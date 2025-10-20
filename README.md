@@ -115,8 +115,8 @@ Two decoder architectures:
 
 ```bash
 # Clone repository
-git clone <your-repo-url>
-cd https://github.com/Razzerr/StructFuse
+git clone https://github.com/Razzerr/StructFuse
+cd StructFuse
 
 # Create conda environment with all dependencies
 conda env create -f environment.yaml
