@@ -46,7 +46,7 @@ This hybrid approach achieves **3-4× improvement** over ESM2-only baselines.
 | trufor | 0.737 | 0.781 | 0.819 | 0.680 | 0.622 | 0.649 | 1h 55m* |
 | **trufor_axial** | **0.789** | **0.822** | **0.851** | **0.734** | **0.683** | **0.708** | 5h 10m |
 
-**Best Model:** `trufor_axial` achieves **F1=0.708** and **P@L=0.789** on TS115 test set.
+**Best Model:** `trufor_axial` achieves **F1=0.708** and **P@L=0.789**.
 
 *Note: trufor training collapsed at epoch 15; best checkpoint saved early.
 
