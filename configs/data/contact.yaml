@@ -1,0 +1,22 @@
+_target_: src.data.contact_lit_datamodule.ContactDataModule
+
+# Root with NPZ files
+data_root: ${paths.processed_dir}
+
+# If you want explicit list files, set "<split>_ids: <split txt file>" below.
+train_ids: null
+val_ids: null
+test_ids: data/splits/all_test_ids.txt
+
+val_ratio: 0.1
+split_dir: ${paths.split_dir}     # where to persist generated splits
+split_seed: ${seed}
+
+batch_size: 2
+num_workers: 4
+bucketed: true
+
+crop_size: 512
+crop_mode: random     # random|center|none
+min_seq_sep: 6
+min_len: 20

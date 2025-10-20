@@ -1,0 +1,21 @@
+name: structfuse
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+# Install minimal conda dependencies for performance, then use pip for the rest
+# This ensures compatibility with requirements.txt (single source of truth)
+
+dependencies:
+  - python=3.10.18
+  - pip>=23
+  
+  # Install PyTorch via conda for better CUDA/MKL integration
+  - pytorch::pytorch=2.8.*
+  - pytorch::torchvision>=0.15.0
+  
+  # Install pip packages from requirements.txt
+  - pip:
+      - -r requirements.txt

@@ -1,0 +1,33 @@
+# @package _global_
+
+defaults:
+  - override /data: contact
+  - override /model: esm2_t6_8M
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: neptune
+
+task_name: "trufor"
+
+tags: ["contact-pred", "esm2_t6_8M", "trufor", "blosum", "tversky", "esm contacts"]
+seed: 42
+
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 4
+
+data:
+  batch_size: 16
+  crop_size: 256
+  num_workers: 4
+  bucketed: true
+
+model:
+  fusion_strategy: "trufor"
+  fusion_num_heads: 4
+  fusion_reduction: 1
+
+  d_pair: 64
+  width: 64
+  depth: 4

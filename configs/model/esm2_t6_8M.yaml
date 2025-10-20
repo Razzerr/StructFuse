@@ -1,0 +1,46 @@
+_target_: src.models.contact_lit_module.ContactLitModule
+
+# retrieval (go straight into module __init__)
+index_dir: data/index_t6
+topk: 4
+only_positive_transfer: false
+min_seq_sep: ${data.min_seq_sep}
+
+# esm model hyperparams
+esm_model: esm2_t6_8M_UR50D
+finetune_esm: false
+d_esm: 320
+
+# align scoring
+use_blosum: true
+
+# contact prediction head
+d_pair: 128
+width: 128
+depth: 4
+
+# head architecture
+head_type: "dilated"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
+head_num_heads: 4       # number of attention heads if head_type="axial" (unused for dilated)
+
+# fusion strategy
+fusion_strategy: "standard"
+fusion_num_heads: 8
+fusion_reduction: 1
+
+# optim (handled by module.configure_optimizers)
+lr: 2.0e-4
+wd: 1.0e-2
+
+# loss hyperparameters
+pos_weight_scale: 0.8      # Class balancing for BCE (keep for stable gradients)
+label_smoothing: 0.05      # Prevents overconfidence (keep for calibration)
+
+# Tversky loss (optional regularizer for F1 optimization)
+use_tversky: true          # Enable Tversky loss as regularizer
+tversky_weight: 0.3        # Weight for Tversky regularizer (loss = BCE + 0.3*Tversky)
+tversky_alpha: 0.7         # False positive penalty weight
+tversky_beta: 0.3          # False negative penalty weight (beta < alpha = recall-biased)
+tversky_gamma: 1.0         # Focal modulation strength
+
+max_tpl_cache: 1000

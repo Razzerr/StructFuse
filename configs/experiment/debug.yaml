@@ -1,0 +1,30 @@
+# @package _global_
+
+defaults:
+  - override /data: contact
+  - override /model: esm2_t6_8M
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: neptune
+
+task_name: "debug"
+
+tags: ["debug"]
+seed: 42
+
+data:
+  batch_size: 2
+  crop_size: 32
+  bucketed: true
+  
+trainer:
+  max_epochs: 5
+  limit_train_batches: 5
+  limit_val_batches: 5
+  limit_test_batches: 5
+  detect_anomaly: true
+
+model:
+  d_pair: 16
+  width: 16
+  depth: 2

@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - override /data: contact
+  - override /model: esm2_only
+  - override /callbacks: default
+  - override /trainer: default
+  - override /logger: neptune
+
+task_name: "esm2_only"
+
+tags: ["contact-pred", "esm2-only-baseline", "no-templates", "frozen"]
+seed: 42
+
+trainer:
+  max_epochs: 1  # No training needed - just evaluating ESM2 contacts
+  limit_train_batches: 0  # Skip training entirely
+  limit_val_batches: null  # Evaluate full validation set for threshold optimization
+
+data:
+  batch_size: 64
+  crop_size: 256
+  num_workers: 8
+  bucketed: false  # No bucketing for cleaner evaluation

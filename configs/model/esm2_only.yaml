@@ -1,0 +1,7 @@
+_target_: src.models.esm2_only_lit_module.ESM2OnlyLitModule
+
+# ESM model
+esm_model: esm2_t6_8M_UR50D
+
+# Basic params
+min_seq_sep: ${data.min_seq_sep}
