@@ -12,7 +12,7 @@ def masked_bce_balanced(
     *,
     pos_weight_scale: float = 1.0,
     label_smoothing: float = 0.0,
-    enforce_symmetry: bool = True,
+    enforce_symmetry: bool = False,  # pair2d_head already symmetrizes logits
 ) -> torch.Tensor:
     if logits.dim() == 4:
         logits = logits.squeeze(1)
@@ -53,7 +53,7 @@ def masked_focal_tversky(
     alpha: float = 0.7,            # Weight for false positives
     beta: float = 0.3,             # Weight for false negatives (beta < alpha = recall-biased)
     gamma: float = 1.0,            # Focal modulation strength (1.0 = standard focal)
-    enforce_symmetry: bool = True,
+    enforce_symmetry: bool = False,  # pair2d_head already symmetrizes logits
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """

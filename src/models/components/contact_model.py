@@ -27,6 +27,7 @@ class ContactModel(torch.nn.Module):
         width: int = 128, 
         depth: int = 8, 
         rel_ch: int = 14,
+        rank: int = 32,
         fusion_strategy: str = "standard",
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
@@ -35,7 +36,7 @@ class ContactModel(torch.nn.Module):
         use_depthwise: bool = False
     ):
         super().__init__()
-        self.pair = PairFeatures(d_model=d_esm, d_pair=d_pair)
+        self.pair = PairFeatures(d_model=d_esm, d_pair=d_pair, rank=rank)
         
         self.head = Pair2DHead(
             d_pair=d_pair, 

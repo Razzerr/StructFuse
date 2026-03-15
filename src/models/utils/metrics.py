@@ -37,9 +37,24 @@ def precision_at_k_masked(
     probs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, k_mode: str = "L"
 ) -> float:
     """
-    probs:   (B,1,L,L) or (B,L,L)
-    targets: (B,L,L) in {0,1}
-    mask:    (B,L,L) in {0,1}  (e.g., long_mask: both residues real AND |i-j|>=min_sep)
+    Precision at K: fraction of the top-K highest-confidence predictions that
+    are true contacts.  K is derived from each sample's usable sequence length
+    (number of rows with ≥1 valid pair).  k_mode controls K:
+
+        "L"   → K = Lb  (one prediction per residue)
+        "L/2" → K = Lb // 2
+        "L/5" → K = Lb // 5
+
+    This is the standard contact-prediction metric (Schaarschmidt et al., 2018).
+
+    Args:
+        probs:   (B,1,L,L) or (B,L,L)  prediction probabilities
+        targets: (B,L,L)               ground truth contacts {0,1}
+        mask:    (B,L,L)               valid pair mask (long_mask * pair_mask)
+        k_mode:  one of "L", "L/2", "L/5"
+
+    Returns:
+        float: mean P@K across the batch
     """
     if probs.dim() == 4:
         probs = probs.squeeze(1)

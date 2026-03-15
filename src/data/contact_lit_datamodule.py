@@ -289,36 +289,49 @@ class ContactDataModule(LightningDataModule):
                     max_tpl_cache=self.max_tpl_cache,
                 )
 
-    def _collate(self, batch):
-        rng_seed = self.crop_rng.randint(0, 1024)
-        
+    def _collate_train(self, batch):
+        """Collate with random cropping for training."""
+        rng_seed = self.crop_rng.randint(0, 2**31)
         return collate_padded(
             batch,
             crop_size=self.crop_size,
-            crop_mode=self.crop_mode,
+            crop_mode="random",
             min_seq_sep=self.min_seq_sep,
             include_diagonal=False,
             seed=rng_seed,
             prior_builder=self._prior_builder,
         )
+
+    def _collate_eval(self, batch):
+        """Collate with center cropping for deterministic val/test."""
+        return collate_padded(
+            batch,
+            crop_size=self.crop_size,
+            crop_mode="center",
+            min_seq_sep=self.min_seq_sep,
+            include_diagonal=False,
+            seed=42,  # fixed seed for reproducibility
+            prior_builder=self._prior_builder,
+        )
         
-    def _dl_kwargs(self):
+    def _dl_kwargs(self, collate_fn=None):
         return dict(
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-            collate_fn=self._collate,
+            collate_fn=collate_fn or self._collate_train,
         )
 
     def train_dataloader(self):
+        kwargs = self._dl_kwargs(collate_fn=self._collate_train)
         # ── Cluster-aware dynamic split ──
         if self._cluster_sampler is not None:
             batches = self._cluster_sampler.train_batches()
             return DataLoader(
                 self.dset_trainval,
                 batch_sampler=ListBatchSampler(batches),
-                **self._dl_kwargs(),
+                **kwargs,
             )
 
         # ── Fallback: static split ──
@@ -330,16 +343,17 @@ class ContactDataModule(LightningDataModule):
             return DataLoader(
                 self.dset_train,
                 batch_sampler=sampler,
-                **self._dl_kwargs()
+                **kwargs,
             )
         return DataLoader(
             self.dset_train,
             batch_size=self.batch_size,
             shuffle=True,
-            **self._dl_kwargs()
+            **kwargs,
         )
 
     def val_dataloader(self):
+        kwargs = self._dl_kwargs(collate_fn=self._collate_eval)
         # ── Cluster-aware dynamic split ──
         if self._cluster_sampler is not None:
             batches = self._cluster_sampler.val_batches()
@@ -349,7 +363,7 @@ class ContactDataModule(LightningDataModule):
             return DataLoader(
                 self.dset_trainval,
                 batch_sampler=ListBatchSampler(batches),
-                **self._dl_kwargs(),
+                **kwargs,
             )
 
         # ── Fallback: static split ──
@@ -361,13 +375,13 @@ class ContactDataModule(LightningDataModule):
             return DataLoader(
                 self.dset_val,
                 batch_sampler=sampler,
-                **self._dl_kwargs()
+                **kwargs,
             )
         return DataLoader(
             self.dset_val,
             batch_size=self.batch_size,
             shuffle=False,
-            **self._dl_kwargs()
+            **kwargs,
         )
 
     def test_dataloader(self):
@@ -375,5 +389,5 @@ class ContactDataModule(LightningDataModule):
             self.dset_test,
             batch_size=self.batch_size,
             shuffle=False,
-            **self._dl_kwargs()
+            **self._dl_kwargs(collate_fn=self._collate_eval),
         )

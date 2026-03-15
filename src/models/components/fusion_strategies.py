@@ -145,6 +145,9 @@ class ChannelEmbed(nn.Module):
         self.norm1 = norm_layer(out_channels // reduction)
         self.act = nn.ReLU(inplace=True)
         self.conv_expand = nn.Conv2d(out_channels // reduction, out_channels, 1, bias=False)
+        # Gate projection: derives attention from the skip (pre-bottleneck)
+        # input and projects to out_channels so it can modulate x_expanded.
+        self.gate_proj = nn.Conv2d(in_channels, out_channels, 1, bias=True)
         self.gate = nn.Sigmoid()
         
     def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
@@ -161,12 +164,14 @@ class ChannelEmbed(nn.Module):
         # Reshape to 2D: (B, C, H, W)
         x = x.permute(0, 2, 1).reshape(B, C, H, W).contiguous()
         
-        # Channel attention
+        # Channel attention with cross-gating:
+        # gate is derived from the original (skip) input via gate_proj,
+        # applied to the bottleneck-expanded features.
         x_reduced = self.act(self.norm1(self.conv_reduce(x)))
         x_expanded = self.conv_expand(x_reduced)
         
-        # Gated output
-        out = x_expanded * self.gate(x_expanded)
+        # Gated output: gate from skip-connection, value from bottleneck
+        out = x_expanded * self.gate(self.gate_proj(x))
         
         return out
 

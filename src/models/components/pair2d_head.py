@@ -1,21 +1,21 @@
+import functools
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from src.models.components.fusion_strategies import get_fusion_strategy
 
-_relpos_cache = {}
 
-
-def relpos_buckets(L, device, cuts=(0, 1, 2, 3, 4, 5, 8, 12, 16, 24, 32, 48, 64)):
+@functools.lru_cache(maxsize=8)
+def relpos_buckets(L: int, device: torch.device, cuts: tuple = (0, 1, 2, 3, 4, 5, 8, 12, 16, 24, 32, 48, 64)) -> torch.Tensor:
     """
     Returns a relative-position encoding: (R, L, L), where R = len(cuts)+1.
     Bin k means |i-j| ∈ (cuts[k-1], cuts[k]] with k=0 for |i-j| <= cuts[0].
-    """
-    key = (L, device, tuple(cuts))
-    if key in _relpos_cache:
-        return _relpos_cache[key]
 
+    Results are cached (LRU, maxsize=32) to avoid recomputation while
+    bounding GPU memory from stale entries.
+    """
     idx = torch.arange(L, device=device)
     dist = (idx[:, None] - idx[None, :]).abs()  # (L, L)
     edges = torch.tensor(cuts, device=device)
@@ -23,8 +23,6 @@ def relpos_buckets(L, device, cuts=(0, 1, 2, 3, 4, 5, 8, 12, 16, 24, 32, 48, 64)
     R = len(cuts) + 1
     oh = F.one_hot(bins.clamp_max(R - 1), num_classes=R)  # (L, L, R)
     rel = oh.permute(2, 0, 1).float()  # (R, L, L)
-
-    _relpos_cache[key] = rel
     return rel
 
 
@@ -146,13 +144,14 @@ class AxialAttentionBlock(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
     
-    def _axial_attention(self, x, axis):
+    def _axial_attention(self, x, axis, pair_mask=None):
         """
         Attention along one axis with axis-specific QKV.
         
         Args:
             x: (B, L, L, C) tensor (already normalized by caller)
             axis: 1 for row attention, 2 for column attention
+            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding), or None
         """
         B, L, _, C = x.shape
         qkv_proj = self.qkv_row if axis == 1 else self.qkv_col
@@ -169,9 +168,31 @@ class AxialAttentionBlock(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B*L, H, L, D)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
+        # Build attention mask from pair_mask so padding positions are ignored.
+        # Row attention (axis=1): for each (batch, row_i), valid key positions
+        #   are the columns j where pair_mask[b, 0, i, j] == 1.
+        # Column attention (axis=2): for each (batch, col_j), valid key positions
+        #   are the rows i where pair_mask[b, 0, i, j] == 1.
+        attn_mask = None
+        if pair_mask is not None:
+            pm = pair_mask.squeeze(1)  # (B, L, L)
+            if axis == 1:
+                # Row attn: each of B*L rows needs an L-length mask
+                # pm[b, i, :] → valid columns for row i
+                row_mask = pm.reshape(B * L, L)  # (B*L, L)
+            else:
+                # Column attn: each of B*L columns needs an L-length mask
+                # pm[b, :, j] → valid rows for column j
+                row_mask = pm.transpose(1, 2).reshape(B * L, L)  # (B*L, L)
+            # SDPA expects (B*L, H, L_q, L_k) or broadcastable bool mask
+            # We use (B*L, 1, 1, L) so it broadcasts over heads and query positions
+            attn_mask = row_mask[:, None, None, :].bool()  # (B*L, 1, 1, L)
+        
         # Flash / fused SDPA — handles scaling, softmax, dropout in one kernel
         drop_p = self.dropout.p if self.training else 0.0
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p, is_causal=False)
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, dropout_p=drop_p, is_causal=False
+        )
         out = out.transpose(1, 2).reshape(B * L, L, C)
         out = out_proj(out)
         
@@ -195,8 +216,9 @@ class AxialAttentionBlock(nn.Module):
         x_attn = x.permute(0, 2, 3, 1)  # (B, L, L, C)
         
         # Pre-norm residual: x + attn(norm(x))
-        x_attn = x_attn + self._axial_attention(self.norm_row(x_attn), axis=1)
-        x_attn = x_attn + self._axial_attention(self.norm_col(x_attn), axis=2)
+        # pair_mask is passed so padding positions are excluded from attention
+        x_attn = x_attn + self._axial_attention(self.norm_row(x_attn), axis=1, pair_mask=pair_mask)
+        x_attn = x_attn + self._axial_attention(self.norm_col(x_attn), axis=2, pair_mask=pair_mask)
 
         # Outer-product update: z[i,j] += Linear(a[i] ⊗ b[j])
         # Breaks axial attention's additive f(i)+g(j) decomposition

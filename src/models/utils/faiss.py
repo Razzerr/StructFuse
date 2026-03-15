@@ -7,6 +7,10 @@ import numpy as np
 import torch
 import faiss
 
+from src.utils import pylogger
+
+log = pylogger.RankedLogger(__name__, rank_zero_only=True)
+
 
 def _get_protein_id(chain_id: str) -> str:
     """Extract protein-level ID from a chain-level ID.
@@ -61,11 +65,11 @@ class FaissIndex:
             self._id2row: Dict[str, int] = {
                 cid: i for i, cid in enumerate(self.row2id)
             }
-            print(f"[FaissIndex] Loaded {len(self._id2row)} precomputed embeddings from {emb_path}")
+            log.info(f"[FaissIndex] Loaded {len(self._id2row)} precomputed embeddings from {emb_path}")
         else:
             self._embeddings = None
             self._id2row = {}
-            print(f"[FaissIndex] WARNING: No embeddings.npy found at {emb_path}, will use ESM2 forward")
+            log.warning(f"[FaissIndex] No embeddings.npy found at {emb_path}, will use ESM2 forward")
         self._emb_hit = 0
         self._emb_miss = 0
 
@@ -140,10 +144,10 @@ class FaissIndex:
             )  # (1, D)
             self._emb_miss += 1
             if self._emb_miss <= 5:
-                print(f"[FaissIndex] MISS for '{query_name}' (not in precomputed, total misses={self._emb_miss})")
+                log.info(f"[FaissIndex] MISS for '{query_name}' (not in precomputed, total misses={self._emb_miss})")
         
         if (self._emb_hit + self._emb_miss) == 100:
-            print(f"[FaissIndex] After 100 queries: {self._emb_hit} hits, {self._emb_miss} misses")
+            log.info(f"[FaissIndex] After 100 queries: {self._emb_hit} hits, {self._emb_miss} misses")
 
         # Large buffer: cluster filtering can remove hundreds of neighbors
         search_k = max(k * 3, k + 500)
@@ -184,18 +188,18 @@ class FaissIndex:
                 break
 
         if debug:
-            print(f"\n[RETRIEVAL] Query: {query_name} (prot={query_prot_id}, cluster={query_cluster})")
-            print(f"  Filtered {len(filtered_same_prot)} same-protein templates")
+            log.info(f"\n[RETRIEVAL] Query: {query_name} (prot={query_prot_id}, cluster={query_cluster})")
+            log.info(f"  Filtered {len(filtered_same_prot)} same-protein templates")
             for tid, s in filtered_same_prot[:3]:
-                print(f"    SAME_PROT: {tid} (sim={s:.4f})")
-            print(f"  Filtered {len(filtered_cluster)} same-cluster templates")
+                log.info(f"    SAME_PROT: {tid} (sim={s:.4f})")
+            log.info(f"  Filtered {len(filtered_cluster)} same-cluster templates")
             for tid, s in filtered_cluster[:3]:
-                print(f"    CLUSTER:   {tid} (sim={s:.4f})")
+                log.info(f"    CLUSTER:   {tid} (sim={s:.4f})")
             if filtered_low_sim:
-                print(f"  Filtered {len(filtered_low_sim)} below min_similarity={min_similarity}")
-            print(f"  Retrieved {len(out)} templates:")
+                log.info(f"  Filtered {len(filtered_low_sim)} below min_similarity={min_similarity}")
+            log.info(f"  Retrieved {len(out)} templates:")
             for tid, s in out:
-                print(f"    OK: {tid} (sim={s:.4f})")
+                log.info(f"    OK: {tid} (sim={s:.4f})")
 
         return out
 

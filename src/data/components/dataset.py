@@ -331,20 +331,19 @@ class ContactDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         pid = self.ids[idx]
-        data = np.load(self.root / f"{pid}.npz", allow_pickle=True)
+        with np.load(self.root / f"{pid}.npz", allow_pickle=True) as data:
+            # seq may be a 0-d object array
+            seq_arr = data["seq"]
+            seq = (
+                str(seq_arr.item())
+                if isinstance(seq_arr, np.ndarray) and seq_arr.shape == ()
+                else str(seq_arr)
+            )
 
-        # seq may be a 0-d object array
-        seq_arr = data["seq"]
-        seq = (
-            str(seq_arr.item())
-            if isinstance(seq_arr, np.ndarray) and seq_arr.shape == ()
-            else str(seq_arr)
-        )
-
-        contact = data["contact"].astype(np.uint8)  # (L, L)
-        mask = data["mask"].astype(np.uint8)  # (L,) - 1 if CA present
-        L = int(data["L"])
-        subset = self._get_subset(pid)
+            contact = data["contact"].astype(np.uint8)  # (L, L)
+            mask = data["mask"].astype(np.uint8)  # (L,) - 1 if CA present
+            L = int(data["L"])
+            subset = self._get_subset(pid)
 
         return {
             "pid": pid,
@@ -816,8 +815,9 @@ class BucketBatchSampler(Sampler[List[int]]):
             self.indices_per_bin[bin_id] = np.where(self.bin_ids == bin_id)[0].tolist()
 
     def __iter__(self):
+        # Reshuffle within each bin on every new iterator (= new epoch)
         for bin_id in self.indices_per_bin:
-            indices = self.indices_per_bin[bin_id]
+            indices = list(self.indices_per_bin[bin_id])  # copy to avoid mutation issues
             if self.shuffle:
                 self.rng.shuffle(indices)
 

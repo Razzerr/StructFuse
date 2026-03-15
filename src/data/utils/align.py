@@ -10,6 +10,15 @@ log = RankedLogger(__name__, rank_zero_only=True)
 _PARASAIL_MATRIX = parasail.matrix_create("ACDEFGHIKLMNPQRSTVWY", 1, -1)
 _BLOSUM62 = bl.BLOSUM(62, default=0)
 
+# Pre-built BLOSUM62 matrix as numpy array for vectorized scoring.
+# Replaces O(n²) Python dict lookups with a single numpy indexing op.
+_AA_ORDER = "ACDEFGHIKLMNPQRSTVWY"
+_AA_TO_IDX = {aa: i for i, aa in enumerate(_AA_ORDER)}
+_BLOSUM_MATRIX = np.zeros((len(_AA_ORDER), len(_AA_ORDER)), dtype=np.float32)
+for _i, _aa_i in enumerate(_AA_ORDER):
+    for _j, _aa_j in enumerate(_AA_ORDER):
+        _BLOSUM_MATRIX[_i, _j] = (_BLOSUM62[_aa_i][_aa_j] + 4) / 15.0
+
 
 def needleman_wunsch(
     query_seq: str,
@@ -169,15 +178,19 @@ def project_prior(
             # Extract the sub-matrix of template contacts for aligned positions
             sub_contact = template_contact[np.ix_(template_indices, template_indices)]
             
-            # Build BLOSUM scores for all aligned residue pairs
-            n_valid = len(template_indices)
-            blosum_scores = np.zeros((n_valid, n_valid), dtype=np.float32)
-            for a in range(n_valid):
-                aa_a = template_seq[template_indices[a]]
-                for b in range(n_valid):
-                    aa_b = template_seq[template_indices[b]]
-                    raw = _BLOSUM62[aa_a][aa_b]
-                    blosum_scores[a, b] = (raw + 4) / 15.0  # normalize to [0, 1]
+            # Per-position query↔template substitution scores (vectorized)
+            query_aa_indices = np.array(
+                [_AA_TO_IDX.get(query_seq[qi], 0) for qi in valid_indices],
+                dtype=np.intp,
+            )
+            template_aa_indices = np.array(
+                [_AA_TO_IDX.get(template_seq[ti], 0) for ti in template_indices],
+                dtype=np.intp,
+            )
+            per_pos_score = _BLOSUM_MATRIX[query_aa_indices, template_aa_indices]  # (N,)
+            
+            # Pairwise confidence = product of per-position query-template scores
+            blosum_scores = per_pos_score[:, None] * per_pos_score[None, :]  # (N, N)
             
             # Contact positions get positive BLOSUM, non-contact get negative
             contact_mask = sub_contact > 0

@@ -18,6 +18,7 @@ use_blosum: true
 d_pair: 256
 width: 256
 depth: 8
+rank: 64
 
 # head architecture
 head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
@@ -47,3 +48,4 @@ max_tpl_cache: 1000
 
 warmup_steps: 1000
 min_lr_ratio: 0.1
+compile_model: false

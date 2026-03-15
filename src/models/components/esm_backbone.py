@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 from src.models.components.esm import pretrained
 
@@ -41,14 +43,14 @@ class ESM2Backbone(torch.nn.Module):
         _, _, tokens = self.batch_converter(seq_list)
         tokens = tokens.to(device)
 
-        ctx = torch.no_grad() if not self.finetune else torch.enable_grad()
+        ctx = torch.no_grad() if not self.finetune else contextlib.nullcontext()
         with ctx:
             out = self.model(
                 tokens, repr_layers=[self.model.num_layers], return_contacts=True
             )
             rep = out["representations"][self.model.num_layers][:, 1:-1, :]
             # ContactPredictionHead already strips BOS/EOS from attentions
-            contacts = out["contacts"]
-            contacts = torch.sigmoid(contacts).unsqueeze(1)  # (B, 1, L, L)
+            # and applies sigmoid internally — do NOT apply sigmoid again
+            contacts = out["contacts"].unsqueeze(1)  # (B, 1, L, L)
 
         return rep, contacts
