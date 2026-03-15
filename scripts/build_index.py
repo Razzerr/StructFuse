@@ -15,14 +15,14 @@ Usage:
       --esm_model esm2_t6_8M_UR50D \
       --batch_size 8 \
       --device cuda \
-      --exclude_ids data/splits/all_test_ids.txt
+      --exclude_ids data/output_splits/all_test_ids.txt
 """
 
 import argparse
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple, Set
+from typing import Dict, List, Tuple, Set
 
 import rootutils
 import numpy as np
@@ -32,6 +32,7 @@ import faiss
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 from src.models.components.esm import pretrained
+from src.models.utils.faiss import _get_protein_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +69,38 @@ def _mean_pool_representations(reps: torch.Tensor, masks: torch.Tensor) -> torch
     return (sums / lens.unsqueeze(-1)).float()
 
 
+def load_cluster_map(cluster_file: str) -> Dict[str, int]:
+    """Parse clusters_30.txt into a protein_id → cluster_id mapping.
+
+    Each line in the file is one cluster whose members are space-separated
+    chain-level IDs (e.g. ``12E8_2 15C8_2 ...``).  We convert to
+    protein-level IDs with ``_get_protein_id`` and assign a sequential
+    integer cluster ID.
+
+    Returns:
+        Dict mapping protein_id (lowercase) → cluster_id (int ≥ 0).
+    """
+    prot2cluster: Dict[str, int] = {}
+    n_clusters = 0
+    with open(cluster_file) as f:
+        for line in f:
+            toks = line.strip().split()
+            if not toks:
+                continue
+            cid = n_clusters
+            for tok in toks:
+                pid = _get_protein_id(tok)
+                # First occurrence wins (a protein shouldn't appear in
+                # multiple clusters at 30 % identity, but be safe).
+                if pid not in prot2cluster:
+                    prot2cluster[pid] = cid
+            n_clusters += 1
+    logger.info(
+        f"Loaded {n_clusters} clusters covering {len(prot2cluster)} proteins"
+    )
+    return prot2cluster
+
+
 def build_faiss_index(
     npz_files: List[Path],
     out_dir: Path,
@@ -76,6 +109,7 @@ def build_faiss_index(
     device: str,
     max_len: int,
     exclude_ids: Set[str] = None,
+    prot2cluster: Dict[str, int] = None,
 ) -> None:
     """
     Build FAISS index from ESM2 embeddings of protein sequences.
@@ -88,9 +122,11 @@ def build_faiss_index(
         device (str): 'cuda' or 'cpu'
         max_len (int): Maximum sequence length per chunk (excluding BOS/EOS)
         exclude_ids (Set[str], optional): Set of PDB IDs to exclude (e.g., test set). Defaults to None.
+        prot2cluster (Dict[str, int], optional): protein_id → cluster_id mapping
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     exclude_ids = exclude_ids or set()
+    prot2cluster = prot2cluster or {}
 
     # Scan NPZ files and filter by exclusion list
     ids_meta = []
@@ -108,7 +144,14 @@ def build_faiss_index(
             if L == 0:
                 continue
 
-            ids_meta.append({"id": npz_path.stem, "seq_len": L, "npz": str(npz_path)})
+            prot_id = _get_protein_id(npz_path.stem)
+            cluster_id = prot2cluster.get(prot_id, -1)
+            ids_meta.append({
+                "id": npz_path.stem,
+                "seq_len": L,
+                "npz": str(npz_path),
+                "cluster_id": cluster_id,
+            })
             seqs.append((npz_path.stem, seq))
         except Exception as e:
             logger.warning(f"Skipping {npz_path.name}: {e}")
@@ -246,8 +289,15 @@ def main():
     ap.add_argument(
         "--exclude_ids",
         type=str,
-        default="data/splits/all_test_ids.txt",
+        default="data/output_splits/all_test_ids.txt",
         help="Path to text file with PDB IDs to exclude (e.g., test set)",
+    )
+    ap.add_argument(
+        "--cluster_file",
+        type=str,
+        default="data/clusters_30.txt",
+        help="Path to cluster file (one cluster per line, space-separated chain IDs). "
+             "Used to embed cluster_id in index metadata for homolog filtering.",
     )
     args = ap.parse_args()
 
@@ -269,6 +319,15 @@ def main():
 
     logger.info(f"Found {len(npz_files)} NPZ files in {processed_dir}")
 
+    # Load cluster mapping
+    prot2cluster: Dict[str, int] = {}
+    if args.cluster_file:
+        cluster_path = Path(args.cluster_file)
+        if cluster_path.exists():
+            prot2cluster = load_cluster_map(str(cluster_path))
+        else:
+            logger.warning(f"Cluster file not found: {cluster_path} — building without cluster IDs")
+
     # Build FAISS index
     build_faiss_index(
         npz_files=npz_files,
@@ -278,6 +337,7 @@ def main():
         device=args.device,
         max_len=args.max_len,
         exclude_ids=exclude_ids,
+        prot2cluster=prot2cluster,
     )
 
 

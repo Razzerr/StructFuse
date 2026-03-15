@@ -1,0 +1,20 @@
+# @package _global_
+
+defaults:
+  - override /model: esm2_only
+
+task_name: "esm2_only"
+
+tags: ["contact-pred", "esm2-only-baseline", "no-templates", "frozen"]
+seed: 42
+
+trainer:
+  max_epochs: 1
+  limit_train_batches: 0
+  limit_val_batches: null
+
+data:
+  batch_size: 64
+  crop_size: 512
+  num_workers: 8
+  bucketed: false  # No bucketing for cleaner evaluation

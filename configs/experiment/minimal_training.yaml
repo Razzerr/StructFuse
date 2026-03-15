@@ -1,0 +1,15 @@
+# @package _global_
+#
+# Quick sanity check with the REAL model architecture.
+# Verifies: loss decreases, checkpointing works, test metrics log correctly.
+# Expected runtime: ~5-10 min on 1 GPU.
+
+task_name: "minimal_training"
+
+tags: ["minimal", "sanity-check"]
+seed: 42
+
+trainer:
+  max_epochs: 10
+  limit_train_batches: 40
+  limit_val_batches: 20

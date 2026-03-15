@@ -3,17 +3,28 @@ _target_: lightning.pytorch.trainer.Trainer
 default_root_dir: ${paths.output_dir}
 
 min_epochs: 1 # prevents early stopping
-max_epochs: 20
+max_epochs: 50
 
 accelerator: gpu
 devices: 1
 
+accumulate_grad_batches: 2
+
 # mixed precision for extra speed-up
-precision: 16-mixed
+# bf16 has the same exponent range as fp32 (no overflow), H100 has native bf16 support
+precision: bf16-mixed
+
+# gradient clipping for training stability
+gradient_clip_val: 1.0
+gradient_clip_algorithm: norm
 
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: 1
 
+# re-create dataloaders each epoch so ClusterTrainValSampler
+# draws fresh train/val splits from each cluster
+reload_dataloaders_every_n_epochs: 1
+
 # set True to to ensure deterministic results
 # makes training slower but gives more reproducibility than just setting seeds
-deterministic: True
+deterministic: False

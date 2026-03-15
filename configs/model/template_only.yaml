@@ -1,0 +1,27 @@
+_target_: src.models.template_only_lit_module.TemplateOnlyLitModule
+
+# Retrieval settings
+index_dir: data/index_t6
+topk: 4
+min_seq_sep: ${data.min_seq_sep}
+
+# Head settings
+hidden_dim: 128
+num_layers: 4
+
+# Training settings
+lr: 2.0e-4
+wd: 1.0e-2
+
+# Loss settings
+pos_weight_scale: 0.8
+label_smoothing: 0.05
+
+# Alignment
+use_blosum: true
+
+# Cache
+max_tpl_cache: 1000
+
+warmup_steps: 1000
+min_lr_ratio: 0.1

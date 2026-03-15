@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: Random template retrieval (killer ablation)
+# If StructFuse needs semantically similar templates, random should fail
+
+task_name: "ablation_random_retrieval"
+tags: ["ablation", "random-retrieval"]
+seed: 42
+
+model:
+  random_retrieval: true

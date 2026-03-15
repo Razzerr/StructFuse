@@ -69,26 +69,43 @@ class BasicBlock(nn.Module):
 
 class AxialAttentionBlock(nn.Module):
     """
-    Memory-efficient axial attention block for 2D pairwise features.
-    
-    Optimizations:
-    - Shared QKV projections for row and column attention
-    - Reduced FFN expansion (2x instead of 4x)
-    - Optional checkpoint for memory savings
-    - Fused operations where possible
-    
+    Axial attention block for 2D pairwise features.
+
+    Each block applies row-attention, column-attention, an outer-product
+    pairwise update, and FFN — all with **pre-norm** residual connections
+    (standard in AlphaFold2 / OpenFold).
+
+    Row and column attention use **separate** QKV projections so they
+    can learn axis-specific transformations.
+
+    The **outer-product update** breaks the additive f(i)+g(j)
+    decomposition inherent to axial attention.  It derives per-residue
+    features by averaging the pair matrix along each axis, computes
+    their outer product, and projects back:
+
+        a = proj_a( mean_j z[i,j] )          # (B, L, c)
+        b = proj_b( mean_i z[i,j] )          # (B, L, c)
+        Δz[i,j] = Linear( a[i] ⊗ b[j] )     # (B, L, L, C)
+
+    This gives rank-c bilinear interactions so that every channel's
+    update depends jointly on residues i *and* j, not on either one
+    alone.  The subsequent FFN can then refine these pairwise features
+    through cross-channel nonlinear mixing.
+
     Args:
         channels: Number of channels
         num_heads: Number of attention heads (must divide channels)
         dropout: Dropout rate
-        ffn_expansion: FFN expansion factor (default: 2, standard is 4)
+        ffn_expansion: FFN expansion factor (default: 2)
+        c_outer: Outer-product projection dimension (default: 8)
     """
     def __init__(
         self, 
         channels: int, 
-        num_heads: int = 4,  # Reduced from 8 for efficiency
+        num_heads: int = 4,
         dropout: float = 0.1,
-        ffn_expansion: int = 2  # Reduced from 4 for memory
+        ffn_expansion: int = 2,
+        c_outer: int = 8,
     ):
         super().__init__()
         assert channels % num_heads == 0, f"channels {channels} must be divisible by num_heads {num_heads}"
@@ -96,15 +113,29 @@ class AxialAttentionBlock(nn.Module):
         self.channels = channels
         self.num_heads = num_heads
         self.head_dim = channels // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.c_outer = c_outer
         
-        # Shared projections for both row and column attention
-        self.qkv = nn.Linear(channels, channels * 3, bias=False)
-        self.proj = nn.Linear(channels, channels)
-        self.norm1 = nn.LayerNorm(channels)
-        self.norm2 = nn.LayerNorm(channels)
+        # Separate projections for row and column attention
+        self.qkv_row = nn.Linear(channels, channels * 3, bias=False)
+        self.proj_row = nn.Linear(channels, channels)
+        self.qkv_col = nn.Linear(channels, channels * 3, bias=False)
+        self.proj_col = nn.Linear(channels, channels)
+
+        # Pre-norm layers (applied BEFORE attention / FFN / outer product)
+        self.norm_row = nn.LayerNorm(channels)
+        self.norm_col = nn.LayerNorm(channels)
+        self.norm_outer = nn.LayerNorm(channels)
+        self.norm_ffn = nn.LayerNorm(channels)
+
+        # Outer-product update: breaks f(i)+g(j) additivity
+        self.outer_a = nn.Linear(channels, c_outer)
+        self.outer_b = nn.Linear(channels, c_outer)
+        self.outer_out = nn.Sequential(
+            nn.Linear(c_outer * c_outer, channels),
+            nn.Dropout(dropout),
+        )
         
-        # Lightweight FFN (2x expansion instead of 4x)
+        # Lightweight FFN (2x expansion)
         self.ffn = nn.Sequential(
             nn.Linear(channels, channels * ffn_expansion),
             nn.GELU(),
@@ -115,37 +146,34 @@ class AxialAttentionBlock(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
     
-    def _efficient_attention(self, x, axis):
+    def _axial_attention(self, x, axis):
         """
-        Memory-efficient attention along one axis.
+        Attention along one axis with axis-specific QKV.
         
         Args:
-            x: (B, L, L, C) tensor
+            x: (B, L, L, C) tensor (already normalized by caller)
             axis: 1 for row attention, 2 for column attention
         """
         B, L, _, C = x.shape
+        qkv_proj = self.qkv_row if axis == 1 else self.qkv_col
+        out_proj = self.proj_row if axis == 1 else self.proj_col
         
         # Rearrange based on axis
-        if axis == 1:  # Row attention: attend across columns for each row
-            x_seq = x.reshape(B * L, L, C)  # (B*L, L, C) - each row is a sequence
-        else:  # Column attention: attend across rows for each column
-            x_seq = x.transpose(1, 2).reshape(B * L, L, C)  # (B*L, L, C) - each col is a sequence
+        if axis == 1:  # Row: attend across columns for each row
+            x_seq = x.reshape(B * L, L, C)
+        else:  # Column: attend across rows for each column
+            x_seq = x.transpose(1, 2).reshape(B * L, L, C)
         
-        # Compute QKV
-        qkv = self.qkv(x_seq).reshape(B * L, L, 3, self.num_heads, self.head_dim)
+        # QKV projection
+        qkv = qkv_proj(x_seq).reshape(B * L, L, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B*L, H, L, D)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (B*L, H, L, D)
+        q, k, v = qkv[0], qkv[1], qkv[2]
         
-        # Efficient attention computation
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B*L, H, L, L)
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        
-        # Apply attention to values
-        out = attn @ v  # (B*L, H, L, D)
-        out = out.transpose(1, 2).reshape(B * L, L, C)  # (B*L, L, C)
-        out = self.proj(out)
-        out = self.dropout(out)
+        # Flash / fused SDPA — handles scaling, softmax, dropout in one kernel
+        drop_p = self.dropout.p if self.training else 0.0
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p, is_causal=False)
+        out = out.transpose(1, 2).reshape(B * L, L, C)
+        out = out_proj(out)
         
         # Reshape back
         if axis == 1:
@@ -155,29 +183,43 @@ class AxialAttentionBlock(nn.Module):
         
         return out
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pair_mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             x: (B, C, L, L) 2D pairwise features
-            
+            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
         Returns:
             (B, C, L, L) attended features
         """
         B, C, L, _ = x.shape
-        
-        # Convert to (B, L, L, C) for attention operations
         x_attn = x.permute(0, 2, 3, 1)  # (B, L, L, C)
         
-        # Row attention
-        x_attn = self.norm1(x_attn + self._efficient_attention(x_attn, axis=1))
+        # Pre-norm residual: x + attn(norm(x))
+        x_attn = x_attn + self._axial_attention(self.norm_row(x_attn), axis=1)
+        x_attn = x_attn + self._axial_attention(self.norm_col(x_attn), axis=2)
+
+        # Outer-product update: z[i,j] += Linear(a[i] ⊗ b[j])
+        # Breaks axial attention's additive f(i)+g(j) decomposition
+        z = self.norm_outer(x_attn)
+
+        if pair_mask is not None:
+            # pair_mask: (B, 1, L, L) → row/col masks for masked mean
+            # Row mask: valid columns for each row → (B, L, L, 1)
+            row_m = pair_mask.squeeze(1).unsqueeze(-1)          # (B, L, L, 1)
+            col_m = pair_mask.squeeze(1).transpose(1, 2).unsqueeze(-1)  # (B, L, L, 1)
+            a = self.outer_a((z * row_m).sum(dim=2) / row_m.sum(dim=2).clamp(min=1))  # (B, L, c_outer)
+            b = self.outer_b((z * col_m).sum(dim=1) / col_m.sum(dim=1).clamp(min=1))  # (B, L, c_outer)
+        else:
+            a = self.outer_a(z.mean(dim=2))   # (B, L, c_outer)
+            b = self.outer_b(z.mean(dim=1))   # (B, L, c_outer)
+
+        outer = torch.einsum('bid,bje->bijde', a, b)          # (B,L,L,c,c)
+        outer = outer.reshape(B, L, L, self.c_outer * self.c_outer)
+        x_attn = x_attn + self.outer_out(outer)
+
+        # FFN refines the now-pairwise (non-additive) features
+        x_attn = x_attn + self.ffn(self.norm_ffn(x_attn))
         
-        # Column attention
-        x_attn = self.norm1(x_attn + self._efficient_attention(x_attn, axis=2))
-        
-        # FFN
-        x_attn = self.norm2(x_attn + self.ffn(x_attn))
-        
-        # Back to (B, C, L, L)
         return x_attn.permute(0, 3, 1, 2)
 
 
@@ -232,7 +274,7 @@ class Pair2DHead(nn.Module):
         
         # Processing blocks - CNN, Dilated CNN, or Axial Attention
         if head_type == "axial":
-            self.blocks = nn.Sequential(*[
+            self.blocks = nn.ModuleList([
                 AxialAttentionBlock(width, num_heads=head_num_heads) 
                 for _ in range(depth)
             ])
@@ -255,7 +297,7 @@ class Pair2DHead(nn.Module):
         # Output projection
         self.out = nn.Conv2d(width, 1, 1)
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts):
+    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None):
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features
@@ -263,6 +305,7 @@ class Pair2DHead(nn.Module):
             count: (B, 1, L, L) template count
             rel: (B, rel_ch, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -270,9 +313,14 @@ class Pair2DHead(nn.Module):
         # Apply fusion strategy
         x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
         
-        # CNN processing
+        # Processing
         x = self.inp(x)
-        x = self.blocks(x)
+        if self.head_type == "axial":
+            for block in self.blocks:
+                x = block(x, pair_mask=pair_mask)
+        else:
+            for block in self.blocks:
+                x = block(x)
         logits = self.out(x)  # (B, 1, L, L)
         
         # Enforce symmetry

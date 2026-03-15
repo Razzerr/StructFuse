@@ -50,7 +50,7 @@ class ContactModel(torch.nn.Module):
             use_depthwise=use_depthwise
         )
 
-    def forward(self, h_esm, prior, count, rel, esm_contacts=None):
+    def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None):
         """
         Args:
             h_esm: (B, L, d_esm) ESM2 embeddings
@@ -58,6 +58,7 @@ class ContactModel(torch.nn.Module):
             count: (B, 1, L, L) template count
             rel: (B, rel_ch, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -66,5 +67,5 @@ class ContactModel(torch.nn.Module):
         pair_feat = self.pair(h_esm)  # (B, d_pair, L, L)
         
         # Pass to fusion head (esm_contacts integrated in Stream 1 if use_esm_contacts=True)
-        logits = self.head(pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts)
+        logits = self.head(pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts, pair_mask=pair_mask)
         return logits

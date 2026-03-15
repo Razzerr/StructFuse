@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: Dilated CNN head instead of Axial attention
+# Tests if dilated convolutions are comparable to axial attention
+
+task_name: "ablation_dilated_head"
+tags: ["ablation", "head-type", "dilated"]
+seed: 42
+
+model:
+  head_type: "dilated"

@@ -159,45 +159,52 @@ def project_prior(
     else:
         prior = np.full((query_len, query_len), -1, dtype=np.int8)
 
-    for i in range(query_len):
-        template_i = query_to_template[i]
-        if template_i == -1:
-            continue  # gap
+    # Vectorized projection: find all query positions that map to a template position
+    valid_mask = query_to_template >= 0  # (Lq,)
+    valid_indices = np.where(valid_mask)[0]  # query indices with alignment
+    template_indices = query_to_template[valid_indices]  # corresponding template indices
 
-        for j in range(query_len):
-            template_j = query_to_template[j]
-            if template_j == -1:
-                continue  # gap
-
-            contact = template_contact[template_i, template_j]
+    if len(valid_indices) > 0:
+        if use_blosum:
+            # Extract the sub-matrix of template contacts for aligned positions
+            sub_contact = template_contact[np.ix_(template_indices, template_indices)]
             
-            if use_blosum:
-                # Store BLOSUM score for all aligned positions (contacts and non-contacts)
-                blosum_score = _BLOSUM62[template_seq[template_i]][template_seq[template_j]]
-                normalized_score = (blosum_score + 4) / 15.0  # Range: [0, 1]
-                if contact > 0:
-                    # Contact: use BLOSUM score as confidence
-                    prior[i, j] = normalized_score
-                else:
-                    # Non-contact: use negative of BLOSUM score to indicate "confident non-contact"
-                    # High BLOSUM = similar residues but no contact = confident negative
-                    prior[i, j] = -normalized_score
-            else:
-                prior[i, j] = contact
+            # Build BLOSUM scores for all aligned residue pairs
+            n_valid = len(template_indices)
+            blosum_scores = np.zeros((n_valid, n_valid), dtype=np.float32)
+            for a in range(n_valid):
+                aa_a = template_seq[template_indices[a]]
+                for b in range(n_valid):
+                    aa_b = template_seq[template_indices[b]]
+                    raw = _BLOSUM62[aa_a][aa_b]
+                    blosum_scores[a, b] = (raw + 4) / 15.0  # normalize to [0, 1]
+            
+            # Contact positions get positive BLOSUM, non-contact get negative
+            contact_mask = sub_contact > 0
+            result = np.where(contact_mask, blosum_scores, -blosum_scores)
+            
+            prior[np.ix_(valid_indices, valid_indices)] = result
+        else:
+            # Binary mode: directly copy template contacts for aligned positions
+            prior[np.ix_(valid_indices, valid_indices)] = template_contact[
+                np.ix_(template_indices, template_indices)
+            ]
 
     # Apply sequence separation filter
     if min_seq_sep > 0:
+        ii, jj = np.indices((query_len, query_len))
+        close = np.abs(ii - jj) < min_seq_sep
         filter_value = 0 if use_blosum else -1
-        for i in range(query_len):
-            for j in range(query_len):
-                if abs(i - j) < min_seq_sep:
-                    prior[i, j] = filter_value
+        prior[close] = filter_value
 
     # Clean diagonal
     np.fill_diagonal(prior, 0)
 
     # Symmetrize if requested
     if symmetrize:
-        prior = np.maximum(prior, prior.T)
+        # Use averaging instead of np.maximum to preserve negative (non-contact)
+        # evidence in BLOSUM mode. np.maximum would always pick the more-positive
+        # value, systematically erasing confident-negative signals.
+        prior = (prior + prior.T) / 2.0
 
     return prior

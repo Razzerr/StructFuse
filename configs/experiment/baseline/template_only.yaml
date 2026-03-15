@@ -1,0 +1,10 @@
+# @package _global_
+# BASELINE: Template-only (no ESM2)
+# Shows the contribution of templates alone, without pLM embeddings
+
+defaults:
+  - override /model: template_only
+
+task_name: "baseline_template_only"
+tags: ["baseline", "template-only", "no-esm2", "ablation"]
+seed: 42

@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: No template retrieval - pure ESM2 baseline
+# This isolates the contribution of ESM2 embeddings alone
+
+task_name: "ablation_no_templates"
+tags: ["ablation", "no-templates", "esm2-only"]
+seed: 42
+
+model:
+  topk: 0

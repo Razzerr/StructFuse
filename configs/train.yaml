@@ -5,10 +5,10 @@
 defaults:
   - _self_
   - data: contact
-  - model: esm2_t33_650M
+  - model: esm2_t6_8M
   - callbacks: default
-  - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
-  - trainer: default
+  - logger: wandb # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - trainer: gpu
   - paths: default
   - extras: default
   - hydra: default

@@ -15,13 +15,17 @@ d_esm: 1280
 use_blosum: true
 
 # contact prediction head
-d_pair: 128
-width: 128
-depth: 4
+d_pair: 256
+width: 256
+depth: 8
+
+# head architecture
+head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
+head_num_heads: 8       # number of attention heads if head_type="axial" (unused for dilated)
 
 # fusion strategy
-fusion_strategy: "standard"
-fusion_num_heads: 8
+fusion_strategy: "trufor"
+fusion_num_heads: 16
 fusion_reduction: 1
 
 # optim (handled by module.configure_optimizers)
@@ -40,3 +44,6 @@ tversky_beta: 0.3          # False negative penalty weight (beta < alpha = recal
 tversky_gamma: 1.0         # Focal modulation strength
 
 max_tpl_cache: 1000
+
+warmup_steps: 1000
+min_lr_ratio: 0.1

@@ -60,7 +60,7 @@ def log_hyperparameters(object_dict: Dict[str, Any]) -> None:
 
 
 def _to_uint8_rgb(mat: torch.Tensor) -> np.ndarray:
-    x = mat.detach().float().cpu().numpy()
+    x = mat.detach().to(torch.float32).cpu().numpy()
     if x.size == 0:
         return np.zeros((1, 1, 3), dtype=np.uint8)
     x_min, x_max = float(x.min()), float(x.max())

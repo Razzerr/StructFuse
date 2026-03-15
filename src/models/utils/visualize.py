@@ -33,9 +33,9 @@ def plot_contact_map_comparison(
         matplotlib Figure object
     """
     # Convert to numpy
-    pred_np = pred_prob.detach().cpu().numpy()
-    target_np = target.detach().cpu().numpy()
-    mask_np = mask.detach().cpu().numpy()
+    pred_np = pred_prob.detach().to(torch.float32).cpu().numpy()
+    target_np = target.detach().to(torch.float32).cpu().numpy()
+    mask_np = mask.detach().to(torch.float32).cpu().numpy()
 
     # Binary prediction
     pred_binary = (pred_np > threshold).astype(np.float32)
@@ -122,6 +122,21 @@ def plot_contact_map_comparison(
     pL2 = precision_at_k_masked(pred_torch, target_torch, mask_torch, k_mode="L/2")
     pL5 = precision_at_k_masked(pred_torch, target_torch, mask_torch, k_mode="L/5")
 
+    # Compute range-specific P@L, AUC-PR, MCC
+    from src.models.utils.metrics import precision_at_k_by_range, auc_pr_masked, mcc_at_threshold
+    range_metrics = precision_at_k_by_range(pred_torch, target_torch, mask_torch, k_mode="L")
+    pL_long = range_metrics.get("long", 0.0)
+    pL_medium = range_metrics.get("medium", 0.0)
+    pL_short = range_metrics.get("short", 0.0)
+    try:
+        auc_pr_long = auc_pr_masked(pred_torch, target_torch, mask_torch, range_type="long")
+    except (ValueError, RuntimeError):
+        auc_pr_long = 0.0
+    try:
+        sample_mcc = mcc_at_threshold(pred_torch, target_torch, mask_torch, threshold)
+    except (ValueError, RuntimeError):
+        sample_mcc = 0.0
+
     # Compute precision, recall, F1 at the given threshold
     valid_pred = pred_binary[mask_np > 0]
     valid_target = target_np[mask_np > 0]
@@ -143,24 +158,28 @@ def plot_contact_map_comparison(
         f"True contacts: {int(num_true)} | Binary pred: {int(num_pred)} | "
         f"P@L={pL:.3f} | P@L/2={pL2:.3f} | P@L/5={pL5:.3f}"
     )
-    title_line2 = f"Precision={precision:.3f} | Recall={recall:.3f} | F1={f1:.3f}"
+    title_line2 = (
+        f"P@L short={pL_short:.3f} | medium={pL_medium:.3f} | long={pL_long:.3f} | "
+        f"AUC-PR(long)={auc_pr_long:.3f} | MCC={sample_mcc:.3f}"
+    )
+    title_line3 = f"Precision={precision:.3f} | Recall={recall:.3f} | F1={f1:.3f}"
 
     fig.suptitle(
         pid,
         fontsize=14,
         style="normal",
         fontweight='bold',
-        y=0.97
+        y=0.98
     )
     fig.text(0.5,
-        0.95,
-        f"{title_line1}\n{title_line2}",
+        0.96,
+        f"{title_line1}\n{title_line2}\n{title_line3}",
         ha='center', 
         va='top',
-        fontsize=11
+        fontsize=10
     )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
 
     if save_path:
         save_path = Path(save_path)
@@ -203,7 +222,7 @@ def plot_contact_map_with_sequence(
     Returns:
         matplotlib Figure object
     """
-    contact_map = contact_map.detach().cpu().numpy()
+    contact_map = contact_map.detach().cpu().to(torch.float32).numpy()
 
     if mask is not None:
         mask = mask.detach().cpu().numpy()
@@ -259,9 +278,9 @@ def plot_precision_recall_curve(
     Returns:
         matplotlib Figure object
     """
-    pred_prob = pred_prob.detach().cpu().numpy().flatten()
-    target = target.detach().cpu().numpy().flatten()
-    mask = mask.detach().cpu().numpy().flatten()
+    pred_prob = pred_prob.detach().to(torch.float32).cpu().numpy().flatten()
+    target = target.detach().to(torch.float32).cpu().numpy().flatten()
+    mask = mask.detach().to(torch.float32).cpu().numpy().flatten()
 
     # Filter to valid pairs
     valid = mask > 0

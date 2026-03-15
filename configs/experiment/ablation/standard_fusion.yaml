@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: Standard fusion instead of TruFor
+# Tests if cross-attention (TruFor) is better than gated residual (Standard)
+
+task_name: "ablation_standard_fusion"
+tags: ["ablation", "fusion-strategy", "standard"]
+seed: 42
+
+model:
+  fusion_strategy: "standard"

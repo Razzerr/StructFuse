@@ -7,14 +7,14 @@ defaults:
 
 model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
-  filename: "epoch{epoch:02d}-pL{val/f1:.3f}"
-  monitor: "val/f1"
+  filename: "epoch{epoch:02d}-f1long{val/f1_long:.3f}"
+  monitor: "val/f1_long"
   mode: "max"
   save_last: True
   auto_insert_metric_name: False
 
 early_stopping:
-  monitor: "val/f1"
+  monitor: "val/f1_long"
   patience: 5
   mode: "max"
 

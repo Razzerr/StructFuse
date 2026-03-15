@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: CNN head instead of Axial attention
+# Tests if axial attention is better than simple CNN for contact prediction
+
+task_name: "ablation_cnn_head"
+tags: ["ablation", "head-type", "cnn"]
+seed: 42
+
+model:
+  head_type: "cnn"

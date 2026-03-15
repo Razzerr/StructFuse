@@ -1,0 +1,8 @@
+# @package _global_
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "large_trufor_axial"
+tags: ["contact-pred", "esm2_t33_650M", "trufor", "axial", "blosum", "tversky", "esm contacts"]
+seed: 42

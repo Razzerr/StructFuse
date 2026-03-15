@@ -1,6 +1,5 @@
 from typing import List, Tuple, Dict, Optional
 
-from collections import OrderedDict
 import numpy as np
 import torch
 from lightning import LightningModule
@@ -11,12 +10,20 @@ from src.models.components.contact_model import ContactModel
 from src.models.components.pair2d_head import relpos_buckets
 from src.models.utils.faiss import FaissIndex
 from src.models.utils.loss import masked_bce_balanced, masked_focal_tversky
-from src.models.utils.metrics import precision_at_k_masked
+from src.models.utils.metrics import (
+    precision_at_k_masked,
+    precision_at_k_by_range,
+    auc_pr_masked,
+    mcc_at_threshold,
+    _create_range_mask,
+)
 from src.models.utils.visualize import (
     plot_contact_map_comparison,
     plot_precision_recall_curve,
 )
-from src.data.utils.align import project_prior
+from src.utils import pylogger
+
+log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
 _INIT_THRESHOLD = 0.5
 
@@ -50,6 +57,13 @@ class ContactLitModule(LightningModule):
         tversky_beta: float = 0.3,
         tversky_gamma: float = 1.0,
         max_tpl_cache: int = 1000,
+        # Scheduler parameters
+        warmup_steps: int = 1000,
+        total_steps: int = 0,  # 0 = auto-calculate from trainer
+        min_lr_ratio: float = 0.01,  # min_lr = lr * min_lr_ratio
+        # Ablation parameters for retrieval
+        min_template_similarity: float = 0.0,  # Filter templates below this similarity
+        random_retrieval: bool = False,  # Use random templates instead of FAISS
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -68,6 +82,7 @@ class ContactLitModule(LightningModule):
             head_type=head_type,
             head_num_heads=head_num_heads,
         )
+        self.net = torch.compile(self.net)
 
         self.index = FaissIndex(index_dir)
         self.topk = int(topk)
@@ -89,37 +104,80 @@ class ContactLitModule(LightningModule):
         self.tversky_beta = float(tversky_beta)
         self.tversky_gamma = float(tversky_gamma)
 
-        self._id_to_npz = {m["id"]: m["npz"] for m in self.index.meta}
-        self._faiss_cache: Dict[Tuple[str, int, int], List[Tuple[str, float]]] = (
-            {}
-        )  # (pid, topk, min_sep)
-        self._tpl_npz_cache: Dict[str, Dict[str, np.ndarray]] = (
-            {}
-        )  # tpl_id -> {"seq":..., "contact":...}
-        self._prior_cache: Dict[
-            Tuple[str, str, int, int], Tuple[torch.Tensor, torch.Tensor]
-        ] = {}  # (qpid,tpl_id,Lq,min_sep) -> (Pk_pos,cnt)
-        self._embedding_cache = OrderedDict()
+        # Scheduler parameters
+        self.warmup_steps = int(warmup_steps)
+        self.total_steps = int(total_steps)
+        self.min_lr_ratio = float(min_lr_ratio)
 
-        self._max_tpl_cache = max_tpl_cache
+        # Ablation parameters
+        self.min_template_similarity = float(min_template_similarity)
+        self.random_retrieval = bool(random_retrieval)
 
         # For visualization logging
         self._val_viz_logged = False  # Log one viz per validation epoch
         self._viz_protein_id = None  # Track same protein across epochs
 
-        # For threshold optimization
-        self._val_probs = []
-        self._val_targets = []
-        self._val_masks = []
+        # ── Streaming validation metrics ──
+        # 20 thresholds for F1/precision/recall/MCC search
+        self._val_thresholds = torch.linspace(0.05, 0.99, 20)
+        # Per-range TP/FP/FN/TN: keys = "short", "medium", "long"
+        self._val_range_tp: Dict[str, torch.Tensor] = {}   # each (20,)
+        self._val_range_fp: Dict[str, torch.Tensor] = {}
+        self._val_range_fn: Dict[str, torch.Tensor] = {}
+        self._val_range_tn: Dict[str, torch.Tensor] = {}
+        # Per-batch P@L by range (accumulated for averaging)
+        self._val_pL_range: Dict[str, List[float]] = {}
+        # Subsampled (prob, target) pairs for AUC-PR per range (capped total)
+        self._val_auc_probs: Dict[str, List[np.ndarray]] = {}
+        self._val_auc_targets: Dict[str, List[np.ndarray]] = {}
+        self._val_auc_n_pairs: Dict[str, int] = {}
+        self._auc_max_pairs = 2_000_000  # cap total pairs for AUC-PR per range
+        self._range_defs = {"short": (6, 12), "medium": (12, 24), "long": (24, None)}
 
         self._test_probs = []
         self._test_targets = []
         self._test_masks = []
+        self._test_pids = []  # Sample IDs for per-sample metrics export
+        self._test_subsets = []  # Subset membership for per-subset metrics
 
     def configure_optimizers(self):
         params = list(filter(lambda p: p.requires_grad, self.parameters()))
         opt = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.wd)
-        return opt
+
+        # Calculate total steps if not provided
+        if self.total_steps <= 0:
+            # Try to get from trainer
+            if self.trainer is not None and self.trainer.estimated_stepping_batches is not None:
+                total_steps = self.trainer.estimated_stepping_batches
+            else:
+                # Fallback: assume 10000 steps
+                total_steps = 10000
+        else:
+            total_steps = self.total_steps
+
+        # Linear warmup + cosine annealing scheduler
+        def lr_lambda(current_step: int) -> float:
+            if current_step < self.warmup_steps:
+                # Linear warmup
+                return float(current_step) / float(max(1, self.warmup_steps))
+            else:
+                # Cosine annealing
+                progress = float(current_step - self.warmup_steps) / float(
+                    max(1, total_steps - self.warmup_steps)
+                )
+                cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
+                return max(self.min_lr_ratio, cosine_decay)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambda)
+
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
     
     def state_dict(self):
         """Save state including the optimal threshold"""
@@ -137,185 +195,25 @@ class ContactLitModule(LightningModule):
         # Load the rest of the state
         return super().load_state_dict(state_dict, strict=strict)
 
-    def _get_hits(self, pid: str, seq: str, debug: bool = False):
-        key = (pid, self.topk, self.min_seq_sep)
-        if key in self._faiss_cache:
-            return self._faiss_cache[key]
-        hits = self.index.topk(
-            self.esm.model,
-            self.esm_alphabet,
-            pid,
-            seq,
-            self.topk,
-            device=str(self.device),
-            debug=debug,  # Enable leakage checking
-        )
-        self._faiss_cache[key] = hits
-        return hits
-
-    def _get_tpl(self, tpl_id: str):
-        if tpl_id in self._tpl_npz_cache:
-            return self._tpl_npz_cache[tpl_id]
-
-        # Evict oldest if cache too large
-        if len(self._tpl_npz_cache) >= self._max_tpl_cache:
-            # Simple FIFO eviction
-            oldest_key = next(iter(self._tpl_npz_cache))
-            del self._tpl_npz_cache[oldest_key]
-
-        npz_path = self._id_to_npz.get(tpl_id)
-        td = np.load(npz_path, allow_pickle=True)
-        tseq_arr = td["seq"]
-        tseq = (
-            str(tseq_arr.item())
-            if isinstance(tseq_arr, np.ndarray) and tseq_arr.shape == ()
-            else str(tseq_arr)
-        )
-        tC = td["contact"].astype(np.uint8).copy()
-        td.close()
-        self._tpl_npz_cache[tpl_id] = {"seq": tseq, "contact": tC}
-        return self._tpl_npz_cache[tpl_id]
-
     def _get_embedding(
-        self, pid: str, seq: str, bounds: Tuple[int, int]
+        self, pids: List[str], seqs: List[str], crop_bounds: List[Tuple[int, int]]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get ESM embedding and contacts with LRU cache
+        """Get ESM embeddings and contacts for a batch of cropped regions.
+
+        Passes all cropped subsequences to ESM2 in a single batched forward
+        call — avoids B separate forward passes.
 
         Returns:
-            Tuple of (embedding, contacts) where:
-                embedding: (L_crop, D)
-                contacts: (1, L_crop, L_crop)
+            Tuple of (h, esm_contacts) where:
+                h: (B, L_max, D) padded embeddings
+                esm_contacts: (B, 1, L_max, L_max) padded contacts
         """
-        cache_key = (pid, seq)
-
-        if cache_key in self._embedding_cache:
-            emb, cont = self._embedding_cache[cache_key]
-            emb = emb.to(self.device)
-            cont = cont.to(self.device)
-            return (
-                emb[bounds[0] : bounds[1]],
-                cont[:, bounds[0] : bounds[1], bounds[0] : bounds[1]],
-            )
-
-        # Cache miss - compute
-        h, esm_cont = self.esm(
-            [(pid, seq)], self.device
-        )  # (1, L_full, D), (1, 1, L_full, L_full)
-
-        # Cache on CPU (store full-length results)
-        self._embedding_cache[cache_key] = (h[0].cpu(), esm_cont[0].cpu())
-
-        return (
-            h[0, bounds[0] : bounds[1]],
-            esm_cont[0, :, bounds[0] : bounds[1], bounds[0] : bounds[1]],
-        )
-
-    def _build_priors(
-        self,
-        pids: List[str],
-        seqs: List[str],
-        crop_bounds: List[Tuple[int, int]],
-        Lmax: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        B = len(seqs)
-        device = self.device
-        prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32, device=device)
-        count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32, device=device)
-
-        total_templates = 0
-        cache_hits = 0
-        cache_misses = 0
-
-        for b, (pid, qseq, crop_bound) in enumerate(zip(pids, seqs, crop_bounds)):
-            hits = self._get_hits(pid, qseq)
-            if len(hits) == 0:
-                continue
-
-            sims = np.array([h[1] for h in hits], dtype=np.float32)
-            w = np.exp(sims - sims.max())
-            w = w / (w.sum() + 1e-8)
-
-            Lq = len(qseq)
-            for (tpl_id, sim), wk in zip(hits, w):
-                total_templates += 1
-                # Use the full sequence string as key (before cropping)
-                cache_key = (pid, tpl_id, self.min_seq_sep)
-
-                if cache_key in self._prior_cache:
-                    cache_hits += 1
-                    Pk_pos_cached, cnt_cached = self._prior_cache[cache_key]
-
-                    Pk_crop = Pk_pos_cached[
-                        crop_bound[0] : crop_bound[1], crop_bound[0] : crop_bound[1]
-                    ]
-                    cnt_crop = cnt_cached[
-                        crop_bound[0] : crop_bound[1], crop_bound[0] : crop_bound[1]
-                    ]
-
-                    # Cached prior is for full query sequence, crop to current Lq
-                    L_use = min(Pk_crop.shape[0], Lmax)
-                    prior[b, 0, :L_use, :L_use] += wk * Pk_crop[
-                        :L_use, :L_use
-                    ].float().to(device)
-                    count[b, 0, :L_use, :L_use] += (
-                        cnt_crop[:L_use, :L_use].float().to(device)
-                    )
-                else:
-                    cache_misses += 1
-                    # Compute prior
-                    tpl = self._get_tpl(tpl_id)
-                    tseq, tC = tpl["seq"], tpl["contact"]
-                    Pk = project_prior(
-                        qseq,
-                        tseq,
-                        tC,
-                        min_seq_sep=0,
-                        symmetrize=True,
-                        use_blosum=self.use_blosum,
-                    )
-
-                    if self.only_positive_transfer:
-                        known = Pk == 1
-                        Pk_pos_np = known.astype(np.float32)
-                        cnt_np = known.astype(np.float32)
-                    else:
-                        known = Pk != -1
-                        Pk_pos_np = np.clip(Pk, 0, 1).astype(np.float32)
-                        if self.use_blosum:
-                            # With BLOSUM, prior is only non-zero where there are contacts
-                            cnt_np = (Pk_pos_np != 0).astype(np.float32)
-                        else:
-                            cnt_np = known.astype(np.float32)
-
-                    if self.min_seq_sep > 0:
-                        ii, jj = np.indices((Lq, Lq))
-                        close = np.abs(ii - jj) < self.min_seq_sep
-                        Pk_pos_np[close] = 0.0
-                        cnt_np[close] = 0.0
-
-                    Pk_pos = torch.from_numpy(Pk_pos_np).float()
-                    cnt = torch.from_numpy(cnt_np).float()
-
-                    # Cache on CPU (store full-length result)
-                    self._prior_cache[cache_key] = (
-                        Pk_pos.cpu().half(),
-                        cnt.cpu().half(),
-                    )
-
-                    Pk_crop = Pk_pos[
-                        crop_bound[0] : crop_bound[1], crop_bound[0] : crop_bound[1]
-                    ]
-                    cnt_crop = cnt[
-                        crop_bound[0] : crop_bound[1], crop_bound[0] : crop_bound[1]
-                    ]
-
-                    L_use = min(Pk_crop.shape[0], Lmax)
-                    prior[b, 0, :L_use, :L_use] += wk * Pk_crop[:L_use, :L_use].to(
-                        device
-                    )
-                    count[b, 0, :L_use, :L_use] += cnt_crop[:L_use, :L_use].to(device)
-
-        return prior, count
+        seq_list = [
+            (pid, seq[b0:b1])
+            for pid, seq, (b0, b1) in zip(pids, seqs, crop_bounds)
+        ]
+        reps, contacts = self.esm(seq_list, self.device)  # (B, L_max, D), (B, 1, L_max, L_max)
+        return reps, contacts
 
     def _step(
         self,
@@ -330,6 +228,8 @@ class ContactLitModule(LightningModule):
           - contact: (B, Lmax, Lmax) float
           - pair_mask: (B, Lmax, Lmax) float
           - long_mask: (B, Lmax, Lmax) float
+          - prior: (B, 1, Lmax, Lmax) float  (built in DataLoader workers)
+          - count: (B, 1, Lmax, Lmax) float  (built in DataLoader workers)
         """
         pids = batch["pid"]
         seqs = batch["seq"]
@@ -338,34 +238,22 @@ class ContactLitModule(LightningModule):
         long_mask = batch["long_mask"].to(self.device)
         pair_mask = batch["pair_mask"].to(self.device)
 
-        h_list = []
-        esm_contacts_list = []
-        for pid, seq, bounds in zip(pids, seqs, crop_bounds):
-            h_seq, esm_cont_seq = self._get_embedding(pid, seq, bounds)
-            h_list.append(h_seq)
-            esm_contacts_list.append(esm_cont_seq)
-        h = torch.nn.utils.rnn.pad_sequence(h_list, batch_first=True)  # (B, L_max, D)
+        # Template priors (already built in DataLoader workers on CPU)
+        prior = batch["prior"].to(self.device)   # (B, 1, Lmax, Lmax)
+        count = batch["count"].to(self.device)   # (B, 1, Lmax, Lmax)
 
-        # Pad ESM contacts to match batch dimensions
-        # Contacts are already cropped inside _get_embedding, just need to pad to batch Lmax
+        # Batched ESM2 forward — single call for all samples
+        h, esm_contacts = self._get_embedding(pids, seqs, crop_bounds)
+
         Lmax = h.shape[1]
-        esm_contacts = torch.zeros(
-            (len(esm_contacts_list), 1, Lmax, Lmax), device=self.device
-        )
-        for i, cont in enumerate(esm_contacts_list):
-            L = cont.shape[1]  # cont is (1, L, L)
-            esm_contacts[i, :, :L, :L] = cont
-
-        prior, count = self._build_priors(
-            pids, seqs, crop_bounds, Lmax
-        )  # (B, 1, Lmax, Lmax)
 
         rel = relpos_buckets(Lmax, self.device)  # (R,L,L)
         # broadcast to batch and mask (no big expands needed)
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts)  # (B, 1, Lmax, Lmax)
+        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1))  # (B, 1, Lmax, Lmax)
+
         valid_mask = long_mask * pair_mask
 
         # Primary loss: BCE
@@ -391,7 +279,7 @@ class ContactLitModule(LightningModule):
         else:
             loss = loss_bce
 
-        if stage == "val" or self.trainer.global_step % 10 == 0:
+        if stage != "train" or self.trainer.global_step % 10 == 0:
             with torch.no_grad():
                 prob = torch.sigmoid(logits)
                 pL = precision_at_k_masked(prob, contact, valid_mask, k_mode="L")
@@ -399,36 +287,38 @@ class ContactLitModule(LightningModule):
                 pL5 = precision_at_k_masked(prob, contact, valid_mask, k_mode="L/5")
 
             prog_bar = stage == "val"
+            on_step = stage == "train"
+            on_epoch = True
             self.log(
                 f"{stage}/loss",
                 loss,
-                prog_bar=prog_bar,
-                on_step=False,
-                on_epoch=True,
+                prog_bar=True,
+                on_step=on_step,
+                on_epoch=on_epoch,
                 sync_dist=True,
             )
             self.log(
                 f"{stage}/P@L",
                 pL,
                 prog_bar=prog_bar,
-                on_step=False,
-                on_epoch=True,
+                on_step=on_step,
+                on_epoch=on_epoch,
                 sync_dist=True,
             )
             self.log(
                 f"{stage}/P@L2",
                 pL2,
                 prog_bar=False,
-                on_step=False,
-                on_epoch=True,
+                on_step=on_step,
+                on_epoch=on_epoch,
                 sync_dist=True,
             )
             self.log(
                 f"{stage}/P@L5",
                 pL5,
                 prog_bar=False,
-                on_step=False,
-                on_epoch=True,
+                on_step=on_step,
+                on_epoch=on_epoch,
                 sync_dist=True,
             )
             if self.use_tversky:
@@ -436,16 +326,16 @@ class ContactLitModule(LightningModule):
                     f"{stage}/loss_tversky",
                     loss_tversky,
                     prog_bar=False,
-                    on_step=False,
-                    on_epoch=True,
+                    on_step=on_step,
+                    on_epoch=on_epoch,
                     sync_dist=True,
                 )
                 self.log(
                     f"{stage}/loss_bce",
                     loss_bce,
                     prog_bar=False,
-                    on_step=False,
-                    on_epoch=True,
+                    on_step=on_step,
+                    on_epoch=on_epoch,
                     sync_dist=True,
                 )
 
@@ -454,6 +344,9 @@ class ContactLitModule(LightningModule):
             with torch.no_grad():
                 prob = torch.sigmoid(logits)
             
+            # Get subset info from batch (if available)
+            subsets = batch.get("subset", ["all"] * len(pids))
+            
             viz_cache = {
                 "prob": prob,
                 "contact": contact,
@@ -461,27 +354,67 @@ class ContactLitModule(LightningModule):
                 "seq": seqs,
                 "crop_bounds": crop_bounds,
                 "pid": pids,
+                "subset": subsets,
             }
 
         return loss, viz_cache
 
-    def on_train_start(self):
-        """Pre-populate caches to speed up training"""
-        # Get a few samples from train dataloader
-        train_loader = self.trainer.train_dataloader
-        for batch_idx, batch in enumerate(train_loader):
-            if batch_idx >= 10:  # Warm up with 10 batches
-                break
-
-            pids = batch["pid"]
-            seqs = batch["seq"]
-
-            # Populate FAISS cache
-            for pid, seq in zip(pids, seqs):
-                self._get_hits(pid, seq)
-
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        return self._step(batch, stage="train")[0]
+        loss, _ = self._step(batch, stage="train")
+
+        # ── NaN / Inf guard ──────────────────────────────────────────
+        loss_val = loss.item()
+        if not (loss_val == loss_val) or loss_val == float("inf"):  # fast NaN check
+            pids = batch["pid"]
+            seqs_len = [len(s) for s in batch["seq"]]
+            log.error(
+                f"NaN/Inf loss detected at step {self.trainer.global_step}, "
+                f"batch_idx={batch_idx}, pids={pids}, seq_lens={seqs_len}"
+            )
+            raise ValueError(
+                f"Training stopped: loss is {'NaN' if loss_val != loss_val else 'Inf'} "
+                f"at global_step={self.trainer.global_step} "
+                f"(pids={pids}, seq_lens={seqs_len})"
+            )
+
+        # ── Console heartbeat (every 50 steps) ────────────────────────
+        if batch_idx % 50 == 0:
+            seqs_len = [len(s) for s in batch["seq"]]
+            print(
+                f"  [step {self.trainer.global_step:>5d} | batch {batch_idx:>3d}] "
+                f"loss={loss_val:.4f}  seq_lens={seqs_len}",
+                flush=True,
+            )
+
+        # Log learning rate
+        if self.trainer.global_step % 10 == 0:
+            opt = self.optimizers()
+            current_lr = opt.param_groups[0]["lr"]
+            self.log("train/lr", current_lr, on_step=True, on_epoch=False, prog_bar=False)
+        
+        return loss
+
+    def on_before_optimizer_step(self, optimizer):
+        """Log gradient statistics before optimizer step for debugging training stability.
+        
+        Uses vectorized operations with only 3 GPU→CPU syncs total (instead of
+        ~3000 per-param syncs in the naive loop).
+        """
+        if self.trainer.global_step % 50 == 0:
+            grads = [p.grad.detach().flatten() for p in self.parameters() if p.grad is not None]
+            if not grads:
+                return
+            all_grads = torch.cat(grads)
+            # 3 GPU→CPU syncs total
+            total_norm = all_grads.norm(2).item()
+            num_nan = torch.isnan(all_grads).any().item()
+            num_inf = torch.isinf(all_grads).any().item()
+            
+            self.log("train/grad_norm", total_norm, on_step=True, on_epoch=False, prog_bar=False)
+            
+            if num_nan or num_inf:
+                self.log("train/grad_nan_count", float(num_nan), on_step=True, on_epoch=False)
+                self.log("train/grad_inf_count", float(num_inf), on_step=True, on_epoch=False)
 
     def _find_optimal_threshold(
         self, prob: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
@@ -501,8 +434,8 @@ class ContactLitModule(LightningModule):
         p = prob[mask > 0].flatten().cpu()
         t = target[mask > 0].flatten().cpu()
 
-        # Try thresholds from 0.05 to 0.95
-        thresholds = torch.linspace(0.05, 0.95, 19)
+        # Try thresholds from 0.05 to 0.99
+        thresholds = torch.linspace(0.05, 0.99, 20)
         best_f1 = 0.0
         best_threshold = 0.5
 
@@ -530,93 +463,147 @@ class ContactLitModule(LightningModule):
         else:
             loss, viz_cache = self._step(batch, stage="val", return_visualization=True)
 
-        # Accumulate predictions for threshold optimization
-        self._val_probs.append(viz_cache["prob"].detach().cpu())
-        self._val_targets.append(viz_cache["contact"].detach().cpu())
-        self._val_masks.append(viz_cache["valid_mask"].detach().cpu())
+        # ── Streaming metric accumulation (scalars only, no tensor storage) ──
+        prob = viz_cache["prob"].detach()       # (B, 1, L, L) or (B, L, L)
+        contact = viz_cache["contact"].detach() # (B, L, L)
+        mask = viz_cache["valid_mask"].detach() # (B, L, L)
+
+        if prob.dim() == 4:
+            prob = prob.squeeze(1)  # (B, L, L)
+
+        B, L, _ = prob.shape
+        thresholds = self._val_thresholds.to(prob.device)  # (20,)
+
+        # Per-range accumulation of TP/FP/FN/TN and AUC-PR pairs
+        for rname, (min_sep, max_sep) in self._range_defs.items():
+            range_mask = _create_range_mask(L, min_sep, max_sep, prob.device).float()
+            combined = mask * range_mask.unsqueeze(0)  # (B, L, L)
+
+            p_flat = prob[combined > 0].flatten()     # (N_range,)
+            t_flat = contact[combined > 0].flatten()   # (N_range,)
+
+            if p_flat.numel() == 0:
+                continue
+
+            # TP/FP/FN/TN at each threshold
+            preds = (p_flat.unsqueeze(0) >= thresholds.unsqueeze(1)).float()  # (20, N)
+            t_exp = t_flat.unsqueeze(0).expand_as(preds)
+            tp = (preds * t_exp).sum(dim=1)              # (20,)
+            fp = (preds * (1 - t_exp)).sum(dim=1)
+            fn = ((1 - preds) * t_exp).sum(dim=1)
+            tn = ((1 - preds) * (1 - t_exp)).sum(dim=1)
+
+            if rname not in self._val_range_tp:
+                self._val_range_tp[rname] = tp
+                self._val_range_fp[rname] = fp
+                self._val_range_fn[rname] = fn
+                self._val_range_tn[rname] = tn
+            else:
+                self._val_range_tp[rname] += tp
+                self._val_range_fp[rname] += fp
+                self._val_range_fn[rname] += fn
+                self._val_range_tn[rname] += tn
+
+            # Subsample pairs for AUC-PR per range
+            n_so_far = self._val_auc_n_pairs.get(rname, 0)
+            if n_so_far < self._auc_max_pairs:
+                p_cpu = p_flat.cpu().float().numpy()
+                t_cpu = t_flat.cpu().float().numpy()
+                budget = self._auc_max_pairs - n_so_far
+                n = len(p_cpu)
+                if n > budget:
+                    idx = np.random.choice(n, int(budget), replace=False)
+                    p_cpu = p_cpu[idx]
+                    t_cpu = t_cpu[idx]
+                self._val_auc_probs.setdefault(rname, []).append(p_cpu)
+                self._val_auc_targets.setdefault(rname, []).append(t_cpu)
+                self._val_auc_n_pairs[rname] = n_so_far + len(p_cpu)
+
+        # P@L by range (per-protein average, lightweight)
+        range_metrics = precision_at_k_by_range(prob, contact, mask, k_mode="L")
+        for rname, val in range_metrics.items():
+            self._val_pL_range.setdefault(rname, []).append(val)
 
         return loss
 
     def on_validation_epoch_start(self):
-        """Reset visualization flag and accumulation at start of each validation epoch"""
+        """Reset streaming accumulators at start of each validation epoch."""
         self._val_viz_logged = False
+        self._val_range_tp = {}
+        self._val_range_fp = {}
+        self._val_range_fn = {}
+        self._val_range_tn = {}
+        self._val_pL_range = {}
+        self._val_auc_probs = {}
+        self._val_auc_targets = {}
+        self._val_auc_n_pairs = {}
 
     def on_validation_epoch_end(self):
-        """Find optimal threshold on accumulated validation predictions"""
-        if len(self._val_probs) == 0:
-            raise ValueError(
-                "No validation predictions accumulated for threshold optimization."
-            )
-        
-        # Skip threshold optimization during sanity check
-        if self.trainer.sanity_checking:
-            self._val_probs = []
-            self._val_targets = []
-            self._val_masks = []
+        """Aggregate streaming stats into final metrics — zero large tensor allocations."""
+        if not self._val_range_tp:
             return
 
-        # Find max length across all batches
-        max_L = max(batch.shape[-1] for batch in self._val_probs)
-        
-        # Pad all batches to max_L
-        padded_probs = []
-        padded_targets = []
-        padded_masks = []
-        
-        for prob_batch, target_batch, mask_batch in zip(self._val_probs, self._val_targets, self._val_masks):
-            # prob_batch is (B, 1, L, L) or (B, L, L)
-            if prob_batch.dim() == 4:
-                prob_batch = prob_batch.squeeze(1)  # (B, L, L)
-            
-            B, L, _ = prob_batch.shape
-            if L < max_L:
-                # Pad to max_L
-                pad_size = max_L - L
-                prob_batch = torch.nn.functional.pad(prob_batch, (0, pad_size, 0, pad_size), value=0)
-                target_batch = torch.nn.functional.pad(target_batch, (0, pad_size, 0, pad_size), value=0)
-                mask_batch = torch.nn.functional.pad(mask_batch, (0, pad_size, 0, pad_size), value=0)
-            
-            padded_probs.append(prob_batch)
-            padded_targets.append(target_batch)
-            padded_masks.append(mask_batch)
-        
-        # Now concatenate - all have same shape (B, max_L, max_L)
-        all_probs = torch.cat(padded_probs, dim=0)  # (N, max_L, max_L)
-        all_targets = torch.cat(padded_targets, dim=0)  # (N, max_L, max_L)
-        all_masks = torch.cat(padded_masks, dim=0)  # (N, max_L, max_L)
+        # Skip during sanity check
+        if self.trainer.sanity_checking:
+            return
 
-        # Find optimal threshold
-        optimal_threshold, optimal_f1 = self._find_optimal_threshold(
-            all_probs, all_targets, all_masks
-        )
+        # For each range: compute F1, precision, recall, MCC, AUC-PR
+        for rname in ("short", "medium", "long"):
+            if rname not in self._val_range_tp:
+                continue
 
-        # Update model's threshold with the optimal value
-        self.pred_threshold = optimal_threshold
+            tp = self._val_range_tp[rname].cpu()
+            fp = self._val_range_fp[rname].cpu()
+            fn = self._val_range_fn[rname].cpu()
+            tn = self._val_range_tn[rname].cpu()
 
-        # Compute precision and recall at optimal threshold
-        all_preds = (all_probs >= optimal_threshold).float()
-        valid_preds = all_preds[all_masks > 0]
-        valid_targets = all_targets[all_masks > 0]
+            # F1 / precision / recall at best-F1 threshold
+            f1 = 2 * tp / (2 * tp + fp + fn + 1e-8)  # (20,)
+            best_idx = int(f1.argmax())
+            best_f1 = f1[best_idx].item()
+            best_thresh = self._val_thresholds[best_idx].item()
+            prec = (tp[best_idx] / (tp[best_idx] + fp[best_idx] + 1e-8)).item()
+            rec = (tp[best_idx] / (tp[best_idx] + fn[best_idx] + 1e-8)).item()
 
-        tp = ((valid_preds == 1) & (valid_targets == 1)).sum().float()
-        fp = ((valid_preds == 1) & (valid_targets == 0)).sum().float()
-        fn = ((valid_preds == 0) & (valid_targets == 1)).sum().float()
+            is_long = rname == "long"
+            self.log(f"val/f1_{rname}", best_f1, prog_bar=is_long, sync_dist=False)
+            self.log(f"val/precision_{rname}", prec, prog_bar=False, sync_dist=False)
+            self.log(f"val/recall_{rname}", rec, prog_bar=False, sync_dist=False)
+            self.log(f"val/threshold_{rname}", best_thresh, prog_bar=False, sync_dist=False)
 
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
+            # MCC at best-F1 threshold & best-MCC threshold
+            mcc_num = tp * tn - fp * fn
+            mcc_den = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-8)
+            mcc_all = mcc_num / mcc_den  # (20,)
+            mcc_at_f1 = mcc_all[best_idx].item()
+            mcc_best_idx = int(mcc_all.argmax())
+            self.log(f"val/MCC_{rname}", mcc_at_f1, prog_bar=False, sync_dist=False)
+            self.log(f"val/MCC_optimal_{rname}", mcc_all[mcc_best_idx].item(), prog_bar=False, sync_dist=False)
 
-        # Log the optimal threshold and metrics
-        self.log(
-            "val/optimal_threshold", optimal_threshold, prog_bar=True, sync_dist=False
-        )
-        self.log("val/precision", precision, prog_bar=True, sync_dist=False)
-        self.log("val/recall", recall, prog_bar=True, sync_dist=False)
-        self.log("val/f1", optimal_f1, prog_bar=True, sync_dist=False)
+            # AUC-PR from subsampled pairs
+            if rname in self._val_auc_probs and self._val_auc_probs[rname]:
+                from sklearn.metrics import average_precision_score
+                all_p = np.concatenate(self._val_auc_probs[rname])
+                all_t = np.concatenate(self._val_auc_targets[rname])
+                if all_t.sum() > 0 and all_t.sum() < len(all_t):
+                    auc = float(average_precision_score(all_t, all_p))
+                else:
+                    auc = 0.0
+                self.log(f"val/AUC-PR_{rname}", auc, prog_bar=is_long, sync_dist=False)
 
-        # Clear accumulated data
-        self._val_probs = []
-        self._val_targets = []
-        self._val_masks = []
+        # P@L by range (average of per-batch averages)
+        for rname, vals in self._val_pL_range.items():
+            avg = float(np.mean(vals)) if vals else 0.0
+            self.log(f"val/P@L_{rname}", avg, prog_bar=(rname == "long"), sync_dist=False)
+
+        # Set pred_threshold from long-range (headline metric)
+        if "long" in self._val_range_tp:
+            tp_l = self._val_range_tp["long"].cpu()
+            fp_l = self._val_range_fp["long"].cpu()
+            fn_l = self._val_range_fn["long"].cpu()
+            f1_l = 2 * tp_l / (2 * tp_l + fp_l + fn_l + 1e-8)
+            self.pred_threshold = self._val_thresholds[int(f1_l.argmax())].item()
+        self.log("val/optimal_threshold", self.pred_threshold, prog_bar=True, sync_dist=False)
 
     def on_test_epoch_end(self):
         """Compute precision, recall, F1 at optimal threshold on test set"""
@@ -677,10 +664,199 @@ class ContactLitModule(LightningModule):
             "test/threshold_used", self.pred_threshold, prog_bar=False, sync_dist=False
         )
 
+        # Compute additional metrics (same as validation)
+        # P@L by range
+        range_metrics = precision_at_k_by_range(all_probs, all_targets, all_masks, k_mode="L")
+        for range_name, value in range_metrics.items():
+            self.log(f"test/P@L_{range_name}", value, prog_bar=(range_name == "long"), sync_dist=False)
+        
+        # AUC-PR
+        auc_pr_all = auc_pr_masked(all_probs, all_targets, all_masks, range_type="all")
+        auc_pr_long = auc_pr_masked(all_probs, all_targets, all_masks, range_type="long")
+        self.log("test/AUC-PR", auc_pr_all, prog_bar=False, sync_dist=False)
+        self.log("test/AUC-PR_long", auc_pr_long, prog_bar=True, sync_dist=False)
+        
+        # MCC at the frozen threshold from validation
+        mcc = mcc_at_threshold(all_probs, all_targets, all_masks, self.pred_threshold)
+        self.log("test/MCC", mcc, prog_bar=False, sync_dist=False)
+
+        # ========== PER-SUBSET EVALUATION ==========
+        # Compute and log metrics for each subset (gold, casp16, cluster_promoted)
+        self._compute_per_subset_metrics(all_probs, all_targets, all_masks)
+
+        # Export per-sample metrics to TSV for qualitative analysis
+        self._export_per_sample_metrics(all_probs, all_targets, all_masks)
+
         # Clear accumulated data
         self._test_probs = []
         self._test_targets = []
         self._test_masks = []
+        self._test_pids = []
+        self._test_subsets = []
+        self._n_non_casp_viz_saved = 0
+    
+    def _compute_per_subset_metrics(
+        self,
+        all_probs: torch.Tensor,
+        all_targets: torch.Tensor,
+        all_masks: torch.Tensor,
+    ):
+        """Compute and log metrics for each test subset (gold, casp16, cluster_promoted)."""
+        from src.data.components.dataset import SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED
+        
+        subsets = self._test_subsets
+        N = all_probs.shape[0]
+        
+        if len(subsets) != N:
+            print(f"Warning: subset count ({len(subsets)}) != sample count ({N}). Skipping per-subset metrics.")
+            return
+        
+        subset_names = [SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED]
+        
+        for subset_name in subset_names:
+            # Find indices belonging to this subset
+            indices = [i for i, s in enumerate(subsets) if s == subset_name]
+            
+            if len(indices) == 0:
+                print(f"  No samples in subset '{subset_name}', skipping.")
+                continue
+            
+            # Slice tensors for this subset
+            sub_probs = all_probs[indices]
+            sub_targets = all_targets[indices]
+            sub_masks = all_masks[indices]
+            
+            # Compute metrics for this subset
+            sub_preds = (sub_probs >= self.pred_threshold).float()
+            valid_preds = sub_preds[sub_masks > 0]
+            valid_targets = sub_targets[sub_masks > 0]
+            
+            tp = ((valid_preds == 1) & (valid_targets == 1)).sum().float()
+            fp = ((valid_preds == 1) & (valid_targets == 0)).sum().float()
+            fn = ((valid_preds == 0) & (valid_targets == 1)).sum().float()
+            
+            precision = (tp / (tp + fp + 1e-8)).item()
+            recall = (tp / (tp + fn + 1e-8)).item()
+            f1 = (2 * precision * recall / (precision + recall + 1e-8)) if (precision + recall) > 0 else 0.0
+            
+            # P@L long-range
+            range_metrics = precision_at_k_by_range(sub_probs, sub_targets, sub_masks, k_mode="L")
+            pl_long = range_metrics.get("long", 0.0)
+            
+            # AUC-PR
+            auc_pr = auc_pr_masked(sub_probs, sub_targets, sub_masks, range_type="long")
+            
+            # MCC
+            mcc = mcc_at_threshold(sub_probs, sub_targets, sub_masks, self.pred_threshold)
+            
+            # Log with subset prefix
+            prefix = f"test/{subset_name}"
+            self.log(f"{prefix}/n_samples", float(len(indices)), prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/precision", precision, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/recall", recall, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/f1", f1, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/P@L_long", pl_long, prog_bar=True, sync_dist=False)
+            self.log(f"{prefix}/AUC-PR_long", auc_pr, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/MCC", mcc, prog_bar=False, sync_dist=False)
+            
+            print(f"  Subset '{subset_name}': n={len(indices)}, P@L_long={pl_long:.4f}, F1={f1:.4f}, AUC-PR={auc_pr:.4f}")
+
+    def _export_per_sample_metrics(
+        self, 
+        all_probs: torch.Tensor, 
+        all_targets: torch.Tensor, 
+        all_masks: torch.Tensor
+    ):
+        """Export per-sample metrics to TSV for qualitative analysis."""
+        from pathlib import Path
+        from hydra.core.hydra_config import HydraConfig
+        
+        # Determine output directory
+        try:
+            hydra_cfg = HydraConfig.get()
+            log_dir = Path(hydra_cfg.runtime.output_dir)
+        except Exception:
+            if self.trainer.log_dir is not None and not str(self.trainer.log_dir).startswith('.neptune'):
+                log_dir = Path(self.trainer.log_dir)
+            else:
+                log_dir = Path("results")
+        
+        output_path = log_dir / "per_sample_metrics.tsv"
+        
+        # Compute per-sample metrics
+        per_sample_results = []
+        N = all_probs.shape[0]
+        
+        for i in range(N):
+            prob_i = all_probs[i]  # (L, L)
+            target_i = all_targets[i]  # (L, L)
+            mask_i = all_masks[i]  # (L, L)
+            
+            sample_id = self._test_pids[i] if i < len(self._test_pids) else f"sample_{i}"
+            subset = self._test_subsets[i] if i < len(self._test_subsets) else "unknown"
+            
+            # Apply threshold for binary predictions
+            pred_i = (prob_i >= self.pred_threshold).float()
+            
+            # Masked values
+            valid = mask_i > 0
+            valid_preds = pred_i[valid]
+            valid_targets = target_i[valid]
+            
+            if valid_preds.numel() == 0:
+                continue
+            
+            # Basic metrics
+            tp = ((valid_preds == 1) & (valid_targets == 1)).sum().float()
+            fp = ((valid_preds == 1) & (valid_targets == 0)).sum().float()
+            fn = ((valid_preds == 0) & (valid_targets == 1)).sum().float()
+            tn = ((valid_preds == 0) & (valid_targets == 0)).sum().float()
+            
+            precision = (tp / (tp + fp + 1e-8)).item()
+            recall = (tp / (tp + fn + 1e-8)).item()
+            f1 = (2 * precision * recall / (precision + recall + 1e-8)) if (precision + recall) > 0 else 0.0
+            
+            # MCC
+            numerator = (tp * tn - fp * fn)
+            denominator = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-8)
+            mcc = (numerator / denominator).item()
+            
+            # Sequence length (from mask)
+            seq_len = int(mask_i.any(dim=0).sum().item())
+            
+            # P@L (per-sample, unsqueeze to fake batch dim)
+            prob_i_3d = prob_i.unsqueeze(0)
+            target_i_3d = target_i.unsqueeze(0)
+            mask_i_3d = mask_i.unsqueeze(0)
+            pL = precision_at_k_masked(prob_i_3d, target_i_3d, mask_i_3d, k_mode="L").item()
+            range_m = precision_at_k_by_range(prob_i_3d, target_i_3d, mask_i_3d, k_mode="L")
+            pL_long = range_m.get("long", 0.0)
+            if isinstance(pL_long, torch.Tensor):
+                pL_long = pL_long.item()
+            
+            per_sample_results.append({
+                "sample_id": sample_id,
+                "subset": subset,
+                "seq_len": seq_len,
+                "P@L": round(pL, 4),
+                "P@L_long": round(pL_long, 4),
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "mcc": mcc,
+                "n_contacts_true": int(valid_targets.sum().item()),
+                "n_contacts_pred": int(valid_preds.sum().item()),
+            })
+        
+        # Write to TSV
+        if per_sample_results:
+            with open(output_path, "w") as f:
+                headers = list(per_sample_results[0].keys())
+                f.write("\t".join(headers) + "\n")
+                for row in per_sample_results:
+                    f.write("\t".join(str(row[h]) for h in headers) + "\n")
+            
+            print(f"Per-sample metrics saved to {output_path}")
 
     def _log_visualization(self, viz_cache: Dict):
         """Log a contact map visualization for the first sample in batch"""
@@ -741,12 +917,12 @@ class ContactLitModule(LightningModule):
                 if hasattr(self.logger.experiment, "add_figure"):
                     # TensorBoard - log with global step
                     self.logger.experiment.add_figure(
-                        f"val/contact_map_{pid}",
+                        "val/contact_map",
                         fig,
                         global_step=self.current_epoch,
                     )
                     self.logger.experiment.add_figure(
-                        f"val/pr_curve_{pid}",
+                        "val/pr_curve",
                         prc_fig,
                         global_step=self.current_epoch,
                     )
@@ -754,22 +930,22 @@ class ContactLitModule(LightningModule):
                     # Neptune - log as series with step for slider
                     import neptune.types as neptune_types
 
-                    self.logger.experiment[f"val/contact_map_{pid}"].append(
+                    self.logger.experiment["val/contact_map"].append(
                         neptune_types.File.as_image(img), step=self.current_epoch
                     )
-                    self.logger.experiment[f"val/pr_curve_{pid}"].append(
+                    self.logger.experiment["val/pr_curve"].append(
                         neptune_types.File.as_image(prc_img), step=self.current_epoch
                     )
                 else:
                     # Fallback: try generic log_image if available
                     if hasattr(self.logger, "log_image"):
                         self.logger.log_image(
-                            key=f"val/contact_map_{pid}",
+                            key="val/contact_map",
                             images=[img],
                             step=self.current_epoch,
                         )
                         self.logger.log_image(
-                            key=f"val/pr_curve_{pid}",
+                            key="val/pr_curve",
                             images=[prc_img],
                             step=self.current_epoch,
                         )
@@ -789,15 +965,24 @@ class ContactLitModule(LightningModule):
         self._test_probs.append(viz_cache["prob"].detach().cpu())
         self._test_targets.append(viz_cache["contact"].detach().cpu())
         self._test_masks.append(viz_cache["valid_mask"].detach().cpu())
+        self._test_pids.extend(viz_cache["pid"])  # Accumulate sample IDs
+        self._test_subsets.extend(viz_cache["subset"])  # Accumulate subset membership
 
+        # Save visualizations: all CASP16 + limited non-CASP16
         self._save_test_batch_visualizations(viz_cache)
 
         return loss
 
-    def _save_test_batch_visualizations(self, viz_cache: Dict):
-        """Save contact map visualizations for all samples in test batch"""
+    def _save_test_batch_visualizations(
+        self,
+        viz_cache: Dict,
+        max_non_casp_samples: int = 10,
+    ):
+        """Save contact map visualizations for CASP16 samples (always) and
+        a limited number of non-CASP16 samples."""
         from pathlib import Path
         from hydra.core.hydra_config import HydraConfig
+        from src.data.components.dataset import SUBSET_CASP16
 
         try:
             hydra_cfg = HydraConfig.get()
@@ -811,8 +996,21 @@ class ContactLitModule(LightningModule):
         save_dir = log_dir / "test_visualizations"
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        subsets = viz_cache.get("subset", ["all"] * len(viz_cache["pid"]))
+
+        # Track how many non-CASP samples we've saved (persists across batches)
+        if not hasattr(self, "_n_non_casp_viz_saved"):
+            self._n_non_casp_viz_saved = 0
+
         # Process each sample in the batch
         for idx in range(len(viz_cache["pid"])):
+            subset = subsets[idx]
+            is_casp = (subset == SUBSET_CASP16)
+
+            # Skip non-CASP16 samples after we've saved enough
+            if not is_casp and self._n_non_casp_viz_saved >= max_non_casp_samples:
+                continue
+
             prob = viz_cache["prob"][idx]
             contact = viz_cache["contact"][idx]
             valid_mask = viz_cache["valid_mask"][idx]
@@ -827,8 +1025,15 @@ class ContactLitModule(LightningModule):
             contact_crop = contact[:L, :L]
             valid_crop = valid_mask[:L, :L]
 
+            # Use subfolder for CASP16
+            if is_casp:
+                sample_dir = save_dir / "casp16"
+            else:
+                sample_dir = save_dir
+            sample_dir.mkdir(parents=True, exist_ok=True)
+
             # Save contact map visualization
-            save_path = save_dir / f"test_{pid}.png"
+            save_path = sample_dir / f"test_{pid}.png"
             plot_contact_map_comparison(
                 pred_prob=prob_crop,
                 target=contact_crop,
@@ -841,7 +1046,7 @@ class ContactLitModule(LightningModule):
             )
 
             # Save precision-recall curve
-            prc_save_path = save_dir / f"test_{pid}_PRC.png"
+            prc_save_path = sample_dir / f"test_{pid}_PRC.png"
             prc_fig = plot_precision_recall_curve(
                 pred_prob=prob_crop,
                 target=contact_crop,
@@ -849,8 +1054,10 @@ class ContactLitModule(LightningModule):
                 pid=pid,
             )
             prc_fig.savefig(prc_save_path, dpi=100, bbox_inches="tight")
-
             plt.close(prc_fig)
+
+            if not is_casp:
+                self._n_non_casp_viz_saved += 1
 
     def predict_binary_contacts(
         self,
@@ -875,6 +1082,8 @@ class ContactLitModule(LightningModule):
                 - "probs": (L, L) probabilities (only if return_probs=True)
                 - "mask": (L, L) valid region mask (long-range pairs)
         """
+        from src.data.components.dataset import PriorBuilder
+
         if threshold is None:
             threshold = self.pred_threshold
 
@@ -883,13 +1092,22 @@ class ContactLitModule(LightningModule):
 
         # Get embedding and contacts
         h, esm_contacts = self._get_embedding(
-            pid, seq, crop_bounds
-        )  # (L, D), (1, L, L)
-        h = h.unsqueeze(0)  # (1, L, D)
-        esm_contacts = esm_contacts.unsqueeze(0)  # (1, 1, L, L)
+            [pid], [seq], [crop_bounds]
+        )  # (1, L, D), (1, 1, L, L)
 
-        # Get priors
-        prior, count = self._build_priors([pid], [seq], [crop_bounds], L)
+        # Build prior via PriorBuilder (CPU, single sample)
+        pb = PriorBuilder(
+            index_dir=self.hparams.index_dir,
+            topk=self.hparams.get("topk", 4),
+            use_blosum=self.hparams.get("use_blosum", True),
+            only_positive_transfer=self.hparams.get("only_positive_transfer", False),
+            min_seq_sep=self.min_seq_sep,
+            min_template_similarity=self.hparams.get("min_template_similarity", 0.0),
+            random_retrieval=self.hparams.get("random_retrieval", False),
+        )
+        p_np, c_np = pb.build_one(pid, seq, 0, L)
+        prior = torch.from_numpy(p_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
+        count = torch.from_numpy(c_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
 
         # Build masks
         rel = relpos_buckets(L, self.device)  # (R, L, L)
@@ -912,16 +1130,17 @@ class ContactLitModule(LightningModule):
 
         # Forward pass
         with torch.no_grad():
-            logits = self.net(h, prior, count, rel, esm_contacts)  # (1, 1, L, L)
+            logits = self.net(h, prior, count, rel, esm_contacts,
+                              pair_mask=pair_mask.unsqueeze(0).unsqueeze(0))  # (1, 1, L, L)
             probs = torch.sigmoid(logits[0, 0])  # (L, L)
             binary = (probs >= threshold).float()  # (L, L)
 
         result = {
-            "binary": binary.cpu().numpy().astype(np.uint8),
-            "mask": (pair_mask * long_mask).cpu().numpy().astype(np.uint8),
+            "binary": binary.cpu().to(torch.float32).numpy().astype(np.uint8),
+            "mask": (pair_mask * long_mask).cpu().to(torch.float32).numpy().astype(np.uint8),
         }
 
         if return_probs:
-            result["probs"] = probs.cpu().numpy().astype(np.float32)
+            result["probs"] = probs.cpu().to(torch.float32).numpy().astype(np.float32)
 
         return result

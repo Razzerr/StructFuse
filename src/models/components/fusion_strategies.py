@@ -56,10 +56,10 @@ class CrossAttention(nn.Module):
         k1, v1 = self.kv1(x1).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
         k2, v2 = self.kv2(x2).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
         
-        # Compute context: (B, H, C//H, C//H)
-        ctx1 = (k1.transpose(-2, -1) @ v1) * self.scale  # Context from stream 1
+        # bf16 has same exponent range as fp32, no overflow risk — skip upcast
+        ctx1 = (k1.transpose(-2, -1) @ v1) * self.scale
         ctx1 = ctx1.softmax(dim=-2)
-        ctx2 = (k2.transpose(-2, -1) @ v2) * self.scale  # Context from stream 2
+        ctx2 = (k2.transpose(-2, -1) @ v2) * self.scale
         ctx2 = ctx2.softmax(dim=-2)
         
         # Cross-attend: stream 1's queries attend to stream 2's context
@@ -353,7 +353,6 @@ class TruForFusion(nn.Module):
             dim=d_pair, 
             reduction=reduction, 
             num_heads=num_heads,
-            norm_layer=nn.BatchNorm2d
         )
         
         # Relative position projection
