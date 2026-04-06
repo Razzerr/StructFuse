@@ -381,6 +381,7 @@ def collate_padded(
     seed: Optional[int] = None,
     include_diagonal: bool = False,  # usually set diagonal to 0 in pair masks
     prior_builder: Optional[PriorBuilder] = None,
+    esm_embeddings_dir: Optional[Path] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Collate function with cropping and padding to batch max length.
@@ -394,6 +395,9 @@ def collate_padded(
         include_diagonal (bool): Include diagonal in pair masks
         prior_builder (Optional[PriorBuilder]): If provided, build template
             priors for each sample inside the DataLoader worker process.
+        esm_embeddings_dir (Optional[Path]): Directory with precomputed ESM2
+            embeddings ({stem}.npz with 'rep' and 'contacts' keys).
+            When set, crops full-length embeddings and adds them to the batch.
 
     Returns:
         Dict with keys:
@@ -503,6 +507,38 @@ def collate_padded(
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
         batch_out["prior"] = prior
         batch_out["count"] = count
+
+    # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
+    if esm_embeddings_dir is not None:
+        # Determine d_esm from first file
+        first_pid = pids[0]
+        first_emb = np.load(esm_embeddings_dir / f"{first_pid}.npz")
+        d_esm = first_emb["rep"].shape[1]
+        first_emb.close()
+
+        h_esm = torch.zeros((B, Lmax, d_esm), dtype=torch.float32)
+        esm_contacts = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+
+        for b, item in enumerate(cropped):
+            pid = item["pid"]
+            cb = item["crop_bounds"]
+            Lc = item["L"]
+
+            emb_data = np.load(esm_embeddings_dir / f"{pid}.npz")
+            rep_full = emb_data["rep"]        # (L_full, d_esm) float16
+            cont_full = emb_data["contacts"]  # (L_full, L_full) float16
+            emb_data.close()
+
+            # Crop from full-length embeddings
+            rep_crop = rep_full[cb[0]:cb[1]].astype(np.float32)    # (Lc, d_esm)
+            cont_crop = cont_full[cb[0]:cb[1], cb[0]:cb[1]].astype(np.float32)  # (Lc, Lc)
+
+            L_use = min(Lc, Lmax)
+            h_esm[b, :L_use, :] = torch.from_numpy(rep_crop[:L_use])
+            esm_contacts[b, 0, :L_use, :L_use] = torch.from_numpy(cont_crop[:L_use, :L_use])
+
+        batch_out["h_esm"] = h_esm
+        batch_out["esm_contacts"] = esm_contacts
 
     return batch_out
 

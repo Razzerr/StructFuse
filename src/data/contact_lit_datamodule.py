@@ -77,6 +77,8 @@ class ContactDataModule(LightningDataModule):
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
+        # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
+        esm_embeddings_dir: Optional[str] = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -113,6 +115,7 @@ class ContactDataModule(LightningDataModule):
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
         self.max_tpl_cache = int(max_tpl_cache)
+        self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -300,6 +303,7 @@ class ContactDataModule(LightningDataModule):
             include_diagonal=False,
             seed=rng_seed,
             prior_builder=self._prior_builder,
+            esm_embeddings_dir=self.esm_embeddings_dir,
         )
 
     def _collate_eval(self, batch):
@@ -312,6 +316,7 @@ class ContactDataModule(LightningDataModule):
             include_diagonal=False,
             seed=42,  # fixed seed for reproducibility
             prior_builder=self._prior_builder,
+            esm_embeddings_dir=self.esm_embeddings_dir,
         )
         
     def _dl_kwargs(self, collate_fn=None):

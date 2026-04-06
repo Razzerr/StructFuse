@@ -65,6 +65,8 @@ class ContactLitModule(LightningModule):
         random_retrieval: bool = False,  # Use random templates instead of FAISS
         # Compilation
         compile_model: bool = False,  # torch.compile (use dynamic=True for variable-length inputs)
+        # Gradient checkpointing
+        use_checkpoint: bool = False,  # Activation checkpointing for axial attention blocks
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -83,6 +85,7 @@ class ContactLitModule(LightningModule):
             fusion_reduction=fusion_reduction,
             head_type=head_type,
             head_num_heads=head_num_heads,
+            use_checkpoint=use_checkpoint,
         )
         if compile_model:
             self.net = torch.compile(self.net, dynamic=True)
@@ -267,7 +270,12 @@ class ContactLitModule(LightningModule):
         count = batch["count"].to(self.device)   # (B, 1, Lmax, Lmax)
 
         # Batched ESM2 forward — single call for all samples
-        h, esm_contacts = self._get_embedding(pids, seqs, crop_bounds)
+        # If precomputed embeddings are in the batch, skip ESM2 entirely
+        if "h_esm" in batch and "esm_contacts" in batch:
+            h = batch["h_esm"].to(self.device)
+            esm_contacts = batch["esm_contacts"].to(self.device)
+        else:
+            h, esm_contacts = self._get_embedding(pids, seqs, crop_bounds)
 
         Lmax = h.shape[1]
 
@@ -278,7 +286,7 @@ class ContactLitModule(LightningModule):
 
         logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1))  # (B, 1, Lmax, Lmax)
 
-        valid_mask = long_mask * pair_mask
+        valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
 
         # Primary loss: BCE
         loss_bce = masked_bce_balanced(
@@ -428,7 +436,7 @@ class ContactLitModule(LightningModule):
             total_norm_sq = 0.0
             has_nan = False
             has_inf = False
-            for p in self.parameters():
+            for p in self.net.parameters():
                 if p.grad is None:
                     continue
                 g = p.grad.detach()

@@ -3,6 +3,7 @@ import functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from src.models.components.fusion_strategies import get_fusion_strategy
 
@@ -152,6 +153,12 @@ class AxialAttentionBlock(nn.Module):
             x: (B, L, L, C) tensor (already normalized by caller)
             axis: 1 for row attention, 2 for column attention
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding), or None
+        
+        Note: We intentionally omit attn_mask from SDPA so the FlashAttention
+        kernel can be used (FA2 does not support arbitrary bool masks).
+        Padding positions are zeroed out in the residual path by the caller's
+        pair_mask multiplication, and pre-norm ensures padding features are
+        near-zero so softmax naturally de-weights them.
         """
         B, L, _, C = x.shape
         qkv_proj = self.qkv_row if axis == 1 else self.qkv_col
@@ -168,30 +175,10 @@ class AxialAttentionBlock(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B*L, H, L, D)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
-        # Build attention mask from pair_mask so padding positions are ignored.
-        # Row attention (axis=1): for each (batch, row_i), valid key positions
-        #   are the columns j where pair_mask[b, 0, i, j] == 1.
-        # Column attention (axis=2): for each (batch, col_j), valid key positions
-        #   are the rows i where pair_mask[b, 0, i, j] == 1.
-        attn_mask = None
-        if pair_mask is not None:
-            pm = pair_mask.squeeze(1)  # (B, L, L)
-            if axis == 1:
-                # Row attn: each of B*L rows needs an L-length mask
-                # pm[b, i, :] → valid columns for row i
-                row_mask = pm.reshape(B * L, L)  # (B*L, L)
-            else:
-                # Column attn: each of B*L columns needs an L-length mask
-                # pm[b, :, j] → valid rows for column j
-                row_mask = pm.transpose(1, 2).reshape(B * L, L)  # (B*L, L)
-            # SDPA expects (B*L, H, L_q, L_k) or broadcastable bool mask
-            # We use (B*L, 1, 1, L) so it broadcasts over heads and query positions
-            attn_mask = row_mask[:, None, None, :].bool()  # (B*L, 1, 1, L)
-        
-        # Flash / fused SDPA — handles scaling, softmax, dropout in one kernel
+        # Flash / fused SDPA — no attn_mask to allow FlashAttention-2 kernel
         drop_p = self.dropout.p if self.training else 0.0
         out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=drop_p, is_causal=False
+            q, k, v, dropout_p=drop_p, is_causal=False
         )
         out = out.transpose(1, 2).reshape(B * L, L, C)
         out = out_proj(out)
@@ -272,11 +259,13 @@ class Pair2DHead(nn.Module):
         fusion_reduction: int = 1,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
-        use_depthwise: bool = False
+        use_depthwise: bool = False,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         
         self.head_type = head_type
+        self.use_checkpoint = use_checkpoint
         
         # Fusion strategy selection
         self.fusion_strategy = fusion_strategy
@@ -339,7 +328,10 @@ class Pair2DHead(nn.Module):
         x = self.inp(x)
         if self.head_type == "axial":
             for block in self.blocks:
-                x = block(x, pair_mask=pair_mask)
+                if self.use_checkpoint and self.training:
+                    x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                else:
+                    x = block(x, pair_mask=pair_mask)
         else:
             for block in self.blocks:
                 x = block(x)

@@ -62,7 +62,7 @@ def precision_at_k_masked(
     precs = []
     for b in range(B):
         # Estimate usable length: number of rows that have any valid pair
-        Lb = int(torch.count_nonzero(mask[b].sum(dim=1) > 0).item())
+        Lb = int(mask[b].sum(dim=1).gt(0).sum().item())
         if Lb == 0:
             continue
         K = Lb if k_mode == "L" else max(1, Lb // 2 if k_mode == "L/2" else Lb // 5)
@@ -74,8 +74,10 @@ def precision_at_k_masked(
             continue
         K = min(K, p.numel())
         topk = torch.topk(p, K).indices
-        precs.append(y[topk].mean().item())
-    return float(np.mean(precs)) if precs else 0.0
+        precs.append(y[topk].mean())
+    if not precs:
+        return 0.0
+    return float(torch.stack(precs).mean().item())
 
 
 def precision_at_k_masked_multi(probs, targets, mask, ks=("L", "L/2", "L/5")):

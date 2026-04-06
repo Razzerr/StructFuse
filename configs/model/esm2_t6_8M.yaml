@@ -23,6 +23,7 @@ rank: 32
 # head architecture
 head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
 head_num_heads: 4       # number of attention heads if head_type="axial" (unused for dilated)
+use_checkpoint: true    # gradient checkpointing on axial attention blocks (saves ~12-18 GB VRAM)
 
 # fusion strategy
 fusion_strategy: "trufor"

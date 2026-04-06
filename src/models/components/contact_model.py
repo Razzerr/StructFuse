@@ -33,7 +33,8 @@ class ContactModel(torch.nn.Module):
         fusion_reduction: int = 1,
         head_type: str = "cnn",
         head_num_heads: int = 8,
-        use_depthwise: bool = False
+        use_depthwise: bool = False,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         self.pair = PairFeatures(d_model=d_esm, d_pair=d_pair, rank=rank)
@@ -48,7 +49,8 @@ class ContactModel(torch.nn.Module):
             fusion_reduction=fusion_reduction,
             head_type=head_type,
             head_num_heads=head_num_heads,
-            use_depthwise=use_depthwise
+            use_depthwise=use_depthwise,
+            use_checkpoint=use_checkpoint,
         )
 
     def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None):
