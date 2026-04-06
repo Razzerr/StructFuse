@@ -529,11 +529,12 @@ def collate_padded(
             cont_full = emb_data["contacts"]  # (L_full, L_full) float16
             emb_data.close()
 
-            # Crop from full-length embeddings
-            rep_crop = rep_full[cb[0]:cb[1]].astype(np.float32)    # (Lc, d_esm)
-            cont_crop = cont_full[cb[0]:cb[1], cb[0]:cb[1]].astype(np.float32)  # (Lc, Lc)
+            # Crop from full-length embeddings (embedding may be shorter than
+            # crop window if the sequence was truncated during precomputation)
+            rep_crop = rep_full[cb[0]:cb[1]].astype(np.float32)
+            cont_crop = cont_full[cb[0]:cb[1], cb[0]:cb[1]].astype(np.float32)
 
-            L_use = min(Lc, Lmax)
+            L_use = min(rep_crop.shape[0], Lmax)
             h_esm[b, :L_use, :] = torch.from_numpy(rep_crop[:L_use])
             esm_contacts[b, 0, :L_use, :L_use] = torch.from_numpy(cont_crop[:L_use, :L_use])
 
