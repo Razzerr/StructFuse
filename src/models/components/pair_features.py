@@ -33,7 +33,9 @@ class PairFeatures(torch.nn.Module):
         # O(r * L²) memory instead of O(d² * L²) for the cubic einsum.
         left = self.bilinear_left(ui)    # (B, L, r)
         right = self.bilinear_right(vj)  # (B, L, r)
-        feat = torch.einsum('bir,bjr->brij', left, right)  # (B, r, L, L)
+        # Outer product via broadcasting — avoids einsum that Inductor struggles with
+        feat = left[:, :, None, :] * right[:, None, :, :]  # (B, L, L, r)
+        feat = feat.permute(0, 3, 1, 2)                     # (B, r, L, L)
         feat = self.bilinear_out(feat)   # (B, d_pair, L, L)
         
         # Normalize to break row/column correlations

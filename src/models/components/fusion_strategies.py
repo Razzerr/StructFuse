@@ -88,8 +88,8 @@ class CrossPath(nn.Module):
         super().__init__()
         self.channel_proj1 = nn.Linear(dim, dim // reduction * 2)
         self.channel_proj2 = nn.Linear(dim, dim // reduction * 2)
-        self.act1 = nn.ReLU(inplace=True)
-        self.act2 = nn.ReLU(inplace=True)
+        self.act1 = nn.ReLU()
+        self.act2 = nn.ReLU()
         self.cross_attn = CrossAttention(dim // reduction, num_heads=num_heads)
         self.end_proj1 = nn.Linear(dim // reduction * 2, dim)
         self.end_proj2 = nn.Linear(dim // reduction * 2, dim)
@@ -143,7 +143,7 @@ class ChannelEmbed(nn.Module):
         super().__init__()
         self.conv_reduce = nn.Conv2d(in_channels, out_channels // reduction, 1, bias=False)
         self.norm1 = norm_layer(out_channels // reduction)
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.ReLU()
         self.conv_expand = nn.Conv2d(out_channels // reduction, out_channels, 1, bias=False)
         # Gate projection: derives attention from the skip (pre-bottleneck)
         # input and projects to out_channels so it can modulate x_expanded.
@@ -340,17 +340,17 @@ class TruForFusion(nn.Module):
         self.esm_encoder = nn.Sequential(
             nn.Conv2d(esm_in_channels, d_pair, 3, padding=1),
             nn.BatchNorm2d(d_pair),
-            nn.ReLU(inplace=True)
+            nn.ReLU()
         )
         
         # Template fingerprint encoder: [prior, count] -> d_pair dimensions
         self.template_encoder = nn.Sequential(
             nn.Conv2d(2, d_pair // 2, 3, padding=1),
             nn.BatchNorm2d(d_pair // 2),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
             nn.BatchNorm2d(d_pair),
-            nn.ReLU(inplace=True)
+            nn.ReLU()
         )
         
         # Cross-modal fusion

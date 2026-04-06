@@ -222,7 +222,8 @@ class AxialAttentionBlock(nn.Module):
             a = self.outer_a(z.mean(dim=2))   # (B, L, c_outer)
             b = self.outer_b(z.mean(dim=1))   # (B, L, c_outer)
 
-        outer = torch.einsum('bid,bje->bijde', a, b)          # (B,L,L,c,c)
+        # Explicit outer product — avoids 5D einsum that Inductor can't lower
+        outer = a[:, :, None, :, None] * b[:, None, :, None, :]  # (B,L,L,c,c)
         outer = outer.reshape(B, L, L, self.c_outer * self.c_outer)
         x_attn = x_attn + self.outer_out(outer)
 
