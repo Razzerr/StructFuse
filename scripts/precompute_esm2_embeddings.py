@@ -39,7 +39,7 @@ def main():
                         help="Directory with per-chain NPZ files")
     parser.add_argument("--output_dir", type=str, default="data/esm2_embeddings",
                         help="Output directory for embeddings")
-    parser.add_argument("--model_name", type=str, default="esm2_t33_650M_UR50D",
+    parser.add_argument("--model_name", type=str, default="esm2_t6_8M_UR50D",
                         help="ESM2 model variant")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for ESM2 forward (adjust to VRAM)")
@@ -59,7 +59,7 @@ def main():
 
     # Skip already processed
     todo = []
-    for npz_path in npz_files:
+    for npz_path in tqdm(npz_files, desc="Checking existing embeddings"):
         out_path = output_dir / npz_path.name
         if not out_path.exists():
             todo.append(npz_path)
