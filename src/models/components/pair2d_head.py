@@ -308,6 +308,13 @@ class Pair2DHead(nn.Module):
         
         # Output projection
         self.out = nn.Conv2d(width, 1, 1)
+        # Prior probability init: contacts are ~5% of valid pairs.
+        # bias = log(π/(1-π)) ≈ -2.94 so initial sigmoid ≈ 0.05.
+        # This lets the model learn to push contacts UP from a low base,
+        # rather than learning to suppress 95% of pairs from 0.5.
+        # (RetinaNet, Lin et al. 2017)
+        import math
+        nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
     def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None):
         """

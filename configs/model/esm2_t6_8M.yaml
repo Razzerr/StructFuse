@@ -35,7 +35,7 @@ lr: 5.0e-4
 wd: 1.0e-2
 
 # loss hyperparameters
-pos_weight_scale: 0.8      # Class balancing for BCE (keep for stable gradients)
+pos_weight_scale: 1.0      # Class balancing for BCE (keep for stable gradients)
 label_smoothing: 0.05      # Prevents overconfidence (keep for calibration)
 
 # Tversky loss (optional regularizer for F1 optimization)
