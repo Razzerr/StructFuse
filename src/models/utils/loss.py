@@ -28,17 +28,17 @@ def masked_bce_balanced(
         eps = label_smoothing
         y = y * (1.0 - eps) + 0.5 * eps
 
-    # class balance within mask
-    pos = (targets == 1).float() * m
-    neg = (targets == 0).float() * m
-    n_pos = pos.sum().clamp_min(1.0)
-    n_neg = neg.sum().clamp_min(1.0)
-    pos_weight = (n_neg / n_pos) * pos_weight_scale
-    pos_weight = torch.as_tensor(pos_weight, device=logits.device, dtype=logits.dtype)
+    # pos_weight_scale: direct constant multiplier on positive class.
+    # 1.0 = plain unweighted BCE. No longer computed dynamically per-batch
+    # (dynamic n_neg/n_pos caused training instability).
+    if pos_weight_scale > 0:
+        pw = torch.tensor(pos_weight_scale, device=logits.device, dtype=logits.dtype)
+    else:
+        pw = None
 
     # base BCE-with-logits per element
     loss = F.binary_cross_entropy_with_logits(
-        logits, y, weight=m, pos_weight=pos_weight, reduction="none"
+        logits, y, weight=m, pos_weight=pw, reduction="none"
     )
 
     denom = m.sum().clamp_min(1.0)

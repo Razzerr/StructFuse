@@ -37,14 +37,14 @@ lr: 5.0e-4
 wd: 1.0e-2
 
 # loss hyperparameters
-pos_weight_scale: 0.5      # Class balancing for BCE (n_neg/n_pos * scale)
-label_smoothing: 0.05      # Prevents overconfidence (keep for calibration)
+pos_weight_scale: 1.0 
+label_smoothing: 0.1      # Prevents overconfidence (keep for calibration)
 
-# Tversky loss (optional regularizer for F1 optimization)
-use_tversky: False          # Enable Tversky loss as regularizer
-tversky_weight: 0.3        # Weight for Tversky regularizer (loss = BCE + 0.3*Tversky)
-tversky_alpha: 0.7         # False positive penalty weight
-tversky_beta: 0.3          # False negative penalty weight (beta < alpha = recall-biased)
+# Tversky loss (handles class imbalance via soft-F1, stable unlike dynamic pos_weight)
+use_tversky: true
+tversky_weight: 0.5        # Weight for Tversky regularizer (loss = BCE + 0.5*Tversky)
+tversky_alpha: 0.3         # False positive penalty weight (lower = tolerate more FP)
+tversky_beta: 0.7          # False negative penalty weight (higher = boost recall)
 tversky_gamma: 1.0         # Focal modulation strength
 
 max_tpl_cache: 1000
