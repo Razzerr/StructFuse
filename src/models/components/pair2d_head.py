@@ -93,7 +93,9 @@ class AxialAttentionBlock(nn.Module):
 
     Args:
         channels: Number of channels
-        num_heads: Number of attention heads (must divide channels)
+        num_heads: Number of query attention heads (must divide channels)
+        num_kv_heads: Number of KV heads for GQA (default: None = same as num_heads)
+        axis: Which axis to attend: 0=both (legacy), 1=row only, 2=col only
         dropout: Dropout rate
         ffn_expansion: FFN expansion factor (default: 2)
         c_outer: Outer-product projection dimension (default: 8)
@@ -102,6 +104,8 @@ class AxialAttentionBlock(nn.Module):
         self, 
         channels: int, 
         num_heads: int = 4,
+        num_kv_heads: int = None,
+        axis: int = 0,
         dropout: float = 0.1,
         ffn_expansion: int = 2,
         c_outer: int = 8,
@@ -113,16 +117,31 @@ class AxialAttentionBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = channels // num_heads
         self.c_outer = c_outer
+        self.axis = axis  # 0=both, 1=row, 2=col
         
-        # Separate projections for row and column attention
-        self.qkv_row = nn.Linear(channels, channels * 3, bias=False)
-        self.proj_row = nn.Linear(channels, channels)
-        self.qkv_col = nn.Linear(channels, channels * 3, bias=False)
-        self.proj_col = nn.Linear(channels, channels)
+        # GQA: fewer KV heads than query heads
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, (
+            f"num_heads {num_heads} must be divisible by num_kv_heads {num_kv_heads}"
+        )
+        self.num_kv_heads = num_kv_heads
+        self.kv_group_size = num_heads // num_kv_heads
+        kv_dim = num_kv_heads * self.head_dim
+        
+        # Only allocate projections for active axes
+        if axis in (0, 1):
+            self.q_row = nn.Linear(channels, channels, bias=False)
+            self.kv_row = nn.Linear(channels, kv_dim * 2, bias=False)
+            self.proj_row = nn.Linear(channels, channels)
+            self.norm_row = nn.LayerNorm(channels)
+        if axis in (0, 2):
+            self.q_col = nn.Linear(channels, channels, bias=False)
+            self.kv_col = nn.Linear(channels, kv_dim * 2, bias=False)
+            self.proj_col = nn.Linear(channels, channels)
+            self.norm_col = nn.LayerNorm(channels)
 
-        # Pre-norm layers (applied BEFORE attention / FFN / outer product)
-        self.norm_row = nn.LayerNorm(channels)
-        self.norm_col = nn.LayerNorm(channels)
+        # Pre-norm layers for outer product and FFN
         self.norm_outer = nn.LayerNorm(channels)
         self.norm_ffn = nn.LayerNorm(channels)
 
@@ -147,21 +166,16 @@ class AxialAttentionBlock(nn.Module):
     
     def _axial_attention(self, x, axis, pair_mask=None):
         """
-        Attention along one axis with axis-specific QKV.
+        GQA attention along one axis.
         
         Args:
             x: (B, L, L, C) tensor (already normalized by caller)
             axis: 1 for row attention, 2 for column attention
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding), or None
-        
-        Note: We intentionally omit attn_mask from SDPA so the FlashAttention
-        kernel can be used (FA2 does not support arbitrary bool masks).
-        Padding positions are zeroed out in the residual path by the caller's
-        pair_mask multiplication, and pre-norm ensures padding features are
-        near-zero so softmax naturally de-weights them.
         """
         B, L, _, C = x.shape
-        qkv_proj = self.qkv_row if axis == 1 else self.qkv_col
+        q_proj = self.q_row if axis == 1 else self.q_col
+        kv_proj = self.kv_row if axis == 1 else self.kv_col
         out_proj = self.proj_row if axis == 1 else self.proj_col
         
         # Rearrange based on axis
@@ -170,17 +184,31 @@ class AxialAttentionBlock(nn.Module):
         else:  # Column: attend across rows for each column
             x_seq = x.transpose(1, 2).reshape(B * L, L, C)
         
-        # QKV projection
-        qkv = qkv_proj(x_seq).reshape(B * L, L, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B*L, H, L, D)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        N = B * L  # number of independent sequences
+        
+        # Q projection: full num_heads
+        q = q_proj(x_seq).reshape(N, L, self.num_heads, self.head_dim)
+        q = q.permute(0, 2, 1, 3)  # (N, H, L, D)
+        
+        # KV projection: fewer heads (GQA)
+        kv = kv_proj(x_seq).reshape(N, L, 2, self.num_kv_heads, self.head_dim)
+        kv = kv.permute(2, 0, 3, 1, 4)  # (2, N, Hkv, L, D)
+        k, v = kv[0], kv[1]
+        
+        # Expand KV heads to match Q heads if GQA
+        if self.kv_group_size > 1:
+            # (N, Hkv, L, D) → (N, Hkv, G, L, D) → (N, H, L, D)
+            k = k[:, :, None].expand(N, self.num_kv_heads, self.kv_group_size, L, self.head_dim)
+            k = k.reshape(N, self.num_heads, L, self.head_dim)
+            v = v[:, :, None].expand(N, self.num_kv_heads, self.kv_group_size, L, self.head_dim)
+            v = v.reshape(N, self.num_heads, L, self.head_dim)
         
         # Flash / fused SDPA — no attn_mask to allow FlashAttention-2 kernel
         drop_p = self.dropout.p if self.training else 0.0
         out = F.scaled_dot_product_attention(
             q, k, v, dropout_p=drop_p, is_causal=False
         )
-        out = out.transpose(1, 2).reshape(B * L, L, C)
+        out = out.transpose(1, 2).reshape(N, L, C)
         out = out_proj(out)
         
         # Reshape back
@@ -202,10 +230,11 @@ class AxialAttentionBlock(nn.Module):
         B, C, L, _ = x.shape
         x_attn = x.permute(0, 2, 3, 1)  # (B, L, L, C)
         
-        # Pre-norm residual: x + attn(norm(x))
-        # pair_mask is passed so padding positions are excluded from attention
-        x_attn = x_attn + self._axial_attention(self.norm_row(x_attn), axis=1, pair_mask=pair_mask)
-        x_attn = x_attn + self._axial_attention(self.norm_col(x_attn), axis=2, pair_mask=pair_mask)
+        # Alternating or dual-axis attention based on self.axis
+        if self.axis in (0, 1):
+            x_attn = x_attn + self._axial_attention(self.norm_row(x_attn), axis=1, pair_mask=pair_mask)
+        if self.axis in (0, 2):
+            x_attn = x_attn + self._axial_attention(self.norm_col(x_attn), axis=2, pair_mask=pair_mask)
 
         # Outer-product update: z[i,j] += Linear(a[i] ⊗ b[j])
         # Breaks axial attention's additive f(i)+g(j) decomposition
@@ -260,6 +289,8 @@ class Pair2DHead(nn.Module):
         fusion_reduction: int = 1,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
+        head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
+        alternating_axial: bool = False,  # Alternating row/col instead of both per block
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
     ):
@@ -287,8 +318,14 @@ class Pair2DHead(nn.Module):
         # Processing blocks - CNN, Dilated CNN, or Axial Attention
         if head_type == "axial":
             self.blocks = nn.ModuleList([
-                AxialAttentionBlock(width, num_heads=head_num_heads) 
-                for _ in range(depth)
+                AxialAttentionBlock(
+                    width,
+                    num_heads=head_num_heads,
+                    num_kv_heads=head_num_kv_heads,
+                    # alternating: even=row, odd=col; otherwise both axes
+                    axis=(1 + (i % 2)) if alternating_axial else 0,
+                )
+                for i in range(depth)
             ])
         elif head_type == "dilated":
             # Dilated convolutions with exponentially increasing dilation

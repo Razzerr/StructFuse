@@ -40,6 +40,8 @@ class ContactLitModule(LightningModule):
         fusion_reduction: int = 1,
         head_type: str = "cnn",  # cnn, dilated or axial
         head_num_heads: int = 8,  # for axial attention head
+        head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
+        alternating_axial: bool = False,  # Alternate row/col attention per block
         d_esm: int = 1280,
         d_pair: int = 128,
         width: int = 128,
@@ -85,6 +87,8 @@ class ContactLitModule(LightningModule):
             fusion_reduction=fusion_reduction,
             head_type=head_type,
             head_num_heads=head_num_heads,
+            head_num_kv_heads=head_num_kv_heads,
+            alternating_axial=alternating_axial,
             use_checkpoint=use_checkpoint,
         )
         if compile_model:

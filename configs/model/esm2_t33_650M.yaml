@@ -22,7 +22,9 @@ rank: 64
 
 # head architecture
 head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
-head_num_heads: 8       # number of attention heads if head_type="axial" (unused for dilated)
+head_num_heads: 8       # number of query attention heads if head_type="axial"
+head_num_kv_heads: 2    # GQA: 2 KV heads shared across 8 query heads
+alternating_axial: true # even blocks=row, odd blocks=col (halves SDPA calls)
 use_checkpoint: true    # gradient checkpointing on axial attention blocks (saves ~12-18 GB VRAM)
 
 # fusion strategy

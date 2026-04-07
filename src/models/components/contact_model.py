@@ -33,6 +33,8 @@ class ContactModel(torch.nn.Module):
         fusion_reduction: int = 1,
         head_type: str = "cnn",
         head_num_heads: int = 8,
+        head_num_kv_heads: int = None,
+        alternating_axial: bool = False,
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
     ):
@@ -49,6 +51,8 @@ class ContactModel(torch.nn.Module):
             fusion_reduction=fusion_reduction,
             head_type=head_type,
             head_num_heads=head_num_heads,
+            head_num_kv_heads=head_num_kv_heads,
+            alternating_axial=alternating_axial,
             use_depthwise=use_depthwise,
             use_checkpoint=use_checkpoint,
         )
