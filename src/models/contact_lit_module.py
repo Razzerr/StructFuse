@@ -69,6 +69,8 @@ class ContactLitModule(LightningModule):
         compile_model: bool = False,  # torch.compile (use dynamic=True for variable-length inputs)
         # Gradient checkpointing
         use_checkpoint: bool = False,  # Activation checkpointing for axial attention blocks
+        # Test visualizations
+        save_test_viz: bool = False,  # Save contact map PNGs during test
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -1055,7 +1057,8 @@ class ContactLitModule(LightningModule):
             })
 
         # Save visualizations: all CASP16 + limited non-CASP16
-        self._save_test_batch_visualizations(viz_cache)
+        if self.hparams.get("save_test_viz", False):
+            self._save_test_batch_visualizations(viz_cache)
 
         return loss
 

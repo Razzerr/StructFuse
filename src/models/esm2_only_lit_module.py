@@ -331,7 +331,8 @@ class ESM2OnlyLitModule(LightningModule):
         )
 
         # Save visualizations
-        self._save_test_batch_visualizations(viz_cache)
+        if self.hparams.get("save_test_viz", False):
+            self._save_test_batch_visualizations(viz_cache)
 
         return loss
 
