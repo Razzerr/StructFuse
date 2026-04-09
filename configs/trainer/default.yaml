@@ -8,7 +8,7 @@ max_epochs: 50
 accelerator: gpu
 devices: 1
 
-accumulate_grad_batches: 2
+accumulate_grad_batches: 4
 
 # mixed precision for extra speed-up
 # bf16 has the same exponent range as fp32 (no overflow), H100 has native bf16 support

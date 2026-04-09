@@ -14,7 +14,7 @@ trainer:
   limit_val_batches: null
 
 data:
-  batch_size: 64
-  crop_size: 512
+  batch_size: 32
+  crop_size: 384
   num_workers: 8
   bucketed: false  # No bucketing for cleaner evaluation
