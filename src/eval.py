@@ -1,12 +1,17 @@
 from typing import Any, Dict, List, Tuple
 
 import hydra
+import numpy as np
+import torch
 import rootutils
 from lightning import LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+# PyTorch 2.6+ defaults weights_only=True; allow numpy scalar stored in checkpoints
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 # ------------------------------------------------------------------------------------ #
 # the setup_root above is equivalent to:
 # - adding project root dir to PYTHONPATH

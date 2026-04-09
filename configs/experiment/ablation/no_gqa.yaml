@@ -1,0 +1,10 @@
+# @package _global_
+# ABLATION: Alternating axial WITHOUT GQA (full MHA)
+# Isolates the effect of Grouped Query Attention
+
+task_name: "ablation_no_gqa"
+tags: ["ablation", "axial", "no-gqa"]
+seed: 42
+
+model:
+  head_num_kv_heads: ${model.head_num_heads}  # MHA (no GQA)

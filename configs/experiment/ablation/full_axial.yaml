@@ -1,0 +1,11 @@
+# @package _global_
+# ABLATION: Full axial attention (both axes per block, no GQA)
+# Tests the efficiency gains of alternating axial + GQA
+
+task_name: "ablation_full_axial"
+tags: ["ablation", "axial", "full"]
+seed: 42
+
+model:
+  alternating_axial: false
+  head_num_kv_heads: ${model.head_num_heads}  # MHA (no GQA)
