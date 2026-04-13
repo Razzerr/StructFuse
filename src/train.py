@@ -11,8 +11,8 @@ from omegaconf import DictConfig
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-# PyTorch 2.6+ defaults weights_only=True; allow numpy scalar stored in checkpoints
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+# PyTorch 2.6+ defaults weights_only=True; allow numpy types stored in checkpoints
+torch.serialization.add_safe_globals([np._core.multiarray.scalar, np.dtype, np.dtypes.Float64DType])
 # ------------------------------------------------------------------------------------ #
 # the setup_root above is equivalent to:
 # - adding project root dir to PYTHONPATH
