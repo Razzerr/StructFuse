@@ -95,17 +95,20 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("test"):
         log.info("Starting testing!")
         
-        checkpoint_callback = None
-        for callback in trainer.callbacks:
-            if isinstance(callback, L.pytorch.callbacks.ModelCheckpoint):
-                checkpoint_callback = callback
-                break
-        
-        if checkpoint_callback is not None and checkpoint_callback.best_model_path:
-            ckpt_path = checkpoint_callback.best_model_path
-        else:
-            ckpt_path = None
-            log.warning("No checkpoint found! Using current model weights for testing...")
+        ckpt_path = cfg.get("ckpt_path")
+
+        if not ckpt_path:
+            checkpoint_callback = None
+            for callback in trainer.callbacks:
+                if isinstance(callback, L.pytorch.callbacks.ModelCheckpoint):
+                    checkpoint_callback = callback
+                    break
+            
+            if checkpoint_callback is not None and checkpoint_callback.best_model_path:
+                ckpt_path = checkpoint_callback.best_model_path
+            else:
+                ckpt_path = None
+                log.warning("No checkpoint found! Using current model weights for testing...")
         
         trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
 
