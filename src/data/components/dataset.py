@@ -639,17 +639,25 @@ class ClusterBucketBatchSampler(Sampler[List[int]]):
         bins = sorted(set(percentiles))
         bin_ids = np.digitize(selected_lengths, bins, right=True)
 
-        # 3. Group into buckets and yield batches (longest first → fail fast on OOM)
+        # 3. Group into buckets and build batches
         indices_per_bin: Dict[int, List[int]] = {}
         for i, bin_id in enumerate(bin_ids):
             indices_per_bin.setdefault(bin_id, []).append(selected[i])
 
+        all_batches = []
         for bin_id in sorted(indices_per_bin.keys(), reverse=True):
             bucket = indices_per_bin[bin_id]
             if self.shuffle:
                 rng.shuffle(bucket)
             for i in range(0, len(bucket), self.batch_size):
-                yield bucket[i : i + self.batch_size]
+                all_batches.append(bucket[i : i + self.batch_size])
+
+        # Shuffle batch order so limit_train_batches samples uniformly
+        # across all length ranges instead of always taking the longest
+        if self.shuffle:
+            rng.shuffle(all_batches)
+
+        yield from all_batches
 
     def __len__(self) -> int:
         # Approximate: exact count depends on bucket distribution
