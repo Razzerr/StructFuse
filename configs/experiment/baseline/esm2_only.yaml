@@ -3,9 +3,9 @@
 defaults:
   - override /model: esm2_only
 
-task_name: "esm2_only"
+task_name: "esm2_8m_only"
 
-tags: ["contact-pred", "esm2-only-baseline", "no-templates", "frozen"]
+tags: ["baseline", "esm-only"]
 seed: 42
 
 train: false

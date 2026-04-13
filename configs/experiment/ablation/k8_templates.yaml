@@ -3,7 +3,7 @@
 # Tests if more templates = better performance
 
 task_name: "ablation_k8"
-tags: ["ablation", "k-templates", "k8"]
+tags: ["ablation", "k8"]
 seed: 42
 
 model:

@@ -3,7 +3,7 @@
 # Tests if axial attention is better than simple CNN for contact prediction
 
 task_name: "ablation_cnn_head"
-tags: ["ablation", "head-type", "cnn"]
+tags: ["ablation", "cnn-head"]
 seed: 42
 
 model:

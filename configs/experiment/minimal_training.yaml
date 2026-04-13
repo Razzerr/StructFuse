@@ -6,7 +6,7 @@
 
 task_name: "minimal_training"
 
-tags: ["minimal", "sanity-check"]
+tags: ["debug"]
 seed: 42
 
 trainer:

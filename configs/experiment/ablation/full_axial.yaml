@@ -3,7 +3,7 @@
 # Tests the efficiency gains of alternating axial + GQA
 
 task_name: "ablation_full_axial"
-tags: ["ablation", "axial", "full"]
+tags: ["ablation", "full-axial"]
 seed: 42
 
 model:

@@ -3,7 +3,7 @@
 # Isolates the effect of Grouped Query Attention
 
 task_name: "ablation_no_gqa"
-tags: ["ablation", "axial", "no-gqa"]
+tags: ["ablation", "no-gqa"]
 seed: 42
 
 model:

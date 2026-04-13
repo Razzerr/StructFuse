@@ -3,7 +3,7 @@
 # Tests if cross-attention (TruFor) is better than gated residual (Standard)
 
 task_name: "ablation_standard_fusion"
-tags: ["ablation", "fusion-strategy", "standard"]
+tags: ["ablation", "standard-fusion"]
 seed: 42
 
 model:

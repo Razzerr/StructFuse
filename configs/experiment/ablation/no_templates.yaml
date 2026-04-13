@@ -3,7 +3,7 @@
 # This isolates the contribution of ESM2 embeddings alone
 
 task_name: "ablation_no_templates"
-tags: ["ablation", "no-templates", "esm2-only"]
+tags: ["ablation", "no-templates"]
 seed: 42
 
 model:

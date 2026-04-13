@@ -3,6 +3,6 @@
 # Best configuration: ESM2 + TruFor fusion + Axial attention head
 # For Bioinformatics submission
 
-task_name: "structfuse_full"
-tags: ["main", "structfuse", "trufor", "axial", "publication"]
+task_name: "structfuse"
+tags: ["main"]
 seed: 42

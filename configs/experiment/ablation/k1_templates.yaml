@@ -3,7 +3,7 @@
 # Tests if more templates = better, or if k=1 is enough
 
 task_name: "ablation_k1"
-tags: ["ablation", "k-templates", "k1"]
+tags: ["ablation", "k1"]
 seed: 42
 
 model:

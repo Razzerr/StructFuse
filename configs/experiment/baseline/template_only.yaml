@@ -5,6 +5,6 @@
 defaults:
   - override /model: template_only
 
-task_name: "baseline_template_only"
-tags: ["baseline", "template-only", "no-esm2", "ablation"]
+task_name: "template_only"
+tags: ["baseline", "template-only"]
 seed: 42
