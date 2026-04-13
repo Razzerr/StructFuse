@@ -70,6 +70,15 @@ class ESM2OnlyLitModule(LightningModule):
         self._test_fp = 0.0
         self._test_fn = 0.0
 
+        # ── Per-subset streaming test metrics ──
+        self._test_subset_tp: Dict[str, float] = {}
+        self._test_subset_fp: Dict[str, float] = {}
+        self._test_subset_fn: Dict[str, float] = {}
+        self._test_subset_pL: Dict[str, List[float]] = {}
+        self._test_subset_auc_probs: Dict[str, List[np.ndarray]] = {}
+        self._test_subset_auc_targets: Dict[str, List[np.ndarray]] = {}
+        self._test_subset_count: Dict[str, int] = {}
+
     def state_dict(self):
         """Save state including the optimal threshold."""
         state = super().state_dict()
@@ -138,6 +147,7 @@ class ESM2OnlyLitModule(LightningModule):
         viz_cache = None
         if return_visualization:
             prob = esm_contacts.squeeze(1)
+            subsets = batch.get("subset", ["all"] * len(pids))
             viz_cache = {
                 'prob': prob,
                 'contact': contact,
@@ -145,6 +155,7 @@ class ESM2OnlyLitModule(LightningModule):
                 'seq': seqs,
                 'crop_bounds': crop_bounds,
                 'pid': pids,
+                'subset': subsets,
             }
 
         return loss, viz_cache
@@ -307,9 +318,13 @@ class ESM2OnlyLitModule(LightningModule):
         prob = viz_cache['prob'].detach()
         contact = viz_cache['contact'].detach()
         mask = viz_cache['valid_mask'].detach()
+        pids = viz_cache['pid']
+        subsets = viz_cache.get('subset', ['all'] * len(pids))
 
         if prob.dim() == 4:
             prob = prob.squeeze(1)
+
+        B, L, _ = prob.shape
 
         # Global TP/FP/FN at pred_threshold
         preds_bin = (prob >= self.pred_threshold).float()
@@ -330,6 +345,44 @@ class ESM2OnlyLitModule(LightningModule):
             pL_dict=self._test_pL_range,
         )
 
+        # ── Per-subset streaming ──
+        for b_idx in range(B):
+            subset = subsets[b_idx]
+            prob_b = prob[b_idx]
+            contact_b = contact[b_idx]
+            mask_b = mask[b_idx]
+            pred_b = (prob_b >= self.pred_threshold).float()
+            vp = pred_b[mask_b > 0]
+            vt = contact_b[mask_b > 0]
+            if vp.numel() == 0:
+                continue
+            s_tp = ((vp == 1) & (vt == 1)).sum().item()
+            s_fp = ((vp == 1) & (vt == 0)).sum().item()
+            s_fn = ((vp == 0) & (vt == 1)).sum().item()
+            self._test_subset_tp[subset] = self._test_subset_tp.get(subset, 0.0) + s_tp
+            self._test_subset_fp[subset] = self._test_subset_fp.get(subset, 0.0) + s_fp
+            self._test_subset_fn[subset] = self._test_subset_fn.get(subset, 0.0) + s_fn
+            self._test_subset_count[subset] = self._test_subset_count.get(subset, 0) + 1
+
+            # Per-subset P@L long
+            prob_3d = prob_b.unsqueeze(0)
+            contact_3d = contact_b.unsqueeze(0)
+            mask_3d = mask_b.unsqueeze(0)
+            rm = precision_at_k_by_range(prob_3d, contact_3d, mask_3d, k_mode="L")
+            pl_long = rm.get("long", 0.0)
+            if isinstance(pl_long, torch.Tensor):
+                pl_long = pl_long.item()
+            self._test_subset_pL.setdefault(subset, []).append(pl_long)
+
+            # Per-subset AUC-PR subsampling (long-range)
+            range_mask_long = _create_range_mask(L, 24, None, prob_b.device).float()
+            comb = mask_b * range_mask_long
+            p_s = prob_b[comb > 0].cpu().float().numpy()
+            t_s = contact_b[comb > 0].cpu().float().numpy()
+            if len(p_s) > 0:
+                self._test_subset_auc_probs.setdefault(subset, []).append(p_s)
+                self._test_subset_auc_targets.setdefault(subset, []).append(t_s)
+
         # Save visualizations
         if self.hparams.get("save_test_viz", False):
             self._save_test_batch_visualizations(viz_cache)
@@ -345,6 +398,13 @@ class ESM2OnlyLitModule(LightningModule):
         self._test_tp = 0.0
         self._test_fp = 0.0
         self._test_fn = 0.0
+        self._test_subset_tp = {}
+        self._test_subset_fp = {}
+        self._test_subset_fn = {}
+        self._test_subset_pL = {}
+        self._test_subset_auc_probs = {}
+        self._test_subset_auc_targets = {}
+        self._test_subset_count = {}
 
     def on_test_epoch_end(self):
         if not self._test_range_tp:
@@ -364,6 +424,9 @@ class ESM2OnlyLitModule(LightningModule):
                                 self._test_range_fn, self._test_range_tn,
                                 self._test_pL_range)
 
+        # ── Per-subset evaluation ──
+        self._log_per_subset_metrics()
+
         # Clear
         self._test_range_tp = {}
         self._test_range_fp = {}
@@ -373,6 +436,51 @@ class ESM2OnlyLitModule(LightningModule):
         self._test_tp = 0.0
         self._test_fp = 0.0
         self._test_fn = 0.0
+        self._test_subset_tp = {}
+        self._test_subset_fp = {}
+        self._test_subset_fn = {}
+        self._test_subset_pL = {}
+        self._test_subset_auc_probs = {}
+        self._test_subset_auc_targets = {}
+        self._test_subset_count = {}
+
+    def _log_per_subset_metrics(self):
+        """Log metrics for each test subset from streaming accumulators."""
+        from src.data.components.dataset import SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED
+
+        for subset_name in [SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED]:
+            n = self._test_subset_count.get(subset_name, 0)
+            if n == 0:
+                log.info(f"No samples in subset '{subset_name}', skipping.")
+                continue
+
+            s_tp = self._test_subset_tp.get(subset_name, 0.0)
+            s_fp = self._test_subset_fp.get(subset_name, 0.0)
+            s_fn = self._test_subset_fn.get(subset_name, 0.0)
+
+            prec = s_tp / max(1, s_tp + s_fp)
+            rec = s_tp / max(1, s_tp + s_fn)
+            f1_val = 2 * prec * rec / max(1e-8, prec + rec)
+
+            pl_long = float(np.mean(self._test_subset_pL.get(subset_name, [0.0])))
+
+            auc_pr = 0.0
+            if subset_name in self._test_subset_auc_probs and self._test_subset_auc_probs[subset_name]:
+                from sklearn.metrics import average_precision_score
+                all_p = np.concatenate(self._test_subset_auc_probs[subset_name])
+                all_t = np.concatenate(self._test_subset_auc_targets[subset_name])
+                if all_t.sum() > 0 and all_t.sum() < len(all_t):
+                    auc_pr = float(average_precision_score(all_t, all_p))
+
+            prefix = f"test/{subset_name}"
+            self.log(f"{prefix}/n_samples", float(n), prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/precision", prec, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/recall", rec, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/f1", f1_val, prog_bar=False, sync_dist=False)
+            self.log(f"{prefix}/P@L_long", pl_long, prog_bar=True, sync_dist=False)
+            self.log(f"{prefix}/AUC-PR_long", auc_pr, prog_bar=False, sync_dist=False)
+
+            log.info(f"Subset '{subset_name}': n={n}, P@L_long={pl_long:.4f}, F1={f1_val:.4f}, AUC-PR={auc_pr:.4f}")
 
     # ── Visualizations ────────────────────────────────────────────────
 

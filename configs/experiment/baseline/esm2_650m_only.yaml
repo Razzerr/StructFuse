@@ -16,8 +16,8 @@ trainer:
   limit_train_batches: 0
 
 model:
-  esm_model: esm2_t6_8M_UR50D
+  esm_model: esm2_t33_650M_UR50D
 
 data:
-  batch_size: 32
+  batch_size: 16
   bucketed: false  # No bucketing for cleaner evaluation

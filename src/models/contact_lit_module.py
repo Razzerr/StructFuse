@@ -224,9 +224,20 @@ class ContactLitModule(LightningModule):
         # Extract and set the optimal threshold if it exists
         if 'pred_threshold' in state_dict:
             self.pred_threshold = state_dict.pop('pred_threshold')
+            log.info(f"Loaded pred_threshold={self.pred_threshold:.4f} from state_dict")
         
         # Load the rest of the state
         return super().load_state_dict(state_dict, strict=strict)
+
+    def on_load_checkpoint(self, checkpoint):
+        """Fallback: restore pred_threshold from checkpoint top-level or state_dict."""
+        sd = checkpoint.get("state_dict", {})
+        if "pred_threshold" in sd:
+            self.pred_threshold = sd["pred_threshold"]
+            log.info(f"on_load_checkpoint: restored pred_threshold={self.pred_threshold:.4f}")
+        elif "pred_threshold" in checkpoint:
+            self.pred_threshold = checkpoint["pred_threshold"]
+            log.info(f"on_load_checkpoint: restored pred_threshold={self.pred_threshold:.4f} from top-level")
 
     def _get_embedding(
         self, pids: List[str], seqs: List[str], crop_bounds: List[Tuple[int, int]]
