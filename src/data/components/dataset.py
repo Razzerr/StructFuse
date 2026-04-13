@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 import json
+import time
+import zipfile
 
 from tqdm import tqdm
 import numpy as np
@@ -10,6 +12,20 @@ from torch.utils.data import Dataset, Sampler
 from src.utils import pylogger
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
+
+
+def _load_npz_with_retry(path, retries: int = 3, **kwargs):
+    """Load an NPZ file with retries to handle transient NFS errors."""
+    for attempt in range(1, retries + 1):
+        try:
+            return np.load(path, **kwargs)
+        except (EOFError, OSError, zipfile.BadZipFile) as exc:
+            if attempt == retries:
+                raise
+            log.warning(
+                f"NPZ load failed ({exc}), retry {attempt}/{retries}: {path}"
+            )
+            time.sleep(0.5 * attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +89,7 @@ class PriorBuilder:
             del self._tpl_cache[oldest]
 
         npz_path = self._id_to_npz.get(tpl_id)
-        td = np.load(npz_path, allow_pickle=True)
+        td = _load_npz_with_retry(npz_path, allow_pickle=True)
         tseq_arr = td["seq"]
         tseq = (
             str(tseq_arr.item())
@@ -331,7 +347,8 @@ class ContactDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         pid = self.ids[idx]
-        with np.load(self.root / f"{pid}.npz", allow_pickle=True) as data:
+        data = _load_npz_with_retry(self.root / f"{pid}.npz", allow_pickle=True)
+        try:
             # seq may be a 0-d object array
             seq_arr = data["seq"]
             seq = (
@@ -344,6 +361,8 @@ class ContactDataset(Dataset):
             mask = data["mask"].astype(np.uint8)  # (L,) - 1 if CA present
             L = int(data["L"])
             subset = self._get_subset(pid)
+        finally:
+            data.close()
 
         return {
             "pid": pid,
@@ -512,7 +531,7 @@ def collate_padded(
     if esm_embeddings_dir is not None:
         # Determine d_esm from first file
         first_pid = pids[0]
-        first_emb = np.load(esm_embeddings_dir / f"{first_pid}.npz")
+        first_emb = _load_npz_with_retry(esm_embeddings_dir / f"{first_pid}.npz")
         d_esm = first_emb["rep"].shape[1]
         first_emb.close()
 
@@ -524,7 +543,7 @@ def collate_padded(
             cb = item["crop_bounds"]
             Lc = item["L"]
 
-            emb_data = np.load(esm_embeddings_dir / f"{pid}.npz")
+            emb_data = _load_npz_with_retry(esm_embeddings_dir / f"{pid}.npz")
             rep_full = emb_data["rep"]        # (L_full, d_esm) float16
             cont_full = emb_data["contacts"]  # (L_full, L_full) float16
             emb_data.close()

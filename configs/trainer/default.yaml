@@ -28,3 +28,7 @@ reload_dataloaders_every_n_epochs: 1
 # set True to to ensure deterministic results
 # makes training slower but gives more reproducibility than just setting seeds
 deterministic: False
+
+# use 10% of training batches per epoch (stochastic subsampling)
+# acts as implicit regularisation; each epoch samples a different 10%
+limit_train_batches: 0.1
