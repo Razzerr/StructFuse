@@ -154,23 +154,30 @@ class PriorBuilder:
 
             if self.only_positive_transfer:
                 known = Pk == 1
-                Pk_pos = known.astype(np.float32)
+                Pk_val = known.astype(np.float32)
                 cnt = known.astype(np.float32)
             else:
-                known = Pk != -1
-                Pk_pos = np.clip(Pk, 0, 1).astype(np.float32)
                 if self.use_blosum:
-                    cnt = (Pk_pos != 0).astype(np.float32)
+                    # BLOSUM mode: Pk has positive values for contacts,
+                    # negative for non-contacts, zero for unaligned (gaps).
+                    # Keep the full signed range so the model can use
+                    # negative evidence ("templates say NOT a contact").
+                    known = Pk != 0  # aligned positions have non-zero scores
+                    Pk_val = Pk.astype(np.float32)
+                    cnt = known.astype(np.float32)  # coverage: all aligned pairs
                 else:
-                    cnt = known.astype(np.float32)
+                    # Binary mode: Pk is -1 (gap), 0 (non-contact), 1 (contact)
+                    known = Pk != -1
+                    Pk_val = Pk.astype(np.float32)  # keep 0 for non-contact
+                    cnt = known.astype(np.float32)   # coverage: all aligned pairs
 
             if self.min_seq_sep > 0:
                 ii, jj = np.indices((Lc, Lc))
                 close = np.abs(ii - jj) < self.min_seq_sep
-                Pk_pos[close] = 0.0
+                Pk_val[close] = 0.0
                 cnt[close] = 0.0
 
-            prior_acc += wk * Pk_pos
+            prior_acc += wk * Pk_val
             count_acc += cnt
 
         return prior_acc, count_acc
