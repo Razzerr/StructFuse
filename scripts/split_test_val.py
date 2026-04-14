@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SPLITS_JSON = ROOT / "data" / "output_splits" / "mmcif_final_splits.json"
 TEST_IDS_FILE = ROOT / "data" / "output_splits" / "all_test_ids.txt"
 CLUSTERS_FILE = ROOT / "data" / "clusters_30.txt"
-OUT_DIR = ROOT / "data" / "splits"
+OUT_DIR = ROOT / "data" / "output_splits"
 
 
 # ── Union-Find ──────────────────────────────────────────────────────────────

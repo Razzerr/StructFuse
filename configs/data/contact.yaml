@@ -5,8 +5,8 @@ data_root: ${paths.processed_dir}
 
 # Override split files
 train_ids: null
-val_ids: data/splits/val_holdout_ids.txt
-test_ids: data/splits/test_ids.txt
+val_ids: data/output_splits/val_holdout_ids.txt
+test_ids: data/output_splits/test_ids.txt
 
 # Path to mmcif_final_splits.json for per-subset evaluation (gold, casp16, cluster_promoted)
 splits_json_path: data/output_splits/mmcif_final_splits.json
