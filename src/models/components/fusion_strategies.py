@@ -237,32 +237,35 @@ class StandardFusion(nn.Module):
     Standard fusion strategy (current baseline).
     
     Architecture:
-    1. Gated prior: gate = sigmoid(conv([prior, count]))
-    2. Residual: x = esm_semantic + gate * prior_phi(prior)
-    3. Aux concat: x = cat([x, prior, count, rel_proj(rel)])
+    1. Gated prior: gate = sigmoid(conv([prior, count, dist_bins]))
+    2. Residual: x = esm_semantic + gate * tpl_phi([prior, count, dist_bins])
+    3. Aux concat: x = cat([x, prior, count, dist_bins, rel_proj(rel)])
     
     Args:
         d_pair: Dimension of pairwise features
         d_rel: Dimension of relative position embeddings
+        n_dist_bins: Number of template distance bin channels (0 = no distance bins)
     """
-    def __init__(self, d_pair: int, d_rel: int):
+    def __init__(self, d_pair: int, d_rel: int, n_dist_bins: int = 0):
         super().__init__()
+        self.n_dist_bins = n_dist_bins
+        tpl_in = 2 + n_dist_bins  # prior + count + dist_bins
         
         # ESM semantic encoder: combines pair_feat + optional esm_contacts
         esm_in_channels = d_pair + 1
         self.esm_proj = nn.Conv2d(esm_in_channels, d_pair, 1)
         
-        # Gate network: learns confidence from prior and count
-        self.gate_conv = nn.Conv2d(2, 1, 1)  # [prior, count] -> gate
+        # Gate network: learns confidence from all template channels
+        self.gate_conv = nn.Conv2d(tpl_in, 1, 1)
         
-        # Prior embedding: maps prior values to feature space
-        self.prior_phi = nn.Conv2d(1, d_pair, 1)
+        # Template embedding: maps all template channels to feature space
+        self.tpl_phi = nn.Conv2d(tpl_in, d_pair, 1)
         
         # Relative position projection
         self.rel_proj = nn.Conv2d(d_rel, d_rel, 1)
         
-        # Total input channels: pair_feat + prior + count + rel = d_pair + 1 + 1 + d_rel
-        self.out_channels = d_pair + 1 + 1 + d_rel
+        # Total input channels: pair_feat + tpl_in + rel
+        self.out_channels = d_pair + tpl_in + d_rel
         
     def forward(
         self, 
@@ -270,15 +273,17 @@ class StandardFusion(nn.Module):
         prior: torch.Tensor,
         count: torch.Tensor,
         rel: torch.Tensor,
-        esm_contacts: torch.Tensor
+        esm_contacts: torch.Tensor,
+        dist_bins: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features from PairFeatures
-            prior: (B, 1, L, L) prior contact map (-1/0/1 or continuous BLOSUM scores)
-            count: (B, 1, L, L) template count confidence
+            prior: (B, 1, L, L) prior contact map (signed BLOSUM scores)
+            count: (B, 1, L, L) template coverage count
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
             
         Returns:
             (B, out_channels, L, L) fused features
@@ -287,20 +292,24 @@ class StandardFusion(nn.Module):
         esm_semantic = torch.cat([pair_feat, esm_contacts], dim=1)  # (B, d_pair+1, L, L)
         esm_semantic = self.esm_proj(esm_semantic)  # (B, d_pair, L, L)
         
-        # Compute gate from prior and count
-        gate_input = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
-        gate = torch.sigmoid(self.gate_conv(gate_input))  # (B, 1, L, L)
+        # Build template feature tensor
+        tpl_parts = [prior, count]
+        if dist_bins is not None:
+            tpl_parts.append(dist_bins)
+        tpl_feat = torch.cat(tpl_parts, dim=1)  # (B, 2+N, L, L)
         
-        # Gated residual: add prior information modulated by confidence
-        prior_emb = self.prior_phi(prior)  # (B, d_pair, L, L)
-        x = esm_semantic + gate * prior_emb  # (B, d_pair, L, L)
+        # Compute gate from template features
+        gate = torch.sigmoid(self.gate_conv(tpl_feat))  # (B, 1, L, L)
+        
+        # Gated residual: add template information modulated by confidence
+        tpl_emb = self.tpl_phi(tpl_feat)  # (B, d_pair, L, L)
+        x = esm_semantic + gate * tpl_emb  # (B, d_pair, L, L)
         
         # Auxiliary features: concatenate raw information
         rel_emb = self.rel_proj(rel)  # (B, d_rel, L, L)
-        aux = [prior, count, rel_emb]  # Raw template info + relative position
         
         # Final concatenation
-        x_fused = torch.cat([x] + aux, dim=1)  # (B, d_pair+1+1+d_rel, L, L)
+        x_fused = torch.cat([x, tpl_feat, rel_emb], dim=1)  # (B, d_pair+tpl_in+d_rel, L, L)
         
         return x_fused
 
@@ -332,9 +341,13 @@ class TruForFusion(nn.Module):
         d_pair: int, 
         d_rel: int, 
         num_heads: int = 8, 
-        reduction: int = 1
+        reduction: int = 1,
+        n_dist_bins: int = 0,
     ):
         super().__init__()
+        self.n_dist_bins = n_dist_bins
+        tpl_in = 2 + n_dist_bins  # prior + count + dist_bins
+        
         # ESM semantic stream encoder: [pair_feat, optional esm_contacts] -> d_pair
         esm_in_channels = d_pair + 1
         self.esm_encoder = nn.Sequential(
@@ -343,9 +356,9 @@ class TruForFusion(nn.Module):
             nn.ReLU()
         )
         
-        # Template fingerprint encoder: [prior, count] -> d_pair dimensions
+        # Template fingerprint encoder: [prior, count, dist_bins] -> d_pair dimensions
         self.template_encoder = nn.Sequential(
-            nn.Conv2d(2, d_pair // 2, 3, padding=1),
+            nn.Conv2d(tpl_in, d_pair // 2, 3, padding=1),
             nn.BatchNorm2d(d_pair // 2),
             nn.ReLU(),
             nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
@@ -372,15 +385,17 @@ class TruForFusion(nn.Module):
         prior: torch.Tensor,
         count: torch.Tensor,
         rel: torch.Tensor,
-        esm_contacts: torch.Tensor
+        esm_contacts: torch.Tensor,
+        dist_bins: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features from ESM2 (semantic)
             prior: (B, 1, L, L) prior contact map from templates (fingerprint)
-            count: (B, 1, L, L) template count (confidence)
+            count: (B, 1, L, L) template coverage count
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
             
         Returns:
             (B, out_channels, L, L) cross-fused features
@@ -390,11 +405,13 @@ class TruForFusion(nn.Module):
         esm_feat = self.esm_encoder(esm_input)  # (B, d_pair, L, L)
         
         # Build Stream 2: Template fingerprint (measured from structures)
-        template_input = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
+        tpl_parts = [prior, count]
+        if dist_bins is not None:
+            tpl_parts.append(dist_bins)
+        template_input = torch.cat(tpl_parts, dim=1)  # (B, 2+N, L, L)
         template_feat = self.template_encoder(template_input)  # (B, d_pair, L, L)
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint
-        # FFM uses cross-attention to let each stream attend to the other
         x_fused = self.ffm(esm_feat, template_feat)  # (B, d_pair, L, L)
         
         # Add relative position information
@@ -409,7 +426,8 @@ def get_fusion_strategy(
     d_pair: int, 
     d_rel: int, 
     num_heads: int = 8, 
-    reduction: int = 1
+    reduction: int = 1,
+    n_dist_bins: int = 0,
 ) -> nn.Module:
     """
     Factory function to create fusion strategy.
@@ -420,18 +438,20 @@ def get_fusion_strategy(
         d_rel: Dimension of relative position embeddings
         num_heads: Number of attention heads (TruFor only)
         reduction: Channel reduction factor (TruFor only)
+        n_dist_bins: Number of template distance bin channels
         
     Returns:
         Fusion module instance
     """
     if strategy == "standard":
-        return StandardFusion(d_pair=d_pair, d_rel=d_rel)
+        return StandardFusion(d_pair=d_pair, d_rel=d_rel, n_dist_bins=n_dist_bins)
     elif strategy == "trufor":
         return TruForFusion(
             d_pair=d_pair, 
             d_rel=d_rel, 
             num_heads=num_heads, 
-            reduction=reduction
+            reduction=reduction,
+            n_dist_bins=n_dist_bins,
         )
     else:
         raise ValueError(f"Unknown fusion strategy: {strategy}. Choose 'standard' or 'trufor'.")

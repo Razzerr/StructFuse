@@ -287,6 +287,7 @@ class Pair2DHead(nn.Module):
         fusion_strategy: str = "standard",
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
+        n_dist_bins: int = 0,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
@@ -306,7 +307,8 @@ class Pair2DHead(nn.Module):
             d_pair=d_pair,
             d_rel=rel_ch,
             num_heads=fusion_num_heads,
-            reduction=fusion_reduction
+            reduction=fusion_reduction,
+            n_dist_bins=n_dist_bins,
         )
         
         # Input channels depend on fusion strategy output
@@ -353,21 +355,22 @@ class Pair2DHead(nn.Module):
         import math
         nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None):
+    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None):
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features
-            prior: (B, 1, L, L) prior contact map (-1/0/1 or continuous BLOSUM)
-            count: (B, 1, L, L) template count
+            prior: (B, 1, L, L) prior contact map (signed BLOSUM scores)
+            count: (B, 1, L, L) template coverage count
             rel: (B, rel_ch, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
+            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
             
         Returns:
             logits: (B, 1, L, L) contact prediction logits
         """
         # Apply fusion strategy
-        x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
+        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins)
         
         # Processing
         x = self.inp(x)

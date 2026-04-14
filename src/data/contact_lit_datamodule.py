@@ -77,6 +77,7 @@ class ContactDataModule(LightningDataModule):
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
+        n_dist_bins: int = 0,
         # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
         esm_embeddings_dir: Optional[str] = None,
     ):
@@ -115,6 +116,7 @@ class ContactDataModule(LightningDataModule):
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
         self.max_tpl_cache = int(max_tpl_cache)
+        self.n_dist_bins = int(n_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
 
         # Initialize RNG for deterministic cropping
@@ -275,6 +277,7 @@ class ContactDataModule(LightningDataModule):
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
+                    n_dist_bins=self.n_dist_bins,
                 )
 
         if stage == "test" or stage is None:
@@ -304,6 +307,7 @@ class ContactDataModule(LightningDataModule):
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
+                    n_dist_bins=self.n_dist_bins,
                 )
 
     def _collate_train(self, batch):

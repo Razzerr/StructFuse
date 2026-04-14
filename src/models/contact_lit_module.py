@@ -58,6 +58,7 @@ class ContactLitModule(LightningModule):
         tversky_beta: float = 0.3,
         tversky_gamma: float = 1.0,
         max_tpl_cache: int = 1000,
+        n_dist_bins: int = 0,
         # Scheduler parameters
         warmup_steps: int = 1000,
         total_steps: int = 0,  # 0 = auto-calculate from trainer
@@ -87,6 +88,7 @@ class ContactLitModule(LightningModule):
             fusion_strategy=fusion_strategy,
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
+            n_dist_bins=n_dist_bins,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,
@@ -285,6 +287,9 @@ class ContactLitModule(LightningModule):
         # Template priors (already built in DataLoader workers on CPU)
         prior = batch["prior"].to(self.device)   # (B, 1, Lmax, Lmax)
         count = batch["count"].to(self.device)   # (B, 1, Lmax, Lmax)
+        dist_bins = batch.get("dist_bins")       # (B, N, Lmax, Lmax) or None
+        if dist_bins is not None:
+            dist_bins = dist_bins.to(self.device)
 
         # Batched ESM2 forward — single call for all samples
         # If precomputed embeddings are in the batch, skip ESM2 entirely
@@ -301,7 +306,7 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1))  # (B, 1, Lmax, Lmax)
+        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins)  # (B, 1, Lmax, Lmax)
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
 
@@ -1206,11 +1211,15 @@ class ContactLitModule(LightningModule):
                 min_seq_sep=self.min_seq_sep,
                 min_template_similarity=self.hparams.get("min_template_similarity", 0.0),
                 random_retrieval=self.hparams.get("random_retrieval", False),
+                n_dist_bins=self.hparams.get("n_dist_bins", 0),
             )
         pb = self._prior_builder
-        p_np, c_np = pb.build_one(pid, seq, 0, L)
+        p_np, c_np, d_np = pb.build_one(pid, seq, 0, L)
         prior = torch.from_numpy(p_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         count = torch.from_numpy(c_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
+        dist_bins = None
+        if d_np.shape[0] > 0:
+            dist_bins = torch.from_numpy(d_np).float().unsqueeze(0).to(self.device)  # (1,N,L,L)
 
         # Build masks
         rel = relpos_buckets(L, self.device)  # (R, L, L)
@@ -1234,7 +1243,8 @@ class ContactLitModule(LightningModule):
         # Forward pass
         with torch.no_grad():
             logits = self.net(h, prior, count, rel, esm_contacts,
-                              pair_mask=pair_mask.unsqueeze(0).unsqueeze(0))  # (1, 1, L, L)
+                              pair_mask=pair_mask.unsqueeze(0).unsqueeze(0),
+                              dist_bins=dist_bins)  # (1, 1, L, L)
             probs = torch.sigmoid(logits[0, 0])  # (L, L)
             binary = (probs >= threshold).float()  # (L, L)
 

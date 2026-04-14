@@ -51,6 +51,7 @@ class PriorBuilder:
         min_template_similarity: Discard templates below this IP similarity.
         random_retrieval: Ablation flag – use random templates.
         max_tpl_cache: Per-worker LRU cache size for template NPZ files.
+        n_dist_bins: Number of distance bins for template distograms (0 = disabled).
     """
 
     def __init__(
@@ -63,6 +64,7 @@ class PriorBuilder:
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
+        n_dist_bins: int = 0,
     ):
         from src.models.utils.faiss import FaissIndex
 
@@ -73,6 +75,11 @@ class PriorBuilder:
         self.min_seq_sep = int(min_seq_sep)
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
+        self.n_dist_bins = int(n_dist_bins)
+
+        # Distance bin edges in Ångströms (creates n_dist_bins categories)
+        # Default 8 bins: [0-5, 5-6, 6-7, 7-8, 8-10, 10-15, 15-20, 20+]
+        self._dist_edges = np.array([5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0], dtype=np.float32)
 
         self._id_to_npz = {m["id"]: m["npz"] for m in self.faiss_index.meta}
         self._tpl_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -97,8 +104,13 @@ class PriorBuilder:
             else str(tseq_arr)
         )
         tC = td["contact"].astype(np.uint8).copy()
+        entry = {"seq": tseq, "contact": tC}
+        # Load coordinates for distance binning (if available and requested)
+        if self.n_dist_bins > 0 and "coords" in td and "mask" in td:
+            entry["coords"] = td["coords"].astype(np.float32).copy()
+            entry["mask"] = td["mask"].astype(np.uint8).copy()
         td.close()
-        self._tpl_cache[tpl_id] = {"seq": tseq, "contact": tC}
+        self._tpl_cache[tpl_id] = entry
         return self._tpl_cache[tpl_id]
 
     # -- main entry point ---------------------------------------------------
@@ -113,16 +125,22 @@ class PriorBuilder:
         """Build aggregated template prior for one sample.
 
         Returns:
-            ``(prior, count)`` – two ``(Lc, Lc)`` float32 numpy arrays.
-            If no templates are found, both are all-zeros.
+            ``(prior, count, dist_bins)`` – two ``(Lc, Lc)`` float32 arrays
+            and one ``(n_dist_bins, Lc, Lc)`` float32 array (all-zeros when
+            ``n_dist_bins == 0``).
         """
-        from src.data.utils.align import project_prior
+        from src.data.utils.align import project_prior, needleman_wunsch
 
         Lc = crop_end - crop_start
         crop_seq = full_seq[crop_start:crop_end]
+        N = self.n_dist_bins
 
         if self.topk <= 0:
-            return np.zeros((Lc, Lc), np.float32), np.zeros((Lc, Lc), np.float32)
+            return (
+                np.zeros((Lc, Lc), np.float32),
+                np.zeros((Lc, Lc), np.float32),
+                np.zeros((N, Lc, Lc), np.float32),
+            )
 
         hits = self.faiss_index.topk_precomputed(
             pid,
@@ -131,7 +149,11 @@ class PriorBuilder:
             random_retrieval=self.random_retrieval,
         )
         if not hits:
-            return np.zeros((Lc, Lc), np.float32), np.zeros((Lc, Lc), np.float32)
+            return (
+                np.zeros((Lc, Lc), np.float32),
+                np.zeros((Lc, Lc), np.float32),
+                np.zeros((N, Lc, Lc), np.float32),
+            )
 
         # Softmax weights from cosine similarities
         sims = np.array([h[1] for h in hits], dtype=np.float32)
@@ -140,6 +162,7 @@ class PriorBuilder:
 
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
+        dist_acc = np.zeros((N, Lc, Lc), dtype=np.float32) if N > 0 else None
 
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
@@ -158,18 +181,13 @@ class PriorBuilder:
                 cnt = known.astype(np.float32)
             else:
                 if self.use_blosum:
-                    # BLOSUM mode: Pk has positive values for contacts,
-                    # negative for non-contacts, zero for unaligned (gaps).
-                    # Keep the full signed range so the model can use
-                    # negative evidence ("templates say NOT a contact").
-                    known = Pk != 0  # aligned positions have non-zero scores
+                    known = Pk != 0
                     Pk_val = Pk.astype(np.float32)
-                    cnt = known.astype(np.float32)  # coverage: all aligned pairs
+                    cnt = known.astype(np.float32)
                 else:
-                    # Binary mode: Pk is -1 (gap), 0 (non-contact), 1 (contact)
                     known = Pk != -1
-                    Pk_val = Pk.astype(np.float32)  # keep 0 for non-contact
-                    cnt = known.astype(np.float32)   # coverage: all aligned pairs
+                    Pk_val = Pk.astype(np.float32)
+                    cnt = known.astype(np.float32)
 
             if self.min_seq_sep > 0:
                 ii, jj = np.indices((Lc, Lc))
@@ -180,7 +198,44 @@ class PriorBuilder:
             prior_acc += wk * Pk_val
             count_acc += cnt
 
-        return prior_acc, count_acc
+            # ── Distance bins ──
+            if N > 0 and "coords" in tpl and "mask" in tpl:
+                # Get alignment mapping for distance projection
+                _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
+                tpl_coords = tpl["coords"]  # (Lt, 3)
+                tpl_mask = tpl["mask"]       # (Lt,)
+
+                # Find query positions that align to valid template residues
+                valid_q = np.where(q2t >= 0)[0]
+                valid_t = q2t[valid_q]
+                # Further filter: both template residues must have coords
+                has_coord = tpl_mask[valid_t].astype(bool)
+                valid_q = valid_q[has_coord]
+                valid_t = valid_t[has_coord]
+
+                if len(valid_q) > 1:
+                    # Compute pairwise Cα distances in template
+                    tc = tpl_coords[valid_t]  # (M, 3)
+                    dmat = np.linalg.norm(tc[:, None, :] - tc[None, :, :], axis=-1)
+                    # Bin distances: digitize gives bin index 0..n_edges
+                    bin_idx = np.digitize(dmat, self._dist_edges)  # 0-based, max=len(edges)
+                    # Clamp to [0, N-1]
+                    bin_idx = np.clip(bin_idx, 0, N - 1)
+                    # One-hot encode
+                    for b in range(N):
+                        layer = (bin_idx == b).astype(np.float32)
+                        # Apply min_seq_sep mask (query indices)
+                        if self.min_seq_sep > 0:
+                            qi, qj = np.meshgrid(valid_q, valid_q, indexing="ij")
+                            close_q = np.abs(qi - qj) < self.min_seq_sep
+                            layer[close_q] = 0.0
+                        dist_acc[b][np.ix_(valid_q, valid_q)] += wk * layer
+
+        return (
+            prior_acc,
+            count_acc,
+            dist_acc if dist_acc is not None else np.zeros((0, Lc, Lc), np.float32),
+        )
 
 
 # Subset definitions for test set evaluation
@@ -521,18 +576,24 @@ def collate_padded(
     if prior_builder is not None:
         prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+        N = prior_builder.n_dist_bins
+        dist_bins = torch.zeros((B, N, Lmax, Lmax), dtype=torch.float32) if N > 0 else None
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
-            p_np, c_np = prior_builder.build_one(
+            p_np, c_np, d_np = prior_builder.build_one(
                 item["pid"], item["seq"], cb[0], cb[1]
             )
-            # p_np, c_np are (Lc, Lc); place into padded tensors
+            # p_np, c_np are (Lc, Lc); d_np is (N, Lc, Lc)
             L_use = min(Lc, Lmax)
             prior[b, 0, :L_use, :L_use] = torch.from_numpy(p_np[:L_use, :L_use])
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
+            if N > 0:
+                dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(d_np[:, :L_use, :L_use])
         batch_out["prior"] = prior
         batch_out["count"] = count
+        if dist_bins is not None:
+            batch_out["dist_bins"] = dist_bins
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

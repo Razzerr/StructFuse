@@ -48,7 +48,8 @@ tversky_beta: 0.7          # False negative penalty weight (beta < alpha = recal
 tversky_gamma: 1.0         # Focal modulation strength
 
 max_tpl_cache: 1000
+n_dist_bins: 8
 
-warmup_steps: 400
+warmup_steps: 100
 min_lr_ratio: 0.1
 compile_model: true
