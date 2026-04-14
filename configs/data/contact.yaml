@@ -3,17 +3,17 @@ _target_: src.data.contact_lit_datamodule.ContactDataModule
 # Root with NPZ files
 data_root: ${paths.processed_dir}
 
-# Override split files (only used when cluster_sampling=false)
+# Override split files
 train_ids: null
-val_ids: null
-test_ids: data/output_splits/all_test_ids.txt
+val_ids: data/splits/val_holdout_ids.txt
+test_ids: data/splits/test_ids.txt
 
 # Path to mmcif_final_splits.json for per-subset evaluation (gold, casp16, cluster_promoted)
 splits_json_path: data/output_splits/mmcif_final_splits.json
 
 # Subsets to exclude from test evaluation (saves time; set to [] for full test)
-test_exclude_subsets:
-  - cluster_promoted
+# NOTE: val_holdout_ids.txt and test_ids.txt already exclude cluster_promoted
+test_exclude_subsets: []
 
 val_ratio: 0.1               # only used when cluster_sampling=false (static split fallback)
 split_dir: ${paths.split_dir}
@@ -28,9 +28,8 @@ crop_mode: random     # random|center|none
 min_seq_sep: 6
 min_len: 20
 
-# Cluster-aware dynamic train/val: each epoch samples 1 train + 1 val chain
-# per multi-member cluster. Singletons/orphans go to train only.
-# When enabled, val_ratio / train_ids / val_ids are ignored.
+# Cluster-aware train sampling: each epoch samples 1 chain per cluster.
+# Val is always loaded from val_ids (static, from test-distribution holdout).
 cluster_sampling: true
 index_dir: data/index_t6
 

@@ -176,8 +176,8 @@ class ContactDataModule(LightningDataModule):
         When cluster_sampling is disabled, falls back to static train/val
         split files.
         """
-        if stage == "fit" and self.dset_trainval is not None:
-            log.info("Train/val dataset already loaded, skipping setup")
+        if stage == "fit" and self.dset_trainval is not None and self.dset_val is not None:
+            log.info("Train/val datasets already loaded, skipping setup")
             return
         if stage == "fit" and self.dset_train is not None and self.dset_val is not None:
             log.info("Train/val datasets already loaded, skipping setup")
@@ -217,6 +217,20 @@ class ContactDataModule(LightningDataModule):
                     batch_size=self.batch_size,
                     seed=self.split_seed,
                 )
+
+                # ── Static val from held-out test split ──
+                if self.val_ids_path:
+                    val_split_path = Path(self.val_ids_path)
+                    assert val_split_path.exists(), f"val_ids file not found: {val_split_path}"
+                    log.info(f"Creating static val dataset from {val_split_path}")
+                    self.dset_val = ContactDataset(
+                        val_split_path,
+                        root=self.data_root,
+                        min_len=self.min_len,
+                        splits_json_path=self.splits_json_path,
+                        exclude_subsets=self.test_exclude_subsets,
+                    )
+                    log.info(f"  Val (static): {len(self.dset_val)} samples")
             else:
                 # ── Fallback: static train/val split ──
                 if self.train_ids_path and self.val_ids_path:
@@ -359,11 +373,31 @@ class ContactDataModule(LightningDataModule):
 
     def val_dataloader(self):
         kwargs = self._dl_kwargs(collate_fn=self._collate_eval)
-        # ── Cluster-aware dynamic split ──
+
+        # ── Static val (from held-out test split) takes priority ──
+        if self.dset_val is not None:
+            if self._cluster_sampler is not None:
+                self._cluster_sampler.advance_epoch()
+            if self.bucketed:
+                lengths = self.dset_val.cached_lengths
+                sampler = BucketBatchSampler(
+                    lengths, batch_size=self.batch_size, shuffle=False, seed=self.split_seed
+                )
+                return DataLoader(
+                    self.dset_val,
+                    batch_sampler=sampler,
+                    **kwargs,
+                )
+            return DataLoader(
+                self.dset_val,
+                batch_size=self.batch_size,
+                shuffle=False,
+                **kwargs,
+            )
+
+        # ── Cluster-aware dynamic val (legacy, no static val_ids) ──
         if self._cluster_sampler is not None:
             batches = self._cluster_sampler.val_batches()
-            # Advance epoch AFTER both train and val dataloaders are created
-            # (Lightning calls train_dataloader() then val_dataloader() per epoch)
             self._cluster_sampler.advance_epoch()
             return DataLoader(
                 self.dset_trainval,
@@ -371,23 +405,7 @@ class ContactDataModule(LightningDataModule):
                 **kwargs,
             )
 
-        # ── Fallback: static split ──
-        if self.bucketed:
-            lengths = self.dset_val.cached_lengths
-            sampler = BucketBatchSampler(
-                lengths, batch_size=self.batch_size, shuffle=False, seed=self.split_seed
-            )
-            return DataLoader(
-                self.dset_val,
-                batch_sampler=sampler,
-                **kwargs,
-            )
-        return DataLoader(
-            self.dset_val,
-            batch_size=self.batch_size,
-            shuffle=False,
-            **kwargs,
-        )
+        raise RuntimeError("No val dataset available. Set val_ids or enable cluster_sampling.")
 
     def test_dataloader(self):
         return DataLoader(
