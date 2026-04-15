@@ -287,6 +287,9 @@ class ContactLitModule(LightningModule):
         # Template priors (already built in DataLoader workers on CPU)
         prior = batch["prior"].to(self.device)   # (B, 1, Lmax, Lmax)
         count = batch["count"].to(self.device)   # (B, 1, Lmax, Lmax)
+        tpl_conf = batch.get("tpl_conf")         # (B, 1, Lmax, Lmax) or None
+        if tpl_conf is not None:
+            tpl_conf = tpl_conf.to(self.device)
         dist_bins = batch.get("dist_bins")       # (B, N, Lmax, Lmax) or None
         if dist_bins is not None:
             dist_bins = dist_bins.to(self.device)
@@ -306,7 +309,7 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins)  # (B, 1, Lmax, Lmax)
+        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins, tpl_conf=tpl_conf)  # (B, 1, Lmax, Lmax)
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
 
@@ -1214,9 +1217,10 @@ class ContactLitModule(LightningModule):
                 n_dist_bins=self.hparams.get("n_dist_bins", 0),
             )
         pb = self._prior_builder
-        p_np, c_np, d_np = pb.build_one(pid, seq, 0, L)
+        p_np, c_np, d_np, conf_np = pb.build_one(pid, seq, 0, L)
         prior = torch.from_numpy(p_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         count = torch.from_numpy(c_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
+        tpl_conf = torch.from_numpy(conf_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         dist_bins = None
         if d_np.shape[0] > 0:
             dist_bins = torch.from_numpy(d_np).float().unsqueeze(0).to(self.device)  # (1,N,L,L)
@@ -1244,7 +1248,8 @@ class ContactLitModule(LightningModule):
         with torch.no_grad():
             logits = self.net(h, prior, count, rel, esm_contacts,
                               pair_mask=pair_mask.unsqueeze(0).unsqueeze(0),
-                              dist_bins=dist_bins)  # (1, 1, L, L)
+                              dist_bins=dist_bins,
+                              tpl_conf=tpl_conf)  # (1, 1, L, L)
             probs = torch.sigmoid(logits[0, 0])  # (L, L)
             binary = (probs >= threshold).float()  # (L, L)
 

@@ -125,22 +125,27 @@ class PriorBuilder:
         """Build aggregated template prior for one sample.
 
         Returns:
-            ``(prior, count, dist_bins)`` – two ``(Lc, Lc)`` float32 arrays
-            and one ``(n_dist_bins, Lc, Lc)`` float32 array (all-zeros when
-            ``n_dist_bins == 0``).
+            ``(prior, count, dist_bins, tpl_conf)`` – two ``(Lc, Lc)`` float32
+            arrays, one ``(n_dist_bins, Lc, Lc)`` float32 array, and one
+            ``(Lc, Lc)`` float32 confidence array.
         """
-        from src.data.utils.align import project_prior, needleman_wunsch
+        from src.data.utils.align import (
+            project_prior, needleman_wunsch, _BLOSUM_MATRIX, _AA_TO_IDX,
+        )
 
         Lc = crop_end - crop_start
         crop_seq = full_seq[crop_start:crop_end]
         N = self.n_dist_bins
 
+        _zeros = (
+            np.zeros((Lc, Lc), np.float32),
+            np.zeros((Lc, Lc), np.float32),
+            np.zeros((N, Lc, Lc), np.float32),
+            np.zeros((Lc, Lc), np.float32),
+        )
+
         if self.topk <= 0:
-            return (
-                np.zeros((Lc, Lc), np.float32),
-                np.zeros((Lc, Lc), np.float32),
-                np.zeros((N, Lc, Lc), np.float32),
-            )
+            return _zeros
 
         hits = self.faiss_index.topk_precomputed(
             pid,
@@ -149,11 +154,7 @@ class PriorBuilder:
             random_retrieval=self.random_retrieval,
         )
         if not hits:
-            return (
-                np.zeros((Lc, Lc), np.float32),
-                np.zeros((Lc, Lc), np.float32),
-                np.zeros((N, Lc, Lc), np.float32),
-            )
+            return _zeros
 
         # Softmax weights from cosine similarities
         sims = np.array([h[1] for h in hits], dtype=np.float32)
@@ -163,6 +164,7 @@ class PriorBuilder:
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
         dist_acc = np.zeros((N, Lc, Lc), dtype=np.float32) if N > 0 else None
+        conf_acc = np.zeros((Lc, Lc), dtype=np.float32)
 
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
@@ -198,24 +200,41 @@ class PriorBuilder:
             prior_acc += wk * Pk_val
             count_acc += cnt
 
+            # ── Alignment (shared by dist_bins + confidence) ──
+            _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
+            valid_q = np.where(q2t >= 0)[0]
+            valid_t = q2t[valid_q]
+
+            # ── Per-position alignment confidence ──
+            if len(valid_q) > 1:
+                q_aa_idx = np.array(
+                    [_AA_TO_IDX.get(crop_seq[i], 0) for i in valid_q],
+                    dtype=np.intp,
+                )
+                t_aa_idx = np.array(
+                    [_AA_TO_IDX.get(tpl["seq"][j], 0) for j in valid_t],
+                    dtype=np.intp,
+                )
+                per_pos = _BLOSUM_MATRIX[q_aa_idx, t_aa_idx]  # (M,) in [0,1]
+                pair_conf = per_pos[:, None] * per_pos[None, :]  # (M, M)
+                if self.min_seq_sep > 0:
+                    qi, qj = np.meshgrid(valid_q, valid_q, indexing="ij")
+                    pair_conf[np.abs(qi - qj) < self.min_seq_sep] = 0.0
+                conf_acc[np.ix_(valid_q, valid_q)] += wk * pair_conf
+
             # ── Distance bins ──
             if N > 0 and "coords" in tpl and "mask" in tpl:
-                # Get alignment mapping for distance projection
-                _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
                 tpl_coords = tpl["coords"]  # (Lt, 3)
                 tpl_mask = tpl["mask"]       # (Lt,)
 
-                # Find query positions that align to valid template residues
-                valid_q = np.where(q2t >= 0)[0]
-                valid_t = q2t[valid_q]
-                # Further filter: both template residues must have coords
+                # Further filter: template residues must have coords
                 has_coord = tpl_mask[valid_t].astype(bool)
-                valid_q = valid_q[has_coord]
-                valid_t = valid_t[has_coord]
+                dist_valid_q = valid_q[has_coord]
+                dist_valid_t = valid_t[has_coord]
 
-                if len(valid_q) > 1:
+                if len(dist_valid_q) > 1:
                     # Compute pairwise Cα distances in template
-                    tc = tpl_coords[valid_t]  # (M, 3)
+                    tc = tpl_coords[dist_valid_t]  # (M, 3)
                     dmat = np.linalg.norm(tc[:, None, :] - tc[None, :, :], axis=-1)
                     # Bin distances: digitize gives bin index 0..n_edges
                     bin_idx = np.digitize(dmat, self._dist_edges)  # 0-based, max=len(edges)
@@ -226,15 +245,16 @@ class PriorBuilder:
                         layer = (bin_idx == b).astype(np.float32)
                         # Apply min_seq_sep mask (query indices)
                         if self.min_seq_sep > 0:
-                            qi, qj = np.meshgrid(valid_q, valid_q, indexing="ij")
+                            qi, qj = np.meshgrid(dist_valid_q, dist_valid_q, indexing="ij")
                             close_q = np.abs(qi - qj) < self.min_seq_sep
                             layer[close_q] = 0.0
-                        dist_acc[b][np.ix_(valid_q, valid_q)] += wk * layer
+                        dist_acc[b][np.ix_(dist_valid_q, dist_valid_q)] += wk * layer
 
         return (
             prior_acc,
             count_acc,
             dist_acc if dist_acc is not None else np.zeros((0, Lc, Lc), np.float32),
+            conf_acc,
         )
 
 
@@ -576,22 +596,24 @@ def collate_padded(
     if prior_builder is not None:
         prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+        tpl_conf = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         N = prior_builder.n_dist_bins
         dist_bins = torch.zeros((B, N, Lmax, Lmax), dtype=torch.float32) if N > 0 else None
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
-            p_np, c_np, d_np = prior_builder.build_one(
+            p_np, c_np, d_np, conf_np = prior_builder.build_one(
                 item["pid"], item["seq"], cb[0], cb[1]
             )
-            # p_np, c_np are (Lc, Lc); d_np is (N, Lc, Lc)
             L_use = min(Lc, Lmax)
             prior[b, 0, :L_use, :L_use] = torch.from_numpy(p_np[:L_use, :L_use])
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
+            tpl_conf[b, 0, :L_use, :L_use] = torch.from_numpy(conf_np[:L_use, :L_use])
             if N > 0:
                 dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(d_np[:, :L_use, :L_use])
         batch_out["prior"] = prior
         batch_out["count"] = count
+        batch_out["tpl_conf"] = tpl_conf
         if dist_bins is not None:
             batch_out["dist_bins"] = dist_bins
 

@@ -355,7 +355,7 @@ class Pair2DHead(nn.Module):
         import math
         nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None):
+    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None, tpl_conf=None):
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features
@@ -365,12 +365,13 @@ class Pair2DHead(nn.Module):
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
+            tpl_conf: (B, 1, L, L) template alignment confidence (optional)
             
         Returns:
             logits: (B, 1, L, L) contact prediction logits
         """
         # Apply fusion strategy
-        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins)
+        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins, tpl_conf=tpl_conf)
         
         # Processing
         x = self.inp(x)
