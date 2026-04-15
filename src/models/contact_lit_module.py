@@ -431,7 +431,7 @@ class ContactLitModule(LightningModule):
                 on_epoch=on_epoch,
                 sync_dist=True,
             )
-            if self.use_tversky:
+            if self.use_tversky and not self.distogram:
                 self.log(
                     f"{stage}/loss_tversky",
                     loss_tversky,
