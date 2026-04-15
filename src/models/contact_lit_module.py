@@ -63,6 +63,10 @@ class ContactLitModule(LightningModule):
         warmup_steps: int = 1000,
         total_steps: int = 0,  # 0 = auto-calculate from trainer
         min_lr_ratio: float = 0.01,  # min_lr = lr * min_lr_ratio
+        cosine_restarts: bool = False,  # Enable SGDR warm restarts
+        restart_period: int = 1000,     # T_0: first cycle length in steps
+        restart_mult: float = 2.0,      # T_mult: cycle length multiplier (>=1)
+        restart_decay: float = 1.0,     # Peak LR decay per cycle (0.75 = 75% of prev peak)
         # Ablation parameters for retrieval
         min_template_similarity: float = 0.0,  # Filter templates below this similarity
         random_retrieval: bool = False,  # Use random templates instead of FAISS
@@ -123,6 +127,10 @@ class ContactLitModule(LightningModule):
         self.warmup_steps = int(warmup_steps)
         self.total_steps = int(total_steps)
         self.min_lr_ratio = float(min_lr_ratio)
+        self.cosine_restarts = bool(cosine_restarts)
+        self.restart_period = int(restart_period)
+        self.restart_mult = float(restart_mult)
+        self.restart_decay = float(restart_decay)
 
         # Ablation parameters
         self.min_template_similarity = float(min_template_similarity)
@@ -190,18 +198,43 @@ class ContactLitModule(LightningModule):
         else:
             total_steps = self.total_steps
 
-        # Linear warmup + cosine annealing scheduler
+        # Linear warmup + cosine annealing scheduler (optionally with warm restarts)
+        _warmup = self.warmup_steps
+        _min_ratio = self.min_lr_ratio
+        _restarts = self.cosine_restarts
+        _T0 = self.restart_period
+        _Tmult = self.restart_mult
+        _decay = self.restart_decay
+
         def lr_lambda(current_step: int) -> float:
-            if current_step < self.warmup_steps:
-                # Linear warmup
-                return float(current_step) / float(max(1, self.warmup_steps))
+            if current_step < _warmup:
+                return float(current_step) / float(max(1, _warmup))
+
+            step = current_step - _warmup
+
+            if _restarts:
+                # SGDR: cosine annealing with warm restarts + amplitude decay
+                if _Tmult == 1.0:
+                    cycle_idx = step // _T0
+                    cycle_pos = (step % _T0) / float(_T0)
+                else:
+                    t_cur = _T0
+                    cumul = 0
+                    cycle_idx = 0
+                    while cumul + t_cur <= step:
+                        cumul += t_cur
+                        t_cur = int(t_cur * _Tmult)
+                        cycle_idx += 1
+                    cycle_pos = (step - cumul) / float(max(1, t_cur))
+                # Decay peak amplitude: peak_k = decay^k
+                amplitude = _decay ** cycle_idx
             else:
-                # Cosine annealing
-                progress = float(current_step - self.warmup_steps) / float(
-                    max(1, total_steps - self.warmup_steps)
-                )
-                cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
-                return max(self.min_lr_ratio, cosine_decay)
+                # Standard single cosine decay over remaining steps
+                cycle_pos = step / float(max(1, total_steps - _warmup))
+                amplitude = 1.0
+
+            cosine_decay = 0.5 * (1.0 + np.cos(np.pi * min(cycle_pos, 1.0)))
+            return max(_min_ratio, amplitude * cosine_decay)
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambda)
 

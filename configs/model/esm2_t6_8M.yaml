@@ -52,4 +52,11 @@ n_dist_bins: 8
 
 warmup_steps: 100
 min_lr_ratio: 0.1
+
+# SGDR warm restarts: exploration→exploitation with periodic LR resets
+cosine_restarts: true
+restart_period: 500     # T_0: first cycle length (steps). ~1.5-2 epochs
+restart_mult: 2.0       # T_mult: each cycle 2x longer → 500, 1000, 2000, 4000, ...
+restart_decay: 0.75     # Peak LR shrinks each cycle: 100%, 75%, 56%, 42%, ...
+
 compile_model: true

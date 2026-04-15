@@ -121,6 +121,10 @@ class TemplateOnlyLitModule(LightningModule):
         # Scheduler
         warmup_steps: int = 1000,
         min_lr_ratio: float = 0.1,
+        cosine_restarts: bool = False,
+        restart_period: int = 1000,
+        restart_mult: float = 2.0,
+        restart_decay: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -135,6 +139,10 @@ class TemplateOnlyLitModule(LightningModule):
         self.use_blosum = use_blosum
         self.warmup_steps = int(warmup_steps)
         self.min_lr_ratio = float(min_lr_ratio)
+        self.cosine_restarts = bool(cosine_restarts)
+        self.restart_period = int(restart_period)
+        self.restart_mult = float(restart_mult)
+        self.restart_decay = float(restart_decay)
 
         # PriorBuilder — lazy init (needs FAISS index on disk)
         self.index_dir = Path(index_dir)
@@ -466,11 +474,39 @@ class TemplateOnlyLitModule(LightningModule):
             else 10000
         )
 
+        _warmup = self.warmup_steps
+        _min_ratio = self.min_lr_ratio
+        _restarts = self.cosine_restarts
+        _T0 = self.restart_period
+        _Tmult = self.restart_mult
+        _decay = self.restart_decay
+
         def lr_lambda(step: int) -> float:
-            if step < self.warmup_steps:
-                return float(step) / float(max(1, self.warmup_steps))
-            progress = float(step - self.warmup_steps) / float(max(1, total_steps - self.warmup_steps))
-            return max(self.min_lr_ratio, 0.5 * (1.0 + np.cos(np.pi * progress)))
+            if step < _warmup:
+                return float(step) / float(max(1, _warmup))
+
+            s = step - _warmup
+
+            if _restarts:
+                if _Tmult == 1.0:
+                    cycle_idx = s // _T0
+                    cycle_pos = (s % _T0) / float(_T0)
+                else:
+                    t_cur = _T0
+                    cumul = 0
+                    cycle_idx = 0
+                    while cumul + t_cur <= s:
+                        cumul += t_cur
+                        t_cur = int(t_cur * _Tmult)
+                        cycle_idx += 1
+                    cycle_pos = (s - cumul) / float(max(1, t_cur))
+                amplitude = _decay ** cycle_idx
+            else:
+                cycle_pos = s / float(max(1, total_steps - _warmup))
+                amplitude = 1.0
+
+            cosine_decay = 0.5 * (1.0 + np.cos(np.pi * min(cycle_pos, 1.0)))
+            return max(_min_ratio, amplitude * cosine_decay)
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
         return {
