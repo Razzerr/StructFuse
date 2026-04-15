@@ -61,6 +61,7 @@ class ContactLitModule(LightningModule):
         n_dist_bins: int = 0,
         # Distogram output: predict distance bins instead of binary contacts
         distogram: bool = False,
+        cb_beta: float = 0.0,  # Effective-number class balancing for distogram (0=off, 0.999=strong)
         # Scheduler parameters
         warmup_steps: int = 1000,
         total_steps: int = 0,  # 0 = auto-calculate from trainer
@@ -88,6 +89,7 @@ class ContactLitModule(LightningModule):
         # Distogram: predict N distance bins instead of binary contact
         from src.data.components.dataset import N_DIST_CLASSES, CONTACT_BIN_THRESHOLD
         self.distogram = bool(distogram)
+        self.cb_beta = float(cb_beta)
         self.n_dist_classes = N_DIST_CLASSES if self.distogram else 1
         self.contact_bin_threshold = CONTACT_BIN_THRESHOLD  # bins 0..K-1 = contact
 
@@ -359,6 +361,7 @@ class ContactLitModule(LightningModule):
             loss = masked_ce_distogram(
                 logits, dist_target, valid_mask,
                 label_smoothing=self.label_smoothing,
+                cb_beta=self.cb_beta,
             )
         else:
             # ── Binary mode: BCE loss ──

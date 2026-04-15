@@ -118,14 +118,29 @@ def masked_ce_distogram(
     mask: torch.Tensor,            # (B, L, L) in {0, 1}
     *,
     label_smoothing: float = 0.0,
+    cb_beta: float = 0.0,         # effective-number class balancing (0 = off, 0.999 = strong)
 ) -> torch.Tensor:
-    """Cross-entropy loss over distance bins, masked to valid pairs."""
-    # targets: (B, L, L) long  |  logits: (B, N, L, L)
+    """Cross-entropy loss over distance bins, masked to valid pairs.
+    
+    When cb_beta > 0, applies class-balanced weights per bin using the
+    effective number of samples (Cui et al., 2019):
+        w_c = (1 - beta) / (1 - beta^n_c)
+    """
     B, N, L, _ = logits.shape
     m = mask.float()
     denom = m.sum().clamp_min(1.0)
 
-    # F.cross_entropy expects (B, C, ...) logits and (B, ...) targets
-    loss = F.cross_entropy(logits, targets, reduction="none",
+    weight = None
+    if cb_beta > 0:
+        # Dynamic per-batch class-balanced weights
+        valid_bins = targets[m > 0].long()
+        counts = torch.bincount(valid_bins, minlength=N).float()  # (N,)
+        # Effective number: (1 - beta) / (1 - beta^n_c)
+        eff = 1.0 - cb_beta ** counts            # (N,)
+        eff = eff.clamp_min(1e-6)                 # avoid div-by-zero for empty bins
+        weight = (1.0 - cb_beta) / eff            # (N,)
+        weight = weight / weight.sum() * N        # normalize so mean weight = 1
+
+    loss = F.cross_entropy(logits, targets, weight=weight, reduction="none",
                            label_smoothing=label_smoothing)  # (B, L, L)
     return (loss * m).sum() / denom
