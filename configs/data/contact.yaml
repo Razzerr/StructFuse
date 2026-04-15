@@ -42,6 +42,9 @@ random_retrieval: false       # ablation: random templates instead of FAISS
 max_tpl_cache: 5000
 n_dist_bins: 8
 
+# Distogram output: ground-truth distance bin targets for CE loss
+distogram: true
+
 # Precomputed ESM2 embeddings (skip frozen ESM2 forward during training)
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
 esm_embeddings_dir: data/precomputed/esm_t6_8M

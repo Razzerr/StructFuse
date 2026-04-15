@@ -9,7 +9,7 @@ from src.models.components.esm_backbone import ESM2Backbone
 from src.models.components.contact_model import ContactModel
 from src.models.components.pair2d_head import relpos_buckets
 from src.models.utils.faiss import FaissIndex
-from src.models.utils.loss import masked_bce_balanced, masked_focal_tversky
+from src.models.utils.loss import masked_bce_balanced, masked_focal_tversky, masked_ce_distogram
 from src.models.utils.metrics import (
     precision_at_k_masked,
     precision_at_k_by_range,
@@ -59,6 +59,8 @@ class ContactLitModule(LightningModule):
         tversky_gamma: float = 1.0,
         max_tpl_cache: int = 1000,
         n_dist_bins: int = 0,
+        # Distogram output: predict distance bins instead of binary contacts
+        distogram: bool = False,
         # Scheduler parameters
         warmup_steps: int = 1000,
         total_steps: int = 0,  # 0 = auto-calculate from trainer
@@ -83,6 +85,12 @@ class ContactLitModule(LightningModule):
         self.esm = ESM2Backbone(esm_model, finetune=finetune_esm)
         self.esm_alphabet = self.esm.alphabet
 
+        # Distogram: predict N distance bins instead of binary contact
+        from src.data.components.dataset import N_DIST_CLASSES, CONTACT_BIN_THRESHOLD
+        self.distogram = bool(distogram)
+        self.n_dist_classes = N_DIST_CLASSES if self.distogram else 1
+        self.contact_bin_threshold = CONTACT_BIN_THRESHOLD  # bins 0..K-1 = contact
+
         self.net = ContactModel(
             d_esm=d_esm,
             d_pair=d_pair,
@@ -93,6 +101,7 @@ class ContactLitModule(LightningModule):
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
             n_dist_bins=n_dist_bins,
+            n_out=self.n_dist_classes,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,
@@ -320,9 +329,6 @@ class ContactLitModule(LightningModule):
         # Template priors (already built in DataLoader workers on CPU)
         prior = batch["prior"].to(self.device)   # (B, 1, Lmax, Lmax)
         count = batch["count"].to(self.device)   # (B, 1, Lmax, Lmax)
-        tpl_conf = batch.get("tpl_conf")         # (B, 1, Lmax, Lmax) or None
-        if tpl_conf is not None:
-            tpl_conf = tpl_conf.to(self.device)
         dist_bins = batch.get("dist_bins")       # (B, N, Lmax, Lmax) or None
         if dist_bins is not None:
             dist_bins = dist_bins.to(self.device)
@@ -342,36 +348,50 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins, tpl_conf=tpl_conf)  # (B, 1, Lmax, Lmax)
+        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins)
+        # logits: (B, n_out, Lmax, Lmax) — n_out=1 binary, n_out=N distogram
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
 
-        # Primary loss: BCE
-        loss_bce = masked_bce_balanced(
-            logits,
-            contact,
-            valid_mask,
-            pos_weight_scale=self.pos_weight_scale,
-            label_smoothing=self.label_smoothing,
-        )
-
-        # Optional Tversky loss
-        if self.use_tversky:
-            loss_tversky = masked_focal_tversky(
+        if self.distogram:
+            # ── Distogram mode: CE loss over distance bins ──
+            dist_target = batch["dist_target"].to(self.device)  # (B, Lmax, Lmax) int64
+            loss = masked_ce_distogram(
+                logits, dist_target, valid_mask,
+                label_smoothing=self.label_smoothing,
+            )
+        else:
+            # ── Binary mode: BCE loss ──
+            loss_bce = masked_bce_balanced(
                 logits,
                 contact,
                 valid_mask,
-                alpha=self.tversky_alpha,
-                beta=self.tversky_beta,
-                gamma=self.tversky_gamma,
+                pos_weight_scale=self.pos_weight_scale,
+                label_smoothing=self.label_smoothing,
             )
-            loss = loss_bce + self.tversky_weight * loss_tversky
-        else:
-            loss = loss_bce
+
+            # Optional Tversky loss
+            if self.use_tversky:
+                loss_tversky = masked_focal_tversky(
+                    logits,
+                    contact,
+                    valid_mask,
+                    alpha=self.tversky_alpha,
+                    beta=self.tversky_beta,
+                    gamma=self.tversky_gamma,
+                )
+                loss = loss_bce + self.tversky_weight * loss_tversky
+            else:
+                loss = loss_bce
 
         if stage != "train" or self.trainer.global_step % 10 == 0:
             with torch.no_grad():
-                prob = torch.sigmoid(logits)
+                if self.distogram:
+                    # Derive contact probability: sum softmax probs for bins < 8Å
+                    dist_probs = torch.softmax(logits, dim=1)  # (B, N, L, L)
+                    prob = dist_probs[:, :self.contact_bin_threshold].sum(dim=1, keepdim=True)  # (B, 1, L, L)
+                else:
+                    prob = torch.sigmoid(logits)
                 pL = precision_at_k_masked(prob, contact, valid_mask, k_mode="L")
                 pL2 = precision_at_k_masked(prob, contact, valid_mask, k_mode="L/2")
                 pL5 = precision_at_k_masked(prob, contact, valid_mask, k_mode="L/5")
@@ -432,7 +452,11 @@ class ContactLitModule(LightningModule):
         viz_cache = None
         if return_visualization:
             with torch.no_grad():
-                prob = torch.sigmoid(logits)
+                if self.distogram:
+                    dist_probs = torch.softmax(logits, dim=1)
+                    prob = dist_probs[:, :self.contact_bin_threshold].sum(dim=1, keepdim=True)
+                else:
+                    prob = torch.sigmoid(logits)
             
             # Get subset info from batch (if available)
             subsets = batch.get("subset", ["all"] * len(pids))
@@ -1250,10 +1274,9 @@ class ContactLitModule(LightningModule):
                 n_dist_bins=self.hparams.get("n_dist_bins", 0),
             )
         pb = self._prior_builder
-        p_np, c_np, d_np, conf_np = pb.build_one(pid, seq, 0, L)
+        p_np, c_np, d_np = pb.build_one(pid, seq, 0, L)
         prior = torch.from_numpy(p_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         count = torch.from_numpy(c_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
-        tpl_conf = torch.from_numpy(conf_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         dist_bins = None
         if d_np.shape[0] > 0:
             dist_bins = torch.from_numpy(d_np).float().unsqueeze(0).to(self.device)  # (1,N,L,L)
@@ -1281,9 +1304,12 @@ class ContactLitModule(LightningModule):
         with torch.no_grad():
             logits = self.net(h, prior, count, rel, esm_contacts,
                               pair_mask=pair_mask.unsqueeze(0).unsqueeze(0),
-                              dist_bins=dist_bins,
-                              tpl_conf=tpl_conf)  # (1, 1, L, L)
-            probs = torch.sigmoid(logits[0, 0])  # (L, L)
+                              dist_bins=dist_bins)  # (1, n_out, L, L)
+            if self.distogram:
+                dist_probs = torch.softmax(logits, dim=1)  # (1, N, L, L)
+                probs = dist_probs[0, :self.contact_bin_threshold].sum(dim=0)  # (L, L)
+            else:
+                probs = torch.sigmoid(logits[0, 0])  # (L, L)
             binary = (probs >= threshold).float()  # (L, L)
 
         result = {

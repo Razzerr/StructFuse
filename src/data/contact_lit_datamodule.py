@@ -13,6 +13,7 @@ from src.data.components.dataset import (
     ClusterBucketBatchSampler,
     ClusterTrainValSampler,
     ListBatchSampler,
+    DIST_EDGES,
 )
 from src.utils import RankedLogger
 
@@ -80,6 +81,8 @@ class ContactDataModule(LightningDataModule):
         n_dist_bins: int = 0,
         # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
         esm_embeddings_dir: Optional[str] = None,
+        # Distogram output: compute ground-truth distance bin targets
+        distogram: bool = False,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -118,6 +121,7 @@ class ContactDataModule(LightningDataModule):
         self.max_tpl_cache = int(max_tpl_cache)
         self.n_dist_bins = int(n_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
+        self.distogram = bool(distogram)
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -322,6 +326,7 @@ class ContactDataModule(LightningDataModule):
             seed=rng_seed,
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
+            dist_edges=DIST_EDGES if self.distogram else None,
         )
 
     def _collate_eval(self, batch):
@@ -335,6 +340,7 @@ class ContactDataModule(LightningDataModule):
             seed=42,  # fixed seed for reproducibility
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
+            dist_edges=DIST_EDGES if self.distogram else None,
         )
         
     def _dl_kwargs(self, collate_fn=None):

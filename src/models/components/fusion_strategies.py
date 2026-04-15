@@ -249,7 +249,7 @@ class StandardFusion(nn.Module):
     def __init__(self, d_pair: int, d_rel: int, n_dist_bins: int = 0):
         super().__init__()
         self.n_dist_bins = n_dist_bins
-        tpl_in = 3 + n_dist_bins  # prior + count + tpl_conf + dist_bins
+        tpl_in = 2 + n_dist_bins  # prior + count + dist_bins
         
         # ESM semantic encoder: combines pair_feat + optional esm_contacts
         esm_in_channels = d_pair + 1
@@ -275,7 +275,6 @@ class StandardFusion(nn.Module):
         rel: torch.Tensor,
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
-        tpl_conf: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -285,7 +284,6 @@ class StandardFusion(nn.Module):
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            tpl_conf: (B, 1, L, L) template alignment confidence (optional)
             
         Returns:
             (B, out_channels, L, L) fused features
@@ -295,12 +293,10 @@ class StandardFusion(nn.Module):
         esm_semantic = self.esm_proj(esm_semantic)  # (B, d_pair, L, L)
         
         # Build template feature tensor
-        if tpl_conf is None:
-            tpl_conf = torch.zeros_like(prior)
-        tpl_parts = [prior, count, tpl_conf]
+        tpl_parts = [prior, count]
         if dist_bins is not None:
             tpl_parts.append(dist_bins)
-        tpl_feat = torch.cat(tpl_parts, dim=1)  # (B, 3+N, L, L)
+        tpl_feat = torch.cat(tpl_parts, dim=1)  # (B, 2+N, L, L)
         
         # Compute gate from template features
         gate = torch.sigmoid(self.gate_conv(tpl_feat))  # (B, 1, L, L)
@@ -350,7 +346,7 @@ class TruForFusion(nn.Module):
     ):
         super().__init__()
         self.n_dist_bins = n_dist_bins
-        tpl_in = 3 + n_dist_bins  # prior + count + tpl_conf + dist_bins
+        tpl_in = 2 + n_dist_bins  # prior + count + dist_bins
         
         # ESM semantic stream encoder: [pair_feat, optional esm_contacts] -> d_pair
         esm_in_channels = d_pair + 1
@@ -391,7 +387,6 @@ class TruForFusion(nn.Module):
         rel: torch.Tensor,
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
-        tpl_conf: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -401,7 +396,6 @@ class TruForFusion(nn.Module):
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            tpl_conf: (B, 1, L, L) template alignment confidence (optional)
             
         Returns:
             (B, out_channels, L, L) cross-fused features
@@ -411,12 +405,10 @@ class TruForFusion(nn.Module):
         esm_feat = self.esm_encoder(esm_input)  # (B, d_pair, L, L)
         
         # Build Stream 2: Template fingerprint (measured from structures)
-        if tpl_conf is None:
-            tpl_conf = torch.zeros_like(prior)
-        tpl_parts = [prior, count, tpl_conf]
+        tpl_parts = [prior, count]
         if dist_bins is not None:
             tpl_parts.append(dist_bins)
-        template_input = torch.cat(tpl_parts, dim=1)  # (B, 3+N, L, L)
+        template_input = torch.cat(tpl_parts, dim=1)  # (B, 2+N, L, L)
         template_feat = self.template_encoder(template_input)  # (B, d_pair, L, L)
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint

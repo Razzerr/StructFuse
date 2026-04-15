@@ -13,6 +13,11 @@ from src.utils import pylogger
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
+# Standard distance bin edges (Å) shared between template features and distogram targets
+DIST_EDGES = [5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0]
+N_DIST_CLASSES = len(DIST_EDGES) + 1  # 8 bins: <5, 5-6, 6-7, 7-8, 8-10, 10-15, 15-20, >20
+CONTACT_BIN_THRESHOLD = 4  # bins 0..3 correspond to <8Å (contact)
+
 
 def _load_npz_with_retry(path, retries: int = 3, **kwargs):
     """Load an NPZ file with retries to handle transient NFS errors."""
@@ -125,9 +130,8 @@ class PriorBuilder:
         """Build aggregated template prior for one sample.
 
         Returns:
-            ``(prior, count, dist_bins, tpl_conf)`` – two ``(Lc, Lc)`` float32
-            arrays, one ``(n_dist_bins, Lc, Lc)`` float32 array, and one
-            ``(Lc, Lc)`` float32 confidence array.
+            ``(prior, count, dist_bins)`` – two ``(Lc, Lc)`` float32
+            arrays and one ``(n_dist_bins, Lc, Lc)`` float32 array.
         """
         from src.data.utils.align import (
             project_prior, needleman_wunsch, _BLOSUM_MATRIX, _AA_TO_IDX,
@@ -141,7 +145,6 @@ class PriorBuilder:
             np.zeros((Lc, Lc), np.float32),
             np.zeros((Lc, Lc), np.float32),
             np.zeros((N, Lc, Lc), np.float32),
-            np.zeros((Lc, Lc), np.float32),
         )
 
         if self.topk <= 0:
@@ -164,7 +167,6 @@ class PriorBuilder:
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
         dist_acc = np.zeros((N, Lc, Lc), dtype=np.float32) if N > 0 else None
-        conf_acc = np.zeros((Lc, Lc), dtype=np.float32)
 
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
@@ -200,30 +202,11 @@ class PriorBuilder:
             prior_acc += wk * Pk_val
             count_acc += cnt
 
-            # ── Alignment (shared by dist_bins + confidence) ──
-            _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
-            valid_q = np.where(q2t >= 0)[0]
-            valid_t = q2t[valid_q]
-
-            # ── Per-position alignment confidence ──
-            if len(valid_q) > 1:
-                q_aa_idx = np.array(
-                    [_AA_TO_IDX.get(crop_seq[i], 0) for i in valid_q],
-                    dtype=np.intp,
-                )
-                t_aa_idx = np.array(
-                    [_AA_TO_IDX.get(tpl["seq"][j], 0) for j in valid_t],
-                    dtype=np.intp,
-                )
-                per_pos = _BLOSUM_MATRIX[q_aa_idx, t_aa_idx]  # (M,) in [0,1]
-                pair_conf = per_pos[:, None] * per_pos[None, :]  # (M, M)
-                if self.min_seq_sep > 0:
-                    qi, qj = np.meshgrid(valid_q, valid_q, indexing="ij")
-                    pair_conf[np.abs(qi - qj) < self.min_seq_sep] = 0.0
-                conf_acc[np.ix_(valid_q, valid_q)] += wk * pair_conf
-
             # ── Distance bins ──
             if N > 0 and "coords" in tpl and "mask" in tpl:
+                _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
+                valid_q = np.where(q2t >= 0)[0]
+                valid_t = q2t[valid_q]
                 tpl_coords = tpl["coords"]  # (Lt, 3)
                 tpl_mask = tpl["mask"]       # (Lt,)
 
@@ -254,7 +237,6 @@ class PriorBuilder:
             prior_acc,
             count_acc,
             dist_acc if dist_acc is not None else np.zeros((0, Lc, Lc), np.float32),
-            conf_acc,
         )
 
 
@@ -441,6 +423,7 @@ class ContactDataset(Dataset):
 
             contact = data["contact"].astype(np.uint8)  # (L, L)
             mask = data["mask"].astype(np.uint8)  # (L,) - 1 if CA present
+            coords = data["coords"].astype(np.float32)  # (L, 3) Cα coords
             L = int(data["L"])
             subset = self._get_subset(pid)
         finally:
@@ -451,6 +434,7 @@ class ContactDataset(Dataset):
             "seq": seq,
             "contact": contact,
             "mask": mask,
+            "coords": coords,
             "L": L,
             "subset": subset,
         }
@@ -483,6 +467,7 @@ def collate_padded(
     include_diagonal: bool = False,  # usually set diagonal to 0 in pair masks
     prior_builder: Optional[PriorBuilder] = None,
     esm_embeddings_dir: Optional[Path] = None,
+    dist_edges: Optional[List[float]] = None,  # distogram target bin edges (e.g. [5,6,7,8,10,15,20])
 ) -> Dict[str, torch.Tensor]:
     """
     Collate function with cropping and padding to batch max length.
@@ -535,6 +520,7 @@ def collate_padded(
                 "subset": item.get("subset", SUBSET_ALL),
                 "contact": item["contact"][crop_start:crop_end, crop_start:crop_end],
                 "mask": item["mask"][crop_start:crop_end],
+                "coords": item["coords"][crop_start:crop_end],  # (Lc, 3) Cα
                 "L": crop_end - crop_start,
                 "crop_bounds": (crop_start, crop_end),
             }
@@ -596,26 +582,39 @@ def collate_padded(
     if prior_builder is not None:
         prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
-        tpl_conf = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         N = prior_builder.n_dist_bins
         dist_bins = torch.zeros((B, N, Lmax, Lmax), dtype=torch.float32) if N > 0 else None
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
-            p_np, c_np, d_np, conf_np = prior_builder.build_one(
+            p_np, c_np, d_np = prior_builder.build_one(
                 item["pid"], item["seq"], cb[0], cb[1]
             )
             L_use = min(Lc, Lmax)
             prior[b, 0, :L_use, :L_use] = torch.from_numpy(p_np[:L_use, :L_use])
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
-            tpl_conf[b, 0, :L_use, :L_use] = torch.from_numpy(conf_np[:L_use, :L_use])
             if N > 0:
                 dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(d_np[:, :L_use, :L_use])
         batch_out["prior"] = prior
         batch_out["count"] = count
-        batch_out["tpl_conf"] = tpl_conf
         if dist_bins is not None:
             batch_out["dist_bins"] = dist_bins
+
+    # ── Ground-truth distogram targets (binned Cα-Cα distances) ──
+    if dist_edges is not None:
+        edges_t = torch.tensor(dist_edges, dtype=torch.float32)  # (n_edges,)
+        n_bins = len(dist_edges) + 1  # last bin = beyond final edge
+        dist_target = torch.full((B, Lmax, Lmax), n_bins - 1, dtype=torch.long)  # default: farthest bin
+        for b, item in enumerate(cropped):
+            Lc = item["L"]
+            coords_b = torch.from_numpy(item["coords"][:Lc].astype(np.float32))  # (Lc, 3)
+            # Cα-Cα distance matrix
+            diff = coords_b.unsqueeze(0) - coords_b.unsqueeze(1)  # (Lc, Lc, 3)
+            dmat = torch.sqrt((diff ** 2).sum(-1) + 1e-8)  # (Lc, Lc)
+            # Bin: bucketize returns index of first edge >= value
+            bins_b = torch.bucketize(dmat, edges_t)  # (Lc, Lc) in [0, n_bins-1]
+            dist_target[b, :Lc, :Lc] = bins_b
+        batch_out["dist_target"] = dist_target  # (B, Lmax, Lmax) int64
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

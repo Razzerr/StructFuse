@@ -215,7 +215,7 @@ class TemplateOnlyLitModule(LightningModule):
             Lmax = contact.shape[-1]
             priors, counts = [], []
             for pid, seq, bounds in zip(pids, seqs, crop_bounds):
-                p_np, c_np, _d_np, _conf_np = self._prior_builder.build_one(
+                p_np, c_np, _d_np = self._prior_builder.build_one(
                     pid, seq, bounds[0].item(), bounds[1].item()
                 )
                 # Pad to Lmax

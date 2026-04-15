@@ -32,6 +32,7 @@ class ContactModel(torch.nn.Module):
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
         n_dist_bins: int = 0,
+        n_out: int = 1,  # 1 for binary contact, N for distogram
         head_type: str = "cnn",
         head_num_heads: int = 8,
         head_num_kv_heads: int = None,
@@ -51,6 +52,7 @@ class ContactModel(torch.nn.Module):
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
             n_dist_bins=n_dist_bins,
+            n_out=n_out,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,
@@ -59,7 +61,7 @@ class ContactModel(torch.nn.Module):
             use_checkpoint=use_checkpoint,
         )
 
-    def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None, tpl_conf=None):
+    def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None):
         """
         Args:
             h_esm: (B, L, d_esm) ESM2 embeddings
@@ -69,7 +71,6 @@ class ContactModel(torch.nn.Module):
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            tpl_conf: (B, 1, L, L) template alignment confidence (optional)
             
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -78,5 +79,5 @@ class ContactModel(torch.nn.Module):
         pair_feat = self.pair(h_esm)  # (B, d_pair, L, L)
         
         # Pass to fusion head
-        logits = self.head(pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts, pair_mask=pair_mask, dist_bins=dist_bins, tpl_conf=tpl_conf)
+        logits = self.head(pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts, pair_mask=pair_mask, dist_bins=dist_bins)
         return logits

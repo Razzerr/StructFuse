@@ -110,3 +110,22 @@ def masked_focal_tversky(
     focal_tversky = (1 - tversky_index).pow(gamma)
     
     return focal_tversky
+
+
+def masked_ce_distogram(
+    logits: torch.Tensor,          # (B, N, L, L) distogram logits
+    targets: torch.Tensor,         # (B, L, L) int64 bin indices in [0, N-1]
+    mask: torch.Tensor,            # (B, L, L) in {0, 1}
+    *,
+    label_smoothing: float = 0.0,
+) -> torch.Tensor:
+    """Cross-entropy loss over distance bins, masked to valid pairs."""
+    # targets: (B, L, L) long  |  logits: (B, N, L, L)
+    B, N, L, _ = logits.shape
+    m = mask.float()
+    denom = m.sum().clamp_min(1.0)
+
+    # F.cross_entropy expects (B, C, ...) logits and (B, ...) targets
+    loss = F.cross_entropy(logits, targets, reduction="none",
+                           label_smoothing=label_smoothing)  # (B, L, L)
+    return (loss * m).sum() / denom

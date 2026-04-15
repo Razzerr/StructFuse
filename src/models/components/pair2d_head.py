@@ -288,6 +288,7 @@ class Pair2DHead(nn.Module):
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
         n_dist_bins: int = 0,
+        n_out: int = 1,  # 1 for binary contact, N for distogram
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
@@ -346,16 +347,15 @@ class Pair2DHead(nn.Module):
             raise ValueError(f"Unknown head_type: {head_type}. Must be 'cnn', 'dilated', or 'axial'")
         
         # Output projection
-        self.out = nn.Conv2d(width, 1, 1)
-        # Prior probability init: contacts are ~5% of valid pairs.
-        # bias = log(π/(1-π)) ≈ -2.94 so initial sigmoid ≈ 0.05.
-        # This lets the model learn to push contacts UP from a low base,
-        # rather than learning to suppress 95% of pairs from 0.5.
-        # (RetinaNet, Lin et al. 2017)
-        import math
-        nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
+        self.n_out = n_out
+        self.out = nn.Conv2d(width, n_out, 1)
+        if n_out == 1:
+            # Prior probability init for binary contact: contacts ~5% of valid pairs.
+            # bias = log(π/(1-π)) ≈ -2.94 so initial sigmoid ≈ 0.05.
+            import math
+            nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None, tpl_conf=None):
+    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None):
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features
@@ -365,13 +365,12 @@ class Pair2DHead(nn.Module):
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            tpl_conf: (B, 1, L, L) template alignment confidence (optional)
             
         Returns:
-            logits: (B, 1, L, L) contact prediction logits
+            logits: (B, n_out, L, L) contact/distogram logits
         """
         # Apply fusion strategy
-        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins, tpl_conf=tpl_conf)
+        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins)
         
         # Processing
         x = self.inp(x)
@@ -384,7 +383,7 @@ class Pair2DHead(nn.Module):
         else:
             for block in self.blocks:
                 x = block(x)
-        logits = self.out(x)  # (B, 1, L, L)
+        logits = self.out(x)  # (B, n_out, L, L)
         
         # Enforce symmetry
         logits = 0.5 * (logits + logits.transpose(-1, -2))
