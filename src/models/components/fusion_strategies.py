@@ -254,7 +254,9 @@ class TemplateEmbedder(nn.Module):
         self.mlp_struct = nn.Sequential(
             nn.Conv2d(2, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
         )
-        self.gate_struct = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+        # Zero-init last layer → template stream starts at exactly 0 (like baseline)
+        nn.init.zeros_(self.mlp_struct[-1].weight)
+        nn.init.zeros_(self.mlp_struct[-1].bias)
 
         # Group 2 – distance bins (optional)
         self.has_dist = n_dist_bins > 0
@@ -262,7 +264,8 @@ class TemplateEmbedder(nn.Module):
             self.mlp_dist = nn.Sequential(
                 nn.Conv2d(n_dist_bins, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
             )
-            self.gate_dist = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+            nn.init.zeros_(self.mlp_dist[-1].weight)
+            nn.init.zeros_(self.mlp_dist[-1].bias)
 
         # Group 3 – SS-pair features (optional)
         self.has_ss = n_ss_feat > 0
@@ -270,7 +273,8 @@ class TemplateEmbedder(nn.Module):
             self.mlp_ss = nn.Sequential(
                 nn.Conv2d(n_ss_feat, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
             )
-            self.gate_ss = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+            nn.init.zeros_(self.mlp_ss[-1].weight)
+            nn.init.zeros_(self.mlp_ss[-1].bias)
 
     def forward(
         self,
@@ -287,28 +291,22 @@ class TemplateEmbedder(nn.Module):
         """
         struct_in = torch.cat([prior, count / 4.0], dim=1)  # (B, 2, L, L)  count normalised to [0,1]
         h_struct = self.mlp_struct(struct_in)
-        g_struct = torch.sigmoid(self.gate_struct)
-        h = g_struct * h_struct
+        h = h_struct
 
-        h_dist = g_dist = None
+        h_dist = None
         if self.has_dist and dist_bins is not None:
             h_dist = self.mlp_dist(dist_bins)
-            g_dist = torch.sigmoid(self.gate_dist)
-            h = h + g_dist * h_dist
+            h = h + h_dist
 
-        h_ss = g_ss = None
+        h_ss = None
         if self.has_ss and ss_feat is not None:
             h_ss = self.mlp_ss(ss_feat)
-            g_ss = torch.sigmoid(self.gate_ss)
-            h = h + g_ss * h_ss
+            h = h + h_ss
 
         if not return_intermediates:
             return h
 
         diag = {
-            "gate_struct": g_struct.mean().item(),
-            "gate_dist": g_dist.mean().item() if g_dist is not None else 0.0,
-            "gate_ss": g_ss.mean().item() if g_ss is not None else 0.0,
             "h_struct_norm": h_struct.norm().item(),
             "h_dist_norm": h_dist.norm().item() if h_dist is not None else 0.0,
             "h_ss_norm": h_ss.norm().item() if h_ss is not None else 0.0,
