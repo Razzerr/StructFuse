@@ -83,6 +83,8 @@ class ContactDataModule(LightningDataModule):
         esm_embeddings_dir: Optional[str] = None,
         # Distogram output: compute ground-truth distance bin targets
         distogram: bool = False,
+        # Template SS-pair features
+        use_ss_feat: bool = False,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -122,6 +124,7 @@ class ContactDataModule(LightningDataModule):
         self.n_dist_bins = int(n_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
         self.distogram = bool(distogram)
+        self.use_ss_feat = bool(use_ss_feat)
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -282,6 +285,7 @@ class ContactDataModule(LightningDataModule):
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
                     n_dist_bins=self.n_dist_bins,
+                    use_ss_feat=self.use_ss_feat,
                 )
 
         if stage == "test" or stage is None:
@@ -312,6 +316,7 @@ class ContactDataModule(LightningDataModule):
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
                     n_dist_bins=self.n_dist_bins,
+                    use_ss_feat=self.use_ss_feat,
                 )
 
     def _collate_train(self, batch):

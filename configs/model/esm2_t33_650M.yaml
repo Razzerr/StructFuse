@@ -49,6 +49,7 @@ tversky_gamma: 1.0         # Focal modulation strength
 
 max_tpl_cache: 1000
 n_dist_bins: 8
+n_ss_feat: 3  # template SS-pair channels (helix-helix, strand-strand, coil-coil)
 distogram: true
 cb_beta: 0.999  # Effective-number class balancing (Cui et al. 2019)
 

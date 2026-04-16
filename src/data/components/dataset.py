@@ -18,6 +18,36 @@ DIST_EDGES = [5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0]
 N_DIST_CLASSES = len(DIST_EDGES) + 1  # 8 bins: <5, 5-6, 6-7, 7-8, 8-10, 10-15, 15-20, >20
 CONTACT_BIN_THRESHOLD = 4  # bins 0..3 correspond to <8Å (contact)
 
+# SS3 classes for template secondary structure features
+SS_COIL, SS_HELIX, SS_STRAND = 0, 1, 2
+N_SS3 = 3  # number of SS classes
+
+
+def _ca_to_ss3(coords: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Assign 3-state SS from Cα coordinates.
+
+    Heuristic based on Cα_i → Cα_{i+3} distance:
+      - α-helix:  d(i, i+3) < 6.0 Å  (3.6 res/turn, ~5.5 Å pitch)
+      - β-strand: d(i, i+3) > 9.5 Å  (extended backbone ~3.3 Å/res)
+      - coil:     everything else
+
+    Returns (L,) uint8 with 0=coil, 1=helix, 2=strand.
+    """
+    L = len(coords)
+    ss = np.zeros(L, dtype=np.uint8)
+    for i in range(L - 3):
+        if not (mask[i] and mask[i + 1] and mask[i + 2] and mask[i + 3]):
+            continue
+        d = np.linalg.norm(coords[i] - coords[i + 3])
+        if d < 6.0:
+            for j in range(i, i + 4):
+                if ss[j] == SS_COIL:
+                    ss[j] = SS_HELIX
+        elif d > 9.5:
+            for j in range(i, i + 4):
+                ss[j] = SS_STRAND  # strand overrides coil but not helix
+    return ss
+
 
 def _load_npz_with_retry(path, retries: int = 3, **kwargs):
     """Load an NPZ file with retries to handle transient NFS errors."""
@@ -70,6 +100,7 @@ class PriorBuilder:
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
         n_dist_bins: int = 0,
+        use_ss_feat: bool = False,
     ):
         from src.models.utils.faiss import FaissIndex
 
@@ -81,6 +112,7 @@ class PriorBuilder:
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
         self.n_dist_bins = int(n_dist_bins)
+        self.use_ss_feat = bool(use_ss_feat)
 
         # Distance bin edges in Ångströms (creates n_dist_bins categories)
         # Default 8 bins: [0-5, 5-6, 6-7, 7-8, 8-10, 10-15, 15-20, 20+]
@@ -110,8 +142,8 @@ class PriorBuilder:
         )
         tC = td["contact"].astype(np.uint8).copy()
         entry = {"seq": tseq, "contact": tC}
-        # Load coordinates for distance binning (if available and requested)
-        if self.n_dist_bins > 0 and "coords" in td and "mask" in td:
+        # Load coordinates for distance binning or SS features (if available)
+        if (self.n_dist_bins > 0 or self.use_ss_feat) and "coords" in td and "mask" in td:
             entry["coords"] = td["coords"].astype(np.float32).copy()
             entry["mask"] = td["mask"].astype(np.uint8).copy()
         td.close()
@@ -130,8 +162,9 @@ class PriorBuilder:
         """Build aggregated template prior for one sample.
 
         Returns:
-            ``(prior, count, dist_bins)`` – two ``(Lc, Lc)`` float32
-            arrays and one ``(n_dist_bins, Lc, Lc)`` float32 array.
+            ``(prior, count, dist_bins, ss_feat)`` – two ``(Lc, Lc)`` float32
+            arrays, one ``(n_dist_bins, Lc, Lc)`` float32 array, and one
+            ``(N_SS3, Lc, Lc)`` float32 array (or empty if ``use_ss_feat=False``).
         """
         from src.data.utils.align import (
             project_prior, needleman_wunsch, _BLOSUM_MATRIX, _AA_TO_IDX,
@@ -140,11 +173,13 @@ class PriorBuilder:
         Lc = crop_end - crop_start
         crop_seq = full_seq[crop_start:crop_end]
         N = self.n_dist_bins
+        S = N_SS3 if self.use_ss_feat else 0
 
         _zeros = (
             np.zeros((Lc, Lc), np.float32),
             np.zeros((Lc, Lc), np.float32),
             np.zeros((N, Lc, Lc), np.float32),
+            np.zeros((S, Lc, Lc), np.float32),
         )
 
         if self.topk <= 0:
@@ -167,6 +202,7 @@ class PriorBuilder:
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
         dist_acc = np.zeros((N, Lc, Lc), dtype=np.float32) if N > 0 else None
+        ss_acc = np.zeros((S, Lc, Lc), dtype=np.float32) if S > 0 else None
 
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
@@ -233,10 +269,41 @@ class PriorBuilder:
                             layer[close_q] = 0.0
                         dist_acc[b][np.ix_(dist_valid_q, dist_valid_q)] += wk * layer
 
+            # ── SS-pair features ──
+            # Reuse alignment mapping from distance bins if available,
+            # otherwise compute it (cheap – NW is called once per template).
+            if S > 0 and "coords" in tpl and "mask" in tpl:
+                if N <= 0:
+                    # alignment wasn't computed above (no dist_bins)
+                    _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
+                    valid_q = np.where(q2t >= 0)[0]
+                    valid_t = q2t[valid_q]
+                    tpl_mask = tpl["mask"]
+                    has_coord = tpl_mask[valid_t].astype(bool)
+                    ss_valid_q = valid_q[has_coord]
+                    ss_valid_t = valid_t[has_coord]
+                else:
+                    # reuse alignment from distance bins block
+                    ss_valid_q = dist_valid_q
+                    ss_valid_t = dist_valid_t
+
+                if len(ss_valid_q) > 1:
+                    tpl_ss = _ca_to_ss3(tpl["coords"], tpl["mask"])  # (Lt,)
+                    ss_proj = tpl_ss[ss_valid_t]  # (M,) SS labels for aligned query positions
+                    # One-hot encode: (N_SS3, M)
+                    ss_oh = np.zeros((N_SS3, len(ss_proj)), dtype=np.float32)
+                    for c in range(N_SS3):
+                        ss_oh[c] = (ss_proj == c).astype(np.float32)
+                    # Outer product per SS class: ss_c_i * ss_c_j
+                    for c in range(N_SS3):
+                        outer = np.outer(ss_oh[c], ss_oh[c])  # (M, M)
+                        ss_acc[c][np.ix_(ss_valid_q, ss_valid_q)] += wk * outer
+
         return (
             prior_acc,
             count_acc,
             dist_acc if dist_acc is not None else np.zeros((0, Lc, Lc), np.float32),
+            ss_acc if ss_acc is not None else np.zeros((0, Lc, Lc), np.float32),
         )
 
 
@@ -583,11 +650,13 @@ def collate_padded(
         prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         N = prior_builder.n_dist_bins
+        S = N_SS3 if prior_builder.use_ss_feat else 0
         dist_bins = torch.zeros((B, N, Lmax, Lmax), dtype=torch.float32) if N > 0 else None
+        ss_feat = torch.zeros((B, S, Lmax, Lmax), dtype=torch.float32) if S > 0 else None
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
-            p_np, c_np, d_np = prior_builder.build_one(
+            p_np, c_np, d_np, s_np = prior_builder.build_one(
                 item["pid"], item["seq"], cb[0], cb[1]
             )
             L_use = min(Lc, Lmax)
@@ -595,10 +664,14 @@ def collate_padded(
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
             if N > 0:
                 dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(d_np[:, :L_use, :L_use])
+            if S > 0:
+                ss_feat[b, :, :L_use, :L_use] = torch.from_numpy(s_np[:, :L_use, :L_use])
         batch_out["prior"] = prior
         batch_out["count"] = count
         if dist_bins is not None:
             batch_out["dist_bins"] = dist_bins
+        if ss_feat is not None:
+            batch_out["ss_feat"] = ss_feat
 
     # ── Ground-truth distogram targets (binned Cα-Cα distances) ──
     if dist_edges is not None:

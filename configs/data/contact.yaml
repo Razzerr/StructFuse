@@ -45,6 +45,9 @@ n_dist_bins: 8
 # Distogram output: ground-truth distance bin targets for CE loss
 distogram: true
 
+# Template SS-pair features (secondary structure outer product from Cα coords)
+use_ss_feat: true
+
 # Precomputed ESM2 embeddings (skip frozen ESM2 forward during training)
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
 esm_embeddings_dir: data/precomputed/esm_t6_8M

@@ -59,6 +59,7 @@ class ContactLitModule(LightningModule):
         tversky_gamma: float = 1.0,
         max_tpl_cache: int = 1000,
         n_dist_bins: int = 0,
+        n_ss_feat: int = 0,
         # Distogram output: predict distance bins instead of binary contacts
         distogram: bool = False,
         cb_beta: float = 0.0,  # Effective-number class balancing for distogram (0=off, 0.999=strong)
@@ -103,6 +104,7 @@ class ContactLitModule(LightningModule):
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
             n_dist_bins=n_dist_bins,
+            n_ss_feat=n_ss_feat,
             n_out=self.n_dist_classes,
             head_type=head_type,
             head_num_heads=head_num_heads,
@@ -334,6 +336,9 @@ class ContactLitModule(LightningModule):
         dist_bins = batch.get("dist_bins")       # (B, N, Lmax, Lmax) or None
         if dist_bins is not None:
             dist_bins = dist_bins.to(self.device)
+        ss_feat = batch.get("ss_feat")           # (B, S, Lmax, Lmax) or None
+        if ss_feat is not None:
+            ss_feat = ss_feat.to(self.device)
 
         # Batched ESM2 forward — single call for all samples
         # If precomputed embeddings are in the batch, skip ESM2 entirely
@@ -350,7 +355,7 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins)
+        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins, ss_feat=ss_feat)
         # logits: (B, n_out, Lmax, Lmax) — n_out=1 binary, n_out=N distogram
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
@@ -1275,14 +1280,18 @@ class ContactLitModule(LightningModule):
                 min_template_similarity=self.hparams.get("min_template_similarity", 0.0),
                 random_retrieval=self.hparams.get("random_retrieval", False),
                 n_dist_bins=self.hparams.get("n_dist_bins", 0),
+                use_ss_feat=self.hparams.get("n_ss_feat", 0) > 0,
             )
         pb = self._prior_builder
-        p_np, c_np, d_np = pb.build_one(pid, seq, 0, L)
+        p_np, c_np, d_np, s_np = pb.build_one(pid, seq, 0, L)
         prior = torch.from_numpy(p_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         count = torch.from_numpy(c_np).float().unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,L,L)
         dist_bins = None
         if d_np.shape[0] > 0:
             dist_bins = torch.from_numpy(d_np).float().unsqueeze(0).to(self.device)  # (1,N,L,L)
+        ss_feat = None
+        if s_np.shape[0] > 0:
+            ss_feat = torch.from_numpy(s_np).float().unsqueeze(0).to(self.device)  # (1,S,L,L)
 
         # Build masks
         rel = relpos_buckets(L, self.device)  # (R, L, L)
@@ -1307,7 +1316,7 @@ class ContactLitModule(LightningModule):
         with torch.no_grad():
             logits = self.net(h, prior, count, rel, esm_contacts,
                               pair_mask=pair_mask.unsqueeze(0).unsqueeze(0),
-                              dist_bins=dist_bins)  # (1, n_out, L, L)
+                              dist_bins=dist_bins, ss_feat=ss_feat)  # (1, n_out, L, L)
             if self.distogram:
                 dist_probs = torch.softmax(logits, dim=1)  # (1, N, L, L)
                 probs = dist_probs[0, :self.contact_bin_threshold].sum(dim=0)  # (L, L)
