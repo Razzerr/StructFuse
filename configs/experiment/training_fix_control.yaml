@@ -11,6 +11,7 @@
 # 4. pos_weight=5: compensate class imbalance without Tversky
 
 defaults:
+  - override /model: esm2_t33_650M
   - override /logger: wandb
 
 task_name: "training_fix_control"

@@ -8,6 +8,7 @@
 # 5. pos_weight=5: compensate class imbalance without Tversky's FP explosion
 
 defaults:
+  - override /model: esm2_t33_650M
   - override /logger: wandb
 
 task_name: "late_fusion"
