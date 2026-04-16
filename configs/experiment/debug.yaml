@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - override /logger: tensorboard
+  - override /logger: wandb
 
 task_name: "debug"
 

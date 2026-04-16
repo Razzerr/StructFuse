@@ -285,7 +285,7 @@ class TemplateEmbedder(nn.Module):
             (B, d_out, L, L) gated-sum template embedding.
             If return_intermediates, also returns dict with per-group stats.
         """
-        struct_in = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
+        struct_in = torch.cat([prior, count / 4.0], dim=1)  # (B, 2, L, L)  count normalised to [0,1]
         h_struct = self.mlp_struct(struct_in)
         g_struct = torch.sigmoid(self.gate_struct)
         h = g_struct * h_struct

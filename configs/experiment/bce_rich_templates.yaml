@@ -1,0 +1,22 @@
+# @package _global_
+#
+# Phase 1 fix: BCE loss + TemplateEmbedder (dist_bins + ss_feat as input features)
+# Tests hypothesis: distogram CE was the root cause of P@L_long regression.
+
+defaults:
+  - override /logger: wandb
+
+task_name: "bce_rich_templates"
+
+tags: ["bce", "rich-templates", "phase1-fix"]
+seed: 42
+
+model:
+  distogram: false
+  cb_beta: 0.0
+  # Keep template input features
+  n_dist_bins: 8
+  n_ss_feat: 3
+  # Diagnostics
+  diagnostic_logging: true
+  diag_every: 25
