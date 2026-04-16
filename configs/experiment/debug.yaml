@@ -23,3 +23,5 @@ model:
   d_pair: 16
   width: 16
   depth: 2
+  diagnostic_logging: true
+  diag_every: 1

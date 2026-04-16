@@ -357,37 +357,51 @@ class Pair2DHead(nn.Module):
             import math
             nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None, ss_feat=None):
-        """
-        Args:
-            pair_feat: (B, d_pair, L, L) pairwise features
-            prior: (B, 1, L, L) prior contact map (signed BLOSUM scores)
-            count: (B, 1, L, L) template coverage count
-            rel: (B, rel_ch, L, L) relative position embeddings
-            esm_contacts: (B, 1, L, L) ESM2 contact predictions
-            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
-            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            ss_feat: (B, n_ss_feat, L, L) template SS-pair features (optional)
-            
-        Returns:
-            logits: (B, n_out, L, L) contact/distogram logits
-        """
+    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None, dist_bins=None, ss_feat=None, return_intermediates=False):
         # Apply fusion strategy
-        x = self.fusion(pair_feat, prior, count, rel, esm_contacts, dist_bins=dist_bins, ss_feat=ss_feat)
+        fusion_out = self.fusion(
+            pair_feat, prior, count, rel, esm_contacts,
+            dist_bins=dist_bins, ss_feat=ss_feat,
+            return_intermediates=return_intermediates,
+        )
+        if return_intermediates:
+            x, diag = fusion_out
+        else:
+            x = fusion_out
+            diag = {}
         
         # Processing
         x = self.inp(x)
         if self.head_type == "axial":
-            for block in self.blocks:
+            for i, block in enumerate(self.blocks):
+                x_in = x
                 if self.use_checkpoint and self.training:
                     x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
                 else:
                     x = block(x, pair_mask=pair_mask)
+                if return_intermediates:
+                    in_norm = x_in.norm().item()
+                    residual_norm = (x - x_in).norm().item()
+                    diag[f"block{i}_in_norm"] = in_norm
+                    diag[f"block{i}_residual_ratio"] = residual_norm / (in_norm + 1e-8)
         else:
-            for block in self.blocks:
+            for i, block in enumerate(self.blocks):
+                x_in = x
                 x = block(x)
-        logits = self.out(x)  # (B, n_out, L, L)
-        
-        # Enforce symmetry
+                if return_intermediates:
+                    in_norm = x_in.norm().item()
+                    residual_norm = (x - x_in).norm().item()
+                    diag[f"block{i}_in_norm"] = in_norm
+                    diag[f"block{i}_residual_ratio"] = residual_norm / (in_norm + 1e-8)
+
+        logits = self.out(x)
         logits = 0.5 * (logits + logits.transpose(-1, -2))
+
+        if return_intermediates:
+            diag["logits_mean"] = logits.mean().item()
+            diag["logits_std"] = logits.std().item()
+            diag["logits_min"] = logits.min().item()
+            diag["logits_max"] = logits.max().item()
+            return logits, diag
+
         return logits

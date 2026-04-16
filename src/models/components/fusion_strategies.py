@@ -278,21 +278,44 @@ class TemplateEmbedder(nn.Module):
         count: torch.Tensor,
         dist_bins: torch.Tensor = None,
         ss_feat: torch.Tensor = None,
-    ) -> torch.Tensor:
+        return_intermediates: bool = False,
+    ):
         """
         Returns:
             (B, d_out, L, L) gated-sum template embedding.
+            If return_intermediates, also returns dict with per-group stats.
         """
         struct_in = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
-        h = torch.sigmoid(self.gate_struct) * self.mlp_struct(struct_in)
+        h_struct = self.mlp_struct(struct_in)
+        g_struct = torch.sigmoid(self.gate_struct)
+        h = g_struct * h_struct
 
+        h_dist = g_dist = None
         if self.has_dist and dist_bins is not None:
-            h = h + torch.sigmoid(self.gate_dist) * self.mlp_dist(dist_bins)
+            h_dist = self.mlp_dist(dist_bins)
+            g_dist = torch.sigmoid(self.gate_dist)
+            h = h + g_dist * h_dist
 
+        h_ss = g_ss = None
         if self.has_ss and ss_feat is not None:
-            h = h + torch.sigmoid(self.gate_ss) * self.mlp_ss(ss_feat)
+            h_ss = self.mlp_ss(ss_feat)
+            g_ss = torch.sigmoid(self.gate_ss)
+            h = h + g_ss * h_ss
 
-        return h  # (B, d_out, L, L)
+        if not return_intermediates:
+            return h
+
+        diag = {
+            "gate_struct": g_struct.mean().item(),
+            "gate_dist": g_dist.mean().item() if g_dist is not None else 0.0,
+            "gate_ss": g_ss.mean().item() if g_ss is not None else 0.0,
+            "h_struct_norm": h_struct.norm().item(),
+            "h_dist_norm": h_dist.norm().item() if h_dist is not None else 0.0,
+            "h_ss_norm": h_ss.norm().item() if h_ss is not None else 0.0,
+            "tpl_emb_mean": h.mean().item(),
+            "tpl_emb_std": h.std().item(),
+        }
+        return h, diag
 
 
 class StandardFusion(nn.Module):
@@ -340,40 +363,38 @@ class StandardFusion(nn.Module):
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
         ss_feat: torch.Tensor = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            pair_feat: (B, d_pair, L, L) pairwise features from PairFeatures
-            prior: (B, 1, L, L) prior contact map (signed BLOSUM scores)
-            count: (B, 1, L, L) template coverage count
-            rel: (B, d_rel, L, L) relative position embeddings
-            esm_contacts: (B, 1, L, L) ESM2 contact predictions
-            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            ss_feat: (B, n_ss_feat, L, L) template SS-pair features (optional)
-            
-        Returns:
-            (B, out_channels, L, L) fused features
-        """
+        return_intermediates: bool = False,
+    ):
         # Build ESM semantic stream (learned from sequences)
-        esm_semantic = torch.cat([pair_feat, esm_contacts], dim=1)  # (B, d_pair+1, L, L)
-        esm_semantic = self.esm_proj(esm_semantic)  # (B, d_pair, L, L)
+        esm_semantic = torch.cat([pair_feat, esm_contacts], dim=1)
+        esm_semantic = self.esm_proj(esm_semantic)
         
         # Template embedding via per-group gated sum
-        tpl_emb = self.tpl_embed(prior, count, dist_bins, ss_feat)  # (B, d_pair, L, L)
+        tpl_out = self.tpl_embed(prior, count, dist_bins, ss_feat,
+                                 return_intermediates=return_intermediates)
+        if return_intermediates:
+            tpl_emb, tpl_diag = tpl_out
+        else:
+            tpl_emb = tpl_out
         
         # Compute spatial gate from template embedding
-        gate = torch.sigmoid(self.gate_conv(tpl_emb))  # (B, 1, L, L)
+        gate = torch.sigmoid(self.gate_conv(tpl_emb))
+        x = esm_semantic + gate * tpl_emb
         
-        # Gated residual: add template information modulated by confidence
-        x = esm_semantic + gate * tpl_emb  # (B, d_pair, L, L)
+        rel_emb = self.rel_proj(rel)
+        x_fused = torch.cat([x, tpl_emb, rel_emb], dim=1)
         
-        # Auxiliary features: concatenate embedded template + relative position
-        rel_emb = self.rel_proj(rel)  # (B, d_rel, L, L)
-        
-        # Final concatenation
-        x_fused = torch.cat([x, tpl_emb, rel_emb], dim=1)  # (B, d_pair+d_pair+d_rel, L, L)
-        
-        return x_fused
+        if not return_intermediates:
+            return x_fused
+
+        diag = tpl_diag
+        diag["esm_feat_norm"] = esm_semantic.norm().item()
+        diag["tpl_feat_norm"] = tpl_emb.norm().item()
+        diag["stream_ratio"] = tpl_emb.norm().item() / (esm_semantic.norm().item() + 1e-8)
+        diag["fusion_gate_mean"] = gate.mean().item()
+        diag["x_fused_mean"] = x_fused.mean().item()
+        diag["x_fused_std"] = x_fused.std().item()
+        return x_fused, diag
 
 
 class TruForFusion(nn.Module):
@@ -444,35 +465,37 @@ class TruForFusion(nn.Module):
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
         ss_feat: torch.Tensor = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            pair_feat: (B, d_pair, L, L) pairwise features from ESM2 (semantic)
-            prior: (B, 1, L, L) prior contact map from templates (fingerprint)
-            count: (B, 1, L, L) template coverage count
-            rel: (B, d_rel, L, L) relative position embeddings
-            esm_contacts: (B, 1, L, L) ESM2 contact predictions
-            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            ss_feat: (B, n_ss_feat, L, L) template SS-pair features (optional)
-            
-        Returns:
-            (B, out_channels, L, L) cross-fused features
-        """
+        return_intermediates: bool = False,
+    ):
         # Build Stream 1: ESM semantic (learned from sequences)
-        esm_input = torch.cat([pair_feat, esm_contacts], dim=1)  # (B, d_pair+1, L, L)
-        esm_feat = self.esm_encoder(esm_input)  # (B, d_pair, L, L)
+        esm_input = torch.cat([pair_feat, esm_contacts], dim=1)
+        esm_feat = self.esm_encoder(esm_input)
         
         # Build Stream 2: Template embedding via per-group gated sum
-        template_feat = self.tpl_embed(prior, count, dist_bins, ss_feat)  # (B, d_pair, L, L)
+        tpl_out = self.tpl_embed(prior, count, dist_bins, ss_feat,
+                                 return_intermediates=return_intermediates)
+        if return_intermediates:
+            template_feat, tpl_diag = tpl_out
+        else:
+            template_feat = tpl_out
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint
-        x_fused = self.ffm(esm_feat, template_feat)  # (B, d_pair, L, L)
+        x_fused = self.ffm(esm_feat, template_feat)
         
         # Add relative position information
-        rel_emb = self.rel_proj(rel)  # (B, d_rel, L, L)
-        x_final = torch.cat([x_fused, rel_emb], dim=1)  # (B, d_pair+d_rel, L, L)
+        rel_emb = self.rel_proj(rel)
+        x_final = torch.cat([x_fused, rel_emb], dim=1)
         
-        return x_final
+        if not return_intermediates:
+            return x_final
+
+        diag = tpl_diag
+        diag["esm_feat_norm"] = esm_feat.norm().item()
+        diag["tpl_feat_norm"] = template_feat.norm().item()
+        diag["stream_ratio"] = template_feat.norm().item() / (esm_feat.norm().item() + 1e-8)
+        diag["x_fused_mean"] = x_final.mean().item()
+        diag["x_fused_std"] = x_final.std().item()
+        return x_final, diag
 
 
 def get_fusion_strategy(

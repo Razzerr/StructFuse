@@ -63,3 +63,7 @@ restart_mult: 2.0       # T_mult: each cycle 2x longer → 500, 1000, 2000, 4000
 restart_decay: 0.75     # Peak LR shrinks each cycle: 100%, 75%, 56%, 42%, ...
 
 compile_model: true
+
+# Diagnostic hooks (off by default, enable in experiment config)
+diagnostic_logging: false
+diag_every: 25

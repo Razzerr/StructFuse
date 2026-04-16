@@ -80,9 +80,14 @@ class ContactLitModule(LightningModule):
         use_checkpoint: bool = False,  # Activation checkpointing for axial attention blocks
         # Test visualizations
         save_test_viz: bool = False,  # Save contact map PNGs during test
+        # Diagnostic hooks
+        diagnostic_logging: bool = False,
+        diag_every: int = 25,
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.diagnostic_logging = bool(diagnostic_logging)
+        self.diag_every = int(diag_every)
 
         self.esm = ESM2Backbone(esm_model, finetune=finetune_esm)
         self.esm_alphabet = self.esm.alphabet
@@ -355,7 +360,37 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1), dist_bins=dist_bins, ss_feat=ss_feat)
+        # Decide whether to collect diagnostics this step
+        _should_diag = (
+            self.diagnostic_logging
+            and stage == "train"
+            and self.trainer.global_step % self.diag_every == 0
+        )
+
+        net_out = self.net(
+            h, prior, count, rel, esm_contacts,
+            pair_mask=pair_mask.unsqueeze(1),
+            dist_bins=dist_bins, ss_feat=ss_feat,
+            return_intermediates=_should_diag,
+        )
+        if _should_diag:
+            logits, diag = net_out
+            # P1: input stats
+            diag["prior_mean"] = prior.mean().item()
+            diag["prior_std"] = prior.std().item()
+            diag["prior_frac_nonzero"] = (prior != 0).float().mean().item()
+            diag["count_mean"] = count.mean().item()
+            diag["esm_contacts_mean"] = esm_contacts.mean().item()
+            if dist_bins is not None:
+                diag["dist_bins_frac_nonzero"] = (dist_bins != 0).float().mean().item()
+            if ss_feat is not None:
+                diag["ss_feat_frac_nonzero"] = (ss_feat != 0).float().mean().item()
+            diag["h_esm_norm"] = h.norm().item()
+            # Log all diag keys
+            for k, v in diag.items():
+                self.log(f"diag/{k}", v, on_step=True, on_epoch=False, prog_bar=False)
+        else:
+            logits = net_out
         # logits: (B, n_out, Lmax, Lmax) — n_out=1 binary, n_out=N distogram
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
@@ -391,6 +426,20 @@ class ContactLitModule(LightningModule):
                 loss = loss_bce + self.tversky_weight * loss_tversky
             else:
                 loss = loss_bce
+
+        # P6: loss-level diagnostics
+        if _should_diag:
+            with torch.no_grad():
+                if self.distogram:
+                    probs = torch.softmax(logits, dim=1)
+                    contact_prob = probs[:, :self.contact_bin_threshold].sum(dim=1)
+                    pred_entropy = -(probs * (probs + 1e-8).log()).sum(dim=1).mean().item()
+                    self.log("diag/pred_entropy", pred_entropy, on_step=True, on_epoch=False)
+                    self.log("diag/contact_prob_mean", contact_prob[valid_mask > 0].mean().item(), on_step=True, on_epoch=False)
+                else:
+                    contact_prob = torch.sigmoid(logits).squeeze(1)
+                    self.log("diag/contact_prob_mean", contact_prob[valid_mask > 0].mean().item(), on_step=True, on_epoch=False)
+                self.log("diag/loss_value", loss.item(), on_step=True, on_epoch=False)
 
         if stage != "train" or self.trainer.global_step % 10 == 0:
             with torch.no_grad():
@@ -516,13 +565,10 @@ class ContactLitModule(LightningModule):
         return loss
 
     def on_before_optimizer_step(self, optimizer):
-        """Log gradient statistics before optimizer step for debugging training stability.
-        
-        Uses vectorized operations with only 3 GPU→CPU syncs total (instead of
-        ~3000 per-param syncs in the naive loop).
-        """
-        if self.trainer.global_step % 50 == 0:
-            # Incremental norm — avoids allocating one huge flat tensor for all grads
+        """Log gradient statistics before optimizer step."""
+        step = self.trainer.global_step
+        if step % 50 == 0:
+            # Global gradient norm
             total_norm_sq = 0.0
             has_nan = False
             has_inf = False
@@ -542,6 +588,26 @@ class ContactLitModule(LightningModule):
             if has_nan or has_inf:
                 self.log("train/grad_has_nan", float(has_nan), on_step=True, on_epoch=False)
                 self.log("train/grad_has_inf", float(has_inf), on_step=True, on_epoch=False)
+
+        # P7: per-module gradient norms
+        if self.diagnostic_logging and step % self.diag_every == 0:
+            module_norms = {}
+            for name, module in self.net.named_modules():
+                # Only track leaf-ish submodules (1 level below net)
+                parts = name.split(".")
+                if len(parts) not in (1, 2):
+                    continue
+                norm_sq = 0.0
+                n_params = 0
+                for p in module.parameters():
+                    if p.grad is not None:
+                        norm_sq += p.grad.detach().norm(2).item() ** 2
+                        n_params += 1
+                if n_params > 0:
+                    module_norms[name] = norm_sq ** 0.5
+            for name, norm in module_norms.items():
+                safe_name = name.replace(".", "/")
+                self.log(f"grad/{safe_name}", norm, on_step=True, on_epoch=False)
 
     def _find_optimal_threshold(
         self, prob: torch.Tensor, target: torch.Tensor, mask: torch.Tensor

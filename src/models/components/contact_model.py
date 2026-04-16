@@ -63,24 +63,18 @@ class ContactModel(torch.nn.Module):
             use_checkpoint=use_checkpoint,
         )
 
-    def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None, ss_feat=None):
-        """
-        Args:
-            h_esm: (B, L, d_esm) ESM2 embeddings
-            prior: (B, 1, L, L) prior contact map from templates
-            count: (B, 1, L, L) template count
-            rel: (B, rel_ch, L, L) relative position embeddings
-            esm_contacts: (B, 1, L, L) ESM2 contact predictions
-            pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
-            dist_bins: (B, n_dist_bins, L, L) template distance bins (optional)
-            ss_feat: (B, n_ss_feat, L, L) template SS-pair features (optional)
-            
-        Returns:
-            logits: (B, 1, L, L) contact prediction logits
-        """
+    def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None, ss_feat=None, return_intermediates=False):
         # Generate pairwise features from ESM2 embeddings
         pair_feat = self.pair(h_esm)  # (B, d_pair, L, L)
         
-        # Pass to fusion head
-        logits = self.head(pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts, pair_mask=pair_mask, dist_bins=dist_bins, ss_feat=ss_feat)
-        return logits
+        head_out = self.head(
+            pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts,
+            pair_mask=pair_mask, dist_bins=dist_bins, ss_feat=ss_feat,
+            return_intermediates=return_intermediates,
+        )
+        if return_intermediates:
+            logits, diag = head_out
+            diag["pair_feat_mean"] = pair_feat.mean().item()
+            diag["pair_feat_std"] = pair_feat.std().item()
+            return logits, diag
+        return head_out
