@@ -1,0 +1,47 @@
+# @package _global_
+
+# Fix #1+#3: Restored TemplateEmbedder with 3×3 Conv + BatchNorm + padding mask.
+# Baseline nv71943g settings — ONLY the encoder fix is new.
+# Tests whether the c7c7218 refactor was the root cause of degradation.
+
+defaults:
+  - override /model: esm2_t33_650M
+  - override /logger: wandb
+
+tags: ["bce", "fix-template-encoder", "baseline-config"]
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+
+# Match nv71943g baseline exactly
+trainer:
+  limit_train_batches: 0.1
+
+model:
+  # Baseline loss: BCE + Tversky (as in nv71943g)
+  use_tversky: true
+  tversky_weight: 0.5
+  pos_weight_scale: 1.0
+  label_smoothing: 0.1
+
+  # Baseline LR
+  lr: 5.0e-4
+  warmup_steps: 400
+
+  # No SGDR (nv71943g didn't have it)
+  cosine_restarts: false
+
+  # No extra features (nv71943g: prior+count only)
+  distogram: false
+  cb_beta: 0.0
+  n_dist_bins: 0
+  n_ss_feat: 0
+
+  # torch.compile for speed (as in nv71943g)
+  compile_model: true
+
+  # Diagnostics
+  diagnostic_logging: true
+  diag_every: 25

@@ -362,6 +362,7 @@ class Pair2DHead(nn.Module):
         fusion_out = self.fusion(
             pair_feat, prior, count, rel, esm_contacts,
             dist_bins=dist_bins, ss_feat=ss_feat,
+            pair_mask=pair_mask,
             return_intermediates=return_intermediates,
         )
         if return_intermediates:

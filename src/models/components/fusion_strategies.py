@@ -37,14 +37,12 @@ class CrossAttention(nn.Module):
         self.kv1 = nn.Linear(dim, dim * 2, bias=False)
         self.kv2 = nn.Linear(dim, dim * 2, bias=False)
         
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, mask: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x1: (B, N, C) features from stream 1
             x2: (B, N, C) features from stream 2
-            
-        Returns:
-            Tuple of (out1, out2) with cross-attended features
+            mask: (B, N) binary mask, 1=valid 0=pad. Zeroes out pad k/v.
         """
         B, N, C = x1.shape
         
@@ -56,7 +54,16 @@ class CrossAttention(nn.Module):
         k1, v1 = self.kv1(x1).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
         k2, v2 = self.kv2(x2).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
         
-        # bf16 has same exponent range as fp32, no overflow risk — skip upcast
+        # Zero out padding positions in keys and values so they don't pollute context
+        if mask is not None:
+            # mask: (B, N) -> (B, 1, N, 1) for broadcasting over heads and head_dim
+            m = mask.unsqueeze(1).unsqueeze(-1)
+            k1 = k1 * m
+            v1 = v1 * m
+            k2 = k2 * m
+            v2 = v2 * m
+        
+        # bf16 has same exponent range as fp32, no overflow risk -- skip upcast
         ctx1 = (k1.transpose(-2, -1) @ v1) * self.scale
         ctx1 = ctx1.softmax(dim=-2)
         ctx2 = (k2.transpose(-2, -1) @ v2) * self.scale
@@ -96,21 +103,19 @@ class CrossPath(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, mask: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x1: (B, N, C) features from stream 1
             x2: (B, N, C) features from stream 2
-            
-        Returns:
-            Tuple of (out1, out2) with fused features
+            mask: (B, N) binary mask, 1=valid 0=pad
         """
         # Split into (y, u) for each stream
         y1, u1 = self.act1(self.channel_proj1(x1)).chunk(2, dim=-1)
         y2, u2 = self.act2(self.channel_proj2(x2)).chunk(2, dim=-1)
         
         # Cross-attend on u
-        v1, v2 = self.cross_attn(u1, u2)
+        v1, v2 = self.cross_attn(u1, u2, mask=mask)
         
         # Concatenate and project back
         y1 = torch.cat((y1, v1), dim=-1)
@@ -207,14 +212,12 @@ class FeatureFusionModule(nn.Module):
             norm_layer=norm_layer
         )
         
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, pair_mask: torch.Tensor = None) -> torch.Tensor:
         """
         Args:
             x1: (B, C, H, W) features from stream 1
             x2: (B, C, H, W) features from stream 2
-            
-        Returns:
-            (B, C, H, W) fused features
+            pair_mask: (B, 1, H, W) binary mask, 1=valid 0=pad
         """
         B, C, H, W = x1.shape
         
@@ -222,8 +225,11 @@ class FeatureFusionModule(nn.Module):
         x1_seq = x1.flatten(2).transpose(1, 2)
         x2_seq = x2.flatten(2).transpose(1, 2)
         
+        # Flatten mask: (B, 1, H, W) -> (B, H*W)
+        mask_seq = pair_mask.flatten(2).squeeze(1) if pair_mask is not None else None
+        
         # Cross-path fusion
-        x1_fused, x2_fused = self.cross(x1_seq, x2_seq)
+        x1_fused, x2_fused = self.cross(x1_seq, x2_seq, mask=mask_seq)
         
         # Concatenate and embed
         merge = torch.cat((x1_fused, x2_fused), dim=-1)  # (B, H*W, 2C)
@@ -250,31 +256,37 @@ class TemplateEmbedder(nn.Module):
         super().__init__()
         self.d_out = d_out
 
-        # Group 1 – always present: prior (1) + count (1)
+        # Group 1 -- always present: prior (1) + count (1)
+        # 3x3 conv + BatchNorm for spatial context and scale stabilization
         self.mlp_struct = nn.Sequential(
-            nn.Conv2d(2, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+            nn.Conv2d(2, d_out, 3, padding=1),
+            nn.BatchNorm2d(d_out),
+            nn.ReLU(),
+            nn.Conv2d(d_out, d_out, 3, padding=1),
+            nn.BatchNorm2d(d_out),
         )
-        # Zero-init last layer → template stream starts at exactly 0 (like baseline)
-        nn.init.zeros_(self.mlp_struct[-1].weight)
-        nn.init.zeros_(self.mlp_struct[-1].bias)
 
-        # Group 2 – distance bins (optional)
+        # Group 2 -- distance bins (optional)
         self.has_dist = n_dist_bins > 0
         if self.has_dist:
             self.mlp_dist = nn.Sequential(
-                nn.Conv2d(n_dist_bins, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+                nn.Conv2d(n_dist_bins, d_out, 3, padding=1),
+                nn.BatchNorm2d(d_out),
+                nn.ReLU(),
+                nn.Conv2d(d_out, d_out, 3, padding=1),
+                nn.BatchNorm2d(d_out),
             )
-            nn.init.zeros_(self.mlp_dist[-1].weight)
-            nn.init.zeros_(self.mlp_dist[-1].bias)
 
-        # Group 3 – SS-pair features (optional)
+        # Group 3 -- SS-pair features (optional)
         self.has_ss = n_ss_feat > 0
         if self.has_ss:
             self.mlp_ss = nn.Sequential(
-                nn.Conv2d(n_ss_feat, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+                nn.Conv2d(n_ss_feat, d_out, 3, padding=1),
+                nn.BatchNorm2d(d_out),
+                nn.ReLU(),
+                nn.Conv2d(d_out, d_out, 3, padding=1),
+                nn.BatchNorm2d(d_out),
             )
-            nn.init.zeros_(self.mlp_ss[-1].weight)
-            nn.init.zeros_(self.mlp_ss[-1].bias)
 
     def forward(
         self,
@@ -361,6 +373,7 @@ class StandardFusion(nn.Module):
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
         ss_feat: torch.Tensor = None,
+        pair_mask: torch.Tensor = None,
         return_intermediates: bool = False,
     ):
         # Build ESM semantic stream (learned from sequences)
@@ -463,6 +476,7 @@ class TruForFusion(nn.Module):
         esm_contacts: torch.Tensor,
         dist_bins: torch.Tensor = None,
         ss_feat: torch.Tensor = None,
+        pair_mask: torch.Tensor = None,
         return_intermediates: bool = False,
     ):
         # Build Stream 1: ESM semantic (learned from sequences)
@@ -478,7 +492,7 @@ class TruForFusion(nn.Module):
             template_feat = tpl_out
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint
-        x_fused = self.ffm(esm_feat, template_feat)
+        x_fused = self.ffm(esm_feat, template_feat, pair_mask=pair_mask)
         
         # Add relative position information
         rel_emb = self.rel_proj(rel)
