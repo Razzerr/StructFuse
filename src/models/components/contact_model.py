@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from src.models.components.pair_features import PairFeatures
 from src.models.components.pair2d_head import Pair2DHead
 
@@ -19,6 +20,8 @@ class ContactModel(torch.nn.Module):
         head_type: "cnn", "dilated" or "axial" - architecture type for head
         head_num_heads: Number of attention heads if head_type="axial"
         use_depthwise: Whether to use depthwise separable convs if head_type="cnn"
+        late_fusion: If True, skip template features in early fusion and add
+                     learned α·prior bias directly to logits.
     """
     def __init__(
         self, 
@@ -40,8 +43,10 @@ class ContactModel(torch.nn.Module):
         alternating_axial: bool = False,
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
+        late_fusion: bool = False,
     ):
         super().__init__()
+        self.late_fusion = late_fusion
         self.pair = PairFeatures(d_model=d_esm, d_pair=d_pair, rank=rank)
         
         self.head = Pair2DHead(
@@ -52,8 +57,9 @@ class ContactModel(torch.nn.Module):
             fusion_strategy=fusion_strategy,
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
-            n_dist_bins=n_dist_bins,
-            n_ss_feat=n_ss_feat,
+            # Late fusion: head sees no template features at all
+            n_dist_bins=0 if late_fusion else n_dist_bins,
+            n_ss_feat=0 if late_fusion else n_ss_feat,
             n_out=n_out,
             head_type=head_type,
             head_num_heads=head_num_heads,
@@ -63,18 +69,38 @@ class ContactModel(torch.nn.Module):
             use_checkpoint=use_checkpoint,
         )
 
+        if late_fusion:
+            # Learned scalar bias: logits += alpha * prior
+            # Init to 0 → model starts identical to no-template baseline
+            self.late_alpha = nn.Parameter(torch.zeros(1))
+
     def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None, ss_feat=None, return_intermediates=False):
         # Generate pairwise features from ESM2 embeddings
         pair_feat = self.pair(h_esm)  # (B, d_pair, L, L)
         
+        # Late fusion: head only sees prior+count (no dist_bins/ss_feat)
+        head_dist_bins = None if self.late_fusion else dist_bins
+        head_ss_feat = None if self.late_fusion else ss_feat
+
         head_out = self.head(
             pair_feat, prior, count, rel=rel, esm_contacts=esm_contacts,
-            pair_mask=pair_mask, dist_bins=dist_bins, ss_feat=ss_feat,
+            pair_mask=pair_mask, dist_bins=head_dist_bins, ss_feat=head_ss_feat,
             return_intermediates=return_intermediates,
         )
         if return_intermediates:
             logits, diag = head_out
             diag["pair_feat_mean"] = pair_feat.mean().item()
             diag["pair_feat_std"] = pair_feat.std().item()
+        else:
+            logits = head_out
+            diag = None
+
+        # Late fusion: add learned α·prior directly to logits
+        if self.late_fusion:
+            logits = logits + self.late_alpha * prior
+            if diag is not None:
+                diag["late_alpha"] = self.late_alpha.item()
+
+        if diag is not None:
             return logits, diag
-        return head_out
+        return logits

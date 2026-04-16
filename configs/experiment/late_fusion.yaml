@@ -1,0 +1,40 @@
+# @package _global_
+#
+# Late fusion + training hygiene fixes:
+# 1. Late fusion: axial head processes ESM2-only, then logits += α·prior (learned, init=0)
+# 2. BCE-only loss: drop Tversky (was fighting BCE — Tversky↓ while BCE↑)
+# 3. Lower LR: 5e-4 → 1e-4, warmup 100 → 400 (gentler optimization)
+# 4. Full data: limit_train_batches removed (was 0.1 → memorization in ~150 steps)
+# 5. pos_weight=5: compensate class imbalance without Tversky's FP explosion
+
+defaults:
+  - override /logger: wandb
+
+task_name: "late_fusion"
+
+tags: ["bce", "late-fusion", "no-tversky", "full-data"]
+seed: 42
+
+trainer:
+  limit_train_batches: null  # use ALL training data (was 0.1 = 10%)
+
+model:
+  # Late fusion: skip template features in early fusion, add α·prior to logits
+  late_fusion: true
+  distogram: false
+  cb_beta: 0.0
+  n_dist_bins: 0
+  n_ss_feat: 0
+
+  # Loss: BCE-only, no Tversky (was causing gradient conflict)
+  use_tversky: false
+  pos_weight_scale: 5.0   # upweight positives (~2-5% contact rate)
+  label_smoothing: 0.05   # lighter smoothing
+
+  # Lower LR + longer warmup (don't burn initial ESM2 signal)
+  lr: 1.0e-4
+  warmup_steps: 400
+
+  # Diagnostics
+  diagnostic_logging: true
+  diag_every: 25
