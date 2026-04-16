@@ -232,41 +232,104 @@ class FeatureFusionModule(nn.Module):
         return out
 
 
+class TemplateEmbedder(nn.Module):
+    """Per-group 1×1 encoders with learned gates for heterogeneous template channels.
+
+    Each channel group (struct, dist, ss) gets its own small MLP that maps raw
+    features into a shared *d*-dimensional space.  A per-channel sigmoid gate
+    controls how much each group contributes before they are summed, so the
+    model can learn to down-weight noisy or uninformative groups.
+
+    Args:
+        d_out: Output embedding dimension (should match d_pair).
+        n_dist_bins: Number of template distance-bin channels (0 = disabled).
+        n_ss_feat: Number of template SS-pair feature channels (0 = disabled).
+    """
+
+    def __init__(self, d_out: int, n_dist_bins: int = 0, n_ss_feat: int = 0):
+        super().__init__()
+        self.d_out = d_out
+
+        # Group 1 – always present: prior (1) + count (1)
+        self.mlp_struct = nn.Sequential(
+            nn.Conv2d(2, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+        )
+        self.gate_struct = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+
+        # Group 2 – distance bins (optional)
+        self.has_dist = n_dist_bins > 0
+        if self.has_dist:
+            self.mlp_dist = nn.Sequential(
+                nn.Conv2d(n_dist_bins, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+            )
+            self.gate_dist = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+
+        # Group 3 – SS-pair features (optional)
+        self.has_ss = n_ss_feat > 0
+        if self.has_ss:
+            self.mlp_ss = nn.Sequential(
+                nn.Conv2d(n_ss_feat, d_out, 1), nn.ReLU(), nn.Conv2d(d_out, d_out, 1),
+            )
+            self.gate_ss = nn.Parameter(torch.zeros(1, d_out, 1, 1))
+
+    def forward(
+        self,
+        prior: torch.Tensor,
+        count: torch.Tensor,
+        dist_bins: torch.Tensor = None,
+        ss_feat: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Returns:
+            (B, d_out, L, L) gated-sum template embedding.
+        """
+        struct_in = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
+        h = torch.sigmoid(self.gate_struct) * self.mlp_struct(struct_in)
+
+        if self.has_dist and dist_bins is not None:
+            h = h + torch.sigmoid(self.gate_dist) * self.mlp_dist(dist_bins)
+
+        if self.has_ss and ss_feat is not None:
+            h = h + torch.sigmoid(self.gate_ss) * self.mlp_ss(ss_feat)
+
+        return h  # (B, d_out, L, L)
+
+
 class StandardFusion(nn.Module):
     """
     Standard fusion strategy (current baseline).
     
     Architecture:
-    1. Gated prior: gate = sigmoid(conv([prior, count, dist_bins]))
-    2. Residual: x = esm_semantic + gate * tpl_phi([prior, count, dist_bins])
-    3. Aux concat: x = cat([x, prior, count, dist_bins, rel_proj(rel)])
+    1. TemplateEmbedder: per-group MLPs + gated sum → d_pair embedding
+    2. Gated residual: gate = sigmoid(conv(tpl_emb)); x = esm + gate * tpl_emb
+    3. Aux concat: x = cat([x, tpl_emb, rel_proj(rel)])
     
     Args:
         d_pair: Dimension of pairwise features
         d_rel: Dimension of relative position embeddings
         n_dist_bins: Number of template distance bin channels (0 = no distance bins)
+        n_ss_feat: Number of template SS-pair feature channels (0 = disabled)
     """
     def __init__(self, d_pair: int, d_rel: int, n_dist_bins: int = 0, n_ss_feat: int = 0):
         super().__init__()
         self.n_dist_bins = n_dist_bins
         self.n_ss_feat = n_ss_feat
-        tpl_in = 2 + n_dist_bins + n_ss_feat  # prior + count + dist_bins + ss_feat
         
         # ESM semantic encoder: combines pair_feat + optional esm_contacts
         esm_in_channels = d_pair + 1
         self.esm_proj = nn.Conv2d(esm_in_channels, d_pair, 1)
         
-        # Gate network: learns confidence from all template channels
-        self.gate_conv = nn.Conv2d(tpl_in, 1, 1)
+        # Template embedder: per-group MLPs + gated sum → d_pair
+        self.tpl_embed = TemplateEmbedder(d_out=d_pair, n_dist_bins=n_dist_bins, n_ss_feat=n_ss_feat)
         
-        # Template embedding: maps all template channels to feature space
-        self.tpl_phi = nn.Conv2d(tpl_in, d_pair, 1)
+        # Gate network: learns spatial confidence from template embedding
+        self.gate_conv = nn.Conv2d(d_pair, 1, 1)
         
         # Relative position projection
         self.rel_proj = nn.Conv2d(d_rel, d_rel, 1)
         
-        # Total input channels: pair_feat + tpl_in + rel
-        self.out_channels = d_pair + tpl_in + d_rel
+        # Total input channels: d_pair (gated residual) + d_pair (tpl_emb) + d_rel
+        self.out_channels = d_pair + d_pair + d_rel
         
     def forward(
         self, 
@@ -295,26 +358,20 @@ class StandardFusion(nn.Module):
         esm_semantic = torch.cat([pair_feat, esm_contacts], dim=1)  # (B, d_pair+1, L, L)
         esm_semantic = self.esm_proj(esm_semantic)  # (B, d_pair, L, L)
         
-        # Build template feature tensor
-        tpl_parts = [prior, count]
-        if dist_bins is not None:
-            tpl_parts.append(dist_bins)
-        if ss_feat is not None:
-            tpl_parts.append(ss_feat)
-        tpl_feat = torch.cat(tpl_parts, dim=1)  # (B, 2+N+S, L, L)
+        # Template embedding via per-group gated sum
+        tpl_emb = self.tpl_embed(prior, count, dist_bins, ss_feat)  # (B, d_pair, L, L)
         
-        # Compute gate from template features
-        gate = torch.sigmoid(self.gate_conv(tpl_feat))  # (B, 1, L, L)
+        # Compute spatial gate from template embedding
+        gate = torch.sigmoid(self.gate_conv(tpl_emb))  # (B, 1, L, L)
         
         # Gated residual: add template information modulated by confidence
-        tpl_emb = self.tpl_phi(tpl_feat)  # (B, d_pair, L, L)
         x = esm_semantic + gate * tpl_emb  # (B, d_pair, L, L)
         
-        # Auxiliary features: concatenate raw information
+        # Auxiliary features: concatenate embedded template + relative position
         rel_emb = self.rel_proj(rel)  # (B, d_rel, L, L)
         
         # Final concatenation
-        x_fused = torch.cat([x, tpl_feat, rel_emb], dim=1)  # (B, d_pair+tpl_in+d_rel, L, L)
+        x_fused = torch.cat([x, tpl_emb, rel_emb], dim=1)  # (B, d_pair+d_pair+d_rel, L, L)
         
         return x_fused
 
@@ -353,7 +410,6 @@ class TruForFusion(nn.Module):
         super().__init__()
         self.n_dist_bins = n_dist_bins
         self.n_ss_feat = n_ss_feat
-        tpl_in = 2 + n_dist_bins + n_ss_feat  # prior + count + dist_bins + ss_feat
         
         # ESM semantic stream encoder: [pair_feat, optional esm_contacts] -> d_pair
         esm_in_channels = d_pair + 1
@@ -363,15 +419,8 @@ class TruForFusion(nn.Module):
             nn.ReLU()
         )
         
-        # Template fingerprint encoder: [prior, count, dist_bins] -> d_pair dimensions
-        self.template_encoder = nn.Sequential(
-            nn.Conv2d(tpl_in, d_pair // 2, 3, padding=1),
-            nn.BatchNorm2d(d_pair // 2),
-            nn.ReLU(),
-            nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
-            nn.BatchNorm2d(d_pair),
-            nn.ReLU()
-        )
+        # Template embedder: per-group MLPs + gated sum → d_pair
+        self.tpl_embed = TemplateEmbedder(d_out=d_pair, n_dist_bins=n_dist_bins, n_ss_feat=n_ss_feat)
         
         # Cross-modal fusion
         self.ffm = FeatureFusionModule(
@@ -413,14 +462,8 @@ class TruForFusion(nn.Module):
         esm_input = torch.cat([pair_feat, esm_contacts], dim=1)  # (B, d_pair+1, L, L)
         esm_feat = self.esm_encoder(esm_input)  # (B, d_pair, L, L)
         
-        # Build Stream 2: Template fingerprint (measured from structures)
-        tpl_parts = [prior, count]
-        if dist_bins is not None:
-            tpl_parts.append(dist_bins)
-        if ss_feat is not None:
-            tpl_parts.append(ss_feat)
-        template_input = torch.cat(tpl_parts, dim=1)  # (B, 2+N+S, L, L)
-        template_feat = self.template_encoder(template_input)  # (B, d_pair, L, L)
+        # Build Stream 2: Template embedding via per-group gated sum
+        template_feat = self.tpl_embed(prior, count, dist_bins, ss_feat)  # (B, d_pair, L, L)
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint
         x_fused = self.ffm(esm_feat, template_feat)  # (B, d_pair, L, L)
