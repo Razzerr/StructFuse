@@ -16,6 +16,11 @@ task_name: "late_fusion"
 tags: ["bce", "late-fusion", "no-tversky", "full-data"]
 seed: 42
 
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+
 trainer:
   limit_train_batches: null  # use ALL training data (was 0.1 = 10%)
 
