@@ -44,6 +44,7 @@ class ContactModel(torch.nn.Module):
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
         late_fusion: bool = False,
+        late_alpha_init: float = 0.0,
     ):
         super().__init__()
         self.late_fusion = late_fusion
@@ -71,8 +72,7 @@ class ContactModel(torch.nn.Module):
 
         if late_fusion:
             # Learned scalar bias: logits += alpha * prior
-            # Init to 0 → model starts identical to no-template baseline
-            self.late_alpha = nn.Parameter(torch.zeros(1))
+            self.late_alpha = nn.Parameter(torch.tensor([float(late_alpha_init)]))
 
     def forward(self, h_esm, prior, count, rel, esm_contacts=None, pair_mask=None, dist_bins=None, ss_feat=None, return_intermediates=False):
         # Generate pairwise features from ESM2 embeddings

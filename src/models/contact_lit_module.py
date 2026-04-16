@@ -85,6 +85,7 @@ class ContactLitModule(LightningModule):
         diag_every: int = 25,
         # Late fusion: add template prior as bias to logits instead of early fusion
         late_fusion: bool = False,
+        late_alpha_init: float = 0.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -119,6 +120,7 @@ class ContactLitModule(LightningModule):
             alternating_axial=alternating_axial,
             use_checkpoint=use_checkpoint,
             late_fusion=late_fusion,
+            late_alpha_init=late_alpha_init,
         )
         if compile_model:
             self.net = torch.compile(self.net, dynamic=True)

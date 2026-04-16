@@ -1,0 +1,55 @@
+# @package _global_
+
+# Late fusion with warm α init on BASELINE config (nv71943g settings).
+# Tests whether templates have signal when α starts high (gradient starvation fix).
+#
+# Key diffs from baseline nv71943g:
+#   + late_fusion=true, late_alpha_init=1.0
+#   + diagnostic_logging
+#   - compile_model=false (incompatible with late_alpha Parameter)
+
+defaults:
+  - override /model: esm2_t33_650M
+  - override /logger: wandb
+
+tags: ["bce", "late-fusion", "warm-alpha", "baseline-config"]
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+
+# Match nv71943g baseline exactly
+trainer:
+  limit_train_batches: 0.1
+
+model:
+  # Baseline loss: BCE + Tversky (as in nv71943g)
+  use_tversky: true
+  tversky_weight: 0.5
+  pos_weight_scale: 1.0
+  label_smoothing: 0.1
+
+  # Baseline LR
+  lr: 5.0e-4
+  warmup_steps: 400
+
+  # No SGDR (nv71943g didn't have it)
+  cosine_restarts: false
+
+  # No distogram / extra features (nv71943g didn't have them)
+  distogram: false
+  cb_beta: 0.0
+  n_dist_bins: 0
+  n_ss_feat: 0
+
+  # Late fusion with warm α
+  late_fusion: true
+  late_alpha_init: 1.0
+
+  # torch.compile breaks with new Parameters
+  compile_model: false
+
+  # Diagnostics
+  diagnostic_logging: true
+  diag_every: 25

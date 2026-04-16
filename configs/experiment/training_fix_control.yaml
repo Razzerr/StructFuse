@@ -25,7 +25,7 @@ data:
   esm_embeddings_dir: data/precomputed/esm_t33_650M
 
 trainer:
-  limit_train_batches: null  # use ALL training data
+  limit_train_batches: 0.3  # was 0.1 → memorization; 0.3 = 3× more diversity
 
 model:
   distogram: false
