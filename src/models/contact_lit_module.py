@@ -9,7 +9,11 @@ from src.models.components.esm_backbone import ESM2Backbone
 from src.models.components.contact_model import ContactModel
 from src.models.components.pair2d_head import relpos_buckets
 from src.models.utils.faiss import FaissIndex
-from src.models.utils.loss import masked_bce_balanced, masked_focal_tversky
+from src.models.utils.loss import (
+    masked_bce_balanced,
+    masked_focal_tversky,
+    masked_ce_distogram,
+)
 from src.models.utils.metrics import (
     precision_at_k_masked,
     precision_at_k_by_range,
@@ -35,13 +39,24 @@ class ContactLitModule(LightningModule):
         esm_model: str = "esm2_t33_650M_UR50D",
         finetune_esm: bool = False,
         use_blosum: bool = True,
-        fusion_strategy: str = "standard",  # standard or trufor
+        fusion_strategy: str = "standard",  # standard, trufor, or grouped
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
+        fusion_feature_groups: Optional[Dict[str, int]] = None,
+        # Stage 2 optional per-group features (channel counts, dataset-side)
+        use_tpl_dist_bins: bool = False,   # 9-channel soft distance histogram
+        use_tpl_agreement: bool = False,   # 1-channel template agreement
+        use_tpl_dist_stats: bool = False,  # 2-channel mean/std distance
         head_type: str = "cnn",  # cnn, dilated or axial
         head_num_heads: int = 8,  # for axial attention head
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
         alternating_axial: bool = False,  # Alternate row/col attention per block
+        triangle_c: int = 32,  # Stage 3: inner dim for triangle mult update
+        # Stage 4 — distogram auxiliary head / loss.
+        use_distogram_head: bool = False,
+        n_distogram_bins: int = 8,
+        lambda_disto: float = 0.05,
+        distogram_class_balance_beta: float = 0.999,
         d_esm: int = 1280,
         d_pair: int = 128,
         width: int = 128,
@@ -87,12 +102,24 @@ class ContactLitModule(LightningModule):
             fusion_strategy=fusion_strategy,
             fusion_num_heads=fusion_num_heads,
             fusion_reduction=fusion_reduction,
+            fusion_feature_groups=(
+                dict(fusion_feature_groups) if fusion_feature_groups else None
+            ),
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,
             alternating_axial=alternating_axial,
             use_checkpoint=use_checkpoint,
+            triangle_c=triangle_c,
+            use_distogram_head=use_distogram_head,
+            n_distogram_bins=n_distogram_bins,
         )
+        self.use_distogram_head = bool(use_distogram_head)
+        self.lambda_disto = float(lambda_disto)
+        self.distogram_class_balance_beta = float(distogram_class_balance_beta)
+        self.use_tpl_dist_bins = bool(use_tpl_dist_bins)
+        self.use_tpl_agreement = bool(use_tpl_agreement)
+        self.use_tpl_dist_stats = bool(use_tpl_dist_stats)
         if compile_model:
             self.net = torch.compile(self.net, dynamic=True)
 
@@ -301,7 +328,28 @@ class ContactLitModule(LightningModule):
         valid = (pair_mask * long_mask).unsqueeze(1)  # (B,1,L,L)
         rel = rel.unsqueeze(0) * valid  # (B,R,L,L) via broadcast
 
-        logits = self.net(h, prior, count, rel, esm_contacts, pair_mask=pair_mask.unsqueeze(1))  # (B, 1, Lmax, Lmax)
+        # Optional Stage 2 features — only passed when configured and present
+        tpl_dist_bins = batch.get("tpl_dist_bins") if self.use_tpl_dist_bins else None
+        tpl_agreement = batch.get("tpl_agreement") if self.use_tpl_agreement else None
+        tpl_dist_stats = batch.get("tpl_dist_stats") if self.use_tpl_dist_stats else None
+        if tpl_dist_bins is not None:
+            tpl_dist_bins = tpl_dist_bins.to(self.device)
+        if tpl_agreement is not None:
+            tpl_agreement = tpl_agreement.to(self.device)
+        if tpl_dist_stats is not None:
+            tpl_dist_stats = tpl_dist_stats.to(self.device)
+
+        net_out = self.net(
+            h, prior, count, rel, esm_contacts,
+            pair_mask=pair_mask.unsqueeze(1),
+            tpl_dist_bins=tpl_dist_bins,
+            tpl_agreement=tpl_agreement,
+            tpl_dist_stats=tpl_dist_stats,
+        )
+        if isinstance(net_out, tuple):
+            logits, logits_disto = net_out
+        else:
+            logits, logits_disto = net_out, None
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product
 
@@ -327,6 +375,27 @@ class ContactLitModule(LightningModule):
             loss = loss_bce + self.tversky_weight * loss_tversky
         else:
             loss = loss_bce
+
+        # Stage 4: distogram auxiliary loss (multi-task regularization).
+        loss_disto = None
+        if (
+            self.use_distogram_head
+            and logits_disto is not None
+            and "gt_dist_bins" in batch
+        ):
+            gt_dist_bins = batch["gt_dist_bins"].to(self.device)  # (B, C, L, L)
+            disto_valid = batch.get("gt_dist_valid")
+            if disto_valid is not None:
+                disto_valid = disto_valid.to(self.device) * valid_mask
+            else:
+                disto_valid = valid_mask
+            loss_disto = masked_ce_distogram(
+                logits_disto,
+                gt_dist_bins,
+                disto_valid,
+                class_balance_beta=self.distogram_class_balance_beta,
+            )
+            loss = loss + self.lambda_disto * loss_disto
 
         if stage != "train" or self.trainer.global_step % 10 == 0:
             with torch.no_grad():
@@ -382,6 +451,15 @@ class ContactLitModule(LightningModule):
                 self.log(
                     f"{stage}/loss_bce",
                     loss_bce,
+                    prog_bar=False,
+                    on_step=on_step,
+                    on_epoch=on_epoch,
+                    sync_dist=True,
+                )
+            if loss_disto is not None:
+                self.log(
+                    f"{stage}/loss_disto",
+                    loss_disto,
                     prog_bar=False,
                     on_step=on_step,
                     on_epoch=on_epoch,
@@ -444,28 +522,59 @@ class ContactLitModule(LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         """Log gradient statistics before optimizer step for debugging training stability.
-        
-        Uses vectorized operations with only 3 GPU→CPU syncs total (instead of
-        ~3000 per-param syncs in the naive loop).
+
+        Logs a global grad norm plus per-branch grad norms so we can detect
+        gradient starvation in specific sub-modules (pair features, fusion
+        encoders, 2D head blocks). If one branch's grad norm is consistently
+        <10% of the max branch, that branch is not learning.
         """
         if self.trainer.global_step % 50 == 0:
-            # Incremental norm — avoids allocating one huge flat tensor for all grads
+            # Prefix buckets — matched against the parameter name produced by
+            # self.net.named_parameters(). For GroupedFeatureFusion, each
+            # per-group encoder is under head.fusion.encoders.<name>.* .
+            branch_prefixes = {
+                "pair": ("pair.",),
+                "fusion_esm": ("head.fusion.esm_encoder.",),
+                "fusion_templates": (
+                    "head.fusion.template_encoder.",  # TruForFusion
+                    "head.fusion.encoders.",          # GroupedFeatureFusion (ModuleDict)
+                    "head.fusion.ffm.",               # TruFor's cross-attn FFM
+                ),
+                "fusion_rel": ("head.fusion.rel_proj.",),
+                "head_blocks": ("head.blocks.", "head.inp."),
+                "head_out": ("head.out.",),
+            }
+            branch_norm_sq = {k: 0.0 for k in branch_prefixes}
+
             total_norm_sq = 0.0
             has_nan = False
             has_inf = False
-            for p in self.net.parameters():
+            for name, p in self.net.named_parameters():
                 if p.grad is None:
                     continue
                 g = p.grad.detach()
-                total_norm_sq += g.norm(2).item() ** 2
+                norm_sq = g.norm(2).item() ** 2
+                total_norm_sq += norm_sq
                 if not has_nan:
                     has_nan = bool(torch.isnan(g).any().item())
                 if not has_inf:
                     has_inf = bool(torch.isinf(g).any().item())
+                for k, prefixes in branch_prefixes.items():
+                    if any(name.startswith(pref) for pref in prefixes):
+                        branch_norm_sq[k] += norm_sq
+                        break
             total_norm = total_norm_sq ** 0.5
-            
+
             self.log("train/grad_norm", total_norm, on_step=True, on_epoch=False, prog_bar=False)
-            
+            for k, v in branch_norm_sq.items():
+                self.log(
+                    f"train/grad_norm/{k}",
+                    v ** 0.5,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                )
+
             if has_nan or has_inf:
                 self.log("train/grad_has_nan", float(has_nan), on_step=True, on_epoch=False)
                 self.log("train/grad_has_inf", float(has_inf), on_step=True, on_epoch=False)
@@ -1233,8 +1342,9 @@ class ContactLitModule(LightningModule):
 
         # Forward pass
         with torch.no_grad():
-            logits = self.net(h, prior, count, rel, esm_contacts,
-                              pair_mask=pair_mask.unsqueeze(0).unsqueeze(0))  # (1, 1, L, L)
+            net_out = self.net(h, prior, count, rel, esm_contacts,
+                               pair_mask=pair_mask.unsqueeze(0).unsqueeze(0))
+            logits = net_out[0] if isinstance(net_out, tuple) else net_out
             probs = torch.sigmoid(logits[0, 0])  # (L, L)
             binary = (probs >= threshold).float()  # (L, L)
 

@@ -1,0 +1,29 @@
+# @package _global_
+# Stage 2 frontier — all three template-coord features combined.
+# Green light: P@L_long ep10 ≥ 0.582 (+1pp vs baseline).
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage2_all"
+tags: ["stage2", "features", "all"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist: 9
+    tpl_agree: 1
+    tpl_dist_stats: 2
+  use_tpl_dist_bins: true
+  use_tpl_agreement: true
+  use_tpl_dist_stats: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true
+  compute_agreement: true
+  compute_dist_stats: true

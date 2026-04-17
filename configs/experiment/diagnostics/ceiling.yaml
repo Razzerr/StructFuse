@@ -1,0 +1,28 @@
+# @package _global_
+# Stage 0 diagnostic: ceiling analysis — how much P@L_long do raw features
+# (prior, esm_contacts) give us without any learned head? Run via:
+#
+#   python scripts/ceiling.py experiment=diagnostics/ceiling
+#
+# Uses the same data pipeline as training so the numbers are directly
+# comparable to val/P@L_long during training.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "ceiling"
+tags: ["diagnostics", "ceiling"]
+seed: 42
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+
+# We don't train here; just push val batches through the pipeline.
+train: false
+test: false
+
+# Cap for quick iteration. -1 = use full val set.
+ceiling:
+  max_batches: -1

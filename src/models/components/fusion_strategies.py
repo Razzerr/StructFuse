@@ -404,23 +404,114 @@ class TruForFusion(nn.Module):
         return x_final
 
 
+class GroupedFeatureFusion(nn.Module):
+    """
+    Per-group feature encoders + zero-init residual addition.
+
+    Designed to fix the sparse/dense mismatch that sank `lylejole` (-23pp):
+    heterogeneous features (BLOSUM-weighted prior ∈ [-1,1] mostly 0,
+    count ∈ [0, K] integer-ish, SS one-hot 0/1, distance bins one-hot, …)
+    cannot share a single Conv2d — dense channels drown sparse ones in the
+    gradient. Here every feature *group* gets its own 2-layer Conv encoder
+    with BN+ReLU, projecting to the same d_pair space as the ESM stream.
+
+    The final Conv of each per-group encoder is zero-initialised, so at
+    step 0 the new branch contributes exactly 0 (identical to baseline
+    without that feature). Gradients still flow from step 0 — no sigmoid
+    gate, so no gradient starvation like the old `tpl_conf` attempt.
+
+    Args:
+        d_pair: main pair-feature dimension
+        d_rel: rel embedding dimension (projected through 1×1 conv)
+        feature_groups: ordered dict {group_name: num_channels}. The
+            names must match the kwargs passed to forward (e.g.
+            "tpl_contact", "tpl_dist", "tpl_agree").
+
+    Forward:
+        esm stream      = Conv3x3(cat[pair_feat, esm_contacts]) + BN + ReLU
+        for each group g present in **features:
+            esm_stream += enc_g(features[g])   # zero-init ⇒ 0 at init
+        return cat[esm_stream, rel_proj(rel)]
+    """
+
+    def __init__(self, d_pair: int, d_rel: int, feature_groups: dict):
+        super().__init__()
+        # ESM semantic stream — same shape as TruForFusion.esm_encoder so
+        # the baseline identity property holds at init.
+        self.esm_encoder = nn.Sequential(
+            nn.Conv2d(d_pair + 1, d_pair, 3, padding=1),
+            nn.BatchNorm2d(d_pair),
+            nn.ReLU(),
+        )
+
+        self.encoders = nn.ModuleDict()
+        for name, n_ch in feature_groups.items():
+            enc = nn.Sequential(
+                nn.Conv2d(int(n_ch), d_pair // 2, 3, padding=1),
+                nn.BatchNorm2d(d_pair // 2),
+                nn.ReLU(),
+                nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
+                nn.BatchNorm2d(d_pair),
+            )
+            # Zero-init the FINAL Conv (not BN — BN weight is 1 at init;
+            # zeroing the conv is enough to kill the branch at step 0).
+            nn.init.zeros_(enc[3].weight)
+            nn.init.zeros_(enc[3].bias)
+            self.encoders[name] = enc
+
+        self.rel_proj = nn.Conv2d(d_rel, d_rel, 1)
+        self.out_channels = d_pair + d_rel
+        self.feature_groups = dict(feature_groups)
+
+    def forward(
+        self,
+        pair_feat: torch.Tensor,
+        esm_contacts: torch.Tensor,
+        rel: torch.Tensor,
+        **features: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            pair_feat: (B, d_pair, L, L) from PairFeatures
+            esm_contacts: (B, 1, L, L) ESM2 contact head output
+            rel: (B, d_rel, L, L) relative position embeddings
+            **features: per-group feature tensors keyed by name. Groups
+                declared in __init__ that are missing or None at call
+                time are silently skipped.
+
+        Returns:
+            (B, d_pair + d_rel, L, L) fused features.
+        """
+        x = self.esm_encoder(torch.cat([pair_feat, esm_contacts], dim=1))
+        for name, enc in self.encoders.items():
+            feat = features.get(name, None)
+            if feat is None:
+                continue
+            x = x + enc(feat)
+        return torch.cat([x, self.rel_proj(rel)], dim=1)
+
+
 def get_fusion_strategy(
-    strategy: str, 
-    d_pair: int, 
-    d_rel: int, 
-    num_heads: int = 8, 
-    reduction: int = 1
+    strategy: str,
+    d_pair: int,
+    d_rel: int,
+    num_heads: int = 8,
+    reduction: int = 1,
+    feature_groups: dict | None = None,
 ) -> nn.Module:
     """
     Factory function to create fusion strategy.
-    
+
     Args:
-        strategy: "standard" or "trufor"
+        strategy: "standard", "trufor", or "grouped"
         d_pair: Dimension of pairwise features
         d_rel: Dimension of relative position embeddings
         num_heads: Number of attention heads (TruFor only)
         reduction: Channel reduction factor (TruFor only)
-        
+        feature_groups: ordered dict {group_name: num_channels} for
+            "grouped" strategy. Defaults to {"tpl_contact": 2} (prior+count)
+            which is informationally equivalent to TruFor's baseline.
+
     Returns:
         Fusion module instance
     """
@@ -428,10 +519,18 @@ def get_fusion_strategy(
         return StandardFusion(d_pair=d_pair, d_rel=d_rel)
     elif strategy == "trufor":
         return TruForFusion(
-            d_pair=d_pair, 
-            d_rel=d_rel, 
-            num_heads=num_heads, 
-            reduction=reduction
+            d_pair=d_pair,
+            d_rel=d_rel,
+            num_heads=num_heads,
+            reduction=reduction,
+        )
+    elif strategy == "grouped":
+        groups = feature_groups if feature_groups else {"tpl_contact": 2}
+        return GroupedFeatureFusion(
+            d_pair=d_pair, d_rel=d_rel, feature_groups=dict(groups)
         )
     else:
-        raise ValueError(f"Unknown fusion strategy: {strategy}. Choose 'standard' or 'trufor'.")
+        raise ValueError(
+            f"Unknown fusion strategy: {strategy}. "
+            "Choose 'standard', 'trufor', or 'grouped'."
+        )

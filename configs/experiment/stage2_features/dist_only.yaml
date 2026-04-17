@@ -1,0 +1,23 @@
+# @package _global_
+# Stage 2 — add only per-template Cα distance bins (9 channels) on top of Stage 1.
+# Tests whether discretized distances add signal over raw contact prior.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage2_dist_only"
+tags: ["stage2", "features", "dist_only"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist: 9
+  use_tpl_dist_bins: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true

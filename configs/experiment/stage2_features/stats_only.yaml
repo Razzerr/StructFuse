@@ -1,0 +1,23 @@
+# @package _global_
+# Stage 2 — add only continuous distance statistics (mean/std, 2 channels).
+# Tests whether continuous distance signal adds beyond discretized bins.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage2_stats_only"
+tags: ["stage2", "features", "stats_only"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist_stats: 2
+  use_tpl_dist_stats: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_stats: true

@@ -1,0 +1,35 @@
+# @package _global_
+# Stage 3 ablation — deeper head (depth=12) to accommodate more triangle blocks.
+# With depth=12 pattern [ax, ax, tri_out, tri_in] × 3 -> 6 triangle, 6 axial.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage3_tri_full"
+tags: ["stage3", "triangle", "ablation-full"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist: 9
+    tpl_agree: 1
+    tpl_dist_stats: 2
+  use_tpl_dist_bins: true
+  use_tpl_agreement: true
+  use_tpl_dist_stats: true
+  head_type: "axial_tri"
+  triangle_c: 32
+  depth: 12
+  lr: 3.0e-4
+  warmup_steps: 1500
+  use_checkpoint: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true
+  compute_agreement: true
+  compute_dist_stats: true

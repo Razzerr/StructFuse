@@ -7,6 +7,7 @@ import zipfile
 from tqdm import tqdm
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
 
 from src.utils import pylogger
@@ -63,6 +64,13 @@ class PriorBuilder:
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
+        # Stage 2 — optional per-pair features derived from template Cα coords.
+        # When any of these is True, build_one returns a richer dict with the
+        # corresponding arrays; otherwise the legacy (prior, count) tuple
+        # shape is preserved for backward compatibility.
+        compute_dist_bins: bool = False,
+        compute_agreement: bool = False,
+        compute_dist_stats: bool = False,
     ):
         from src.models.utils.faiss import FaissIndex
 
@@ -73,6 +81,13 @@ class PriorBuilder:
         self.min_seq_sep = int(min_seq_sep)
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
+
+        self.compute_dist_bins = bool(compute_dist_bins)
+        self.compute_agreement = bool(compute_agreement)
+        self.compute_dist_stats = bool(compute_dist_stats)
+        self._needs_coords = (
+            self.compute_dist_bins or self.compute_agreement or self.compute_dist_stats
+        )
 
         self._id_to_npz = {m["id"]: m["npz"] for m in self.faiss_index.meta}
         self._tpl_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -97,8 +112,13 @@ class PriorBuilder:
             else str(tseq_arr)
         )
         tC = td["contact"].astype(np.uint8).copy()
+        entry: Dict[str, np.ndarray] = {"seq": tseq, "contact": tC}
+        if self._needs_coords:
+            # Templates cached with contact/coords for downstream Stage 2
+            # features. Coords are Cα-only (from scripts/build_contacts.py).
+            entry["coords"] = td["coords"].astype(np.float32).copy()
         td.close()
-        self._tpl_cache[tpl_id] = {"seq": tseq, "contact": tC}
+        self._tpl_cache[tpl_id] = entry
         return self._tpl_cache[tpl_id]
 
     # -- main entry point ---------------------------------------------------
@@ -109,20 +129,50 @@ class PriorBuilder:
         full_seq: str,
         crop_start: int,
         crop_end: int,
-    ) -> tuple:
+    ):
         """Build aggregated template prior for one sample.
 
         Returns:
-            ``(prior, count)`` – two ``(Lc, Lc)`` float32 numpy arrays.
-            If no templates are found, both are all-zeros.
+            Legacy mode (no Stage 2 flags set): ``(prior, count)`` tuple of
+            two ``(Lc, Lc)`` float32 arrays. All-zeros if no templates found.
+
+            Rich mode (any of compute_dist_bins/agreement/dist_stats set):
+            dict with keys:
+              - "prior"      : (Lc, Lc) float32
+              - "count"      : (Lc, Lc) float32
+              - "dist_bins"  : (9, Lc, Lc) float32 soft histogram (when enabled)
+              - "agreement"  : (1, Lc, Lc) float32 1 − std across templates
+              - "dist_stats" : (2, Lc, Lc) float32 [mean/30Å, std/15Å]
         """
-        from src.data.utils.align import project_prior
+        from src.data.utils.align import (
+            project_prior,
+            project_distance,
+            project_raw_distance,
+            needleman_wunsch,
+            N_DIST_BINS,
+        )
 
         Lc = crop_end - crop_start
         crop_seq = full_seq[crop_start:crop_end]
 
+        rich = self._needs_coords
+
+        def _empty_return():
+            prior = np.zeros((Lc, Lc), np.float32)
+            count = np.zeros((Lc, Lc), np.float32)
+            if not rich:
+                return prior, count
+            out = {"prior": prior, "count": count}
+            if self.compute_dist_bins:
+                out["dist_bins"] = np.zeros((N_DIST_BINS, Lc, Lc), np.float32)
+            if self.compute_agreement:
+                out["agreement"] = np.zeros((1, Lc, Lc), np.float32)
+            if self.compute_dist_stats:
+                out["dist_stats"] = np.zeros((2, Lc, Lc), np.float32)
+            return out
+
         if self.topk <= 0:
-            return np.zeros((Lc, Lc), np.float32), np.zeros((Lc, Lc), np.float32)
+            return _empty_return()
 
         hits = self.faiss_index.topk_precomputed(
             pid,
@@ -131,7 +181,7 @@ class PriorBuilder:
             random_retrieval=self.random_retrieval,
         )
         if not hits:
-            return np.zeros((Lc, Lc), np.float32), np.zeros((Lc, Lc), np.float32)
+            return _empty_return()
 
         # Softmax weights from cosine similarities
         sims = np.array([h[1] for h in hits], dtype=np.float32)
@@ -141,8 +191,19 @@ class PriorBuilder:
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
 
+        # Stage 2 accumulators
+        per_tpl_contacts: List[np.ndarray] = []
+        per_tpl_distances: List[np.ndarray] = []
+        dist_bins_acc = None
+        if rich and self.compute_dist_bins:
+            dist_bins_acc = np.zeros((Lc, Lc, N_DIST_BINS), dtype=np.float32)
+
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
+            # Compute NW once; feed into every projector to avoid recomputing
+            # the O(Lq·Lt) alignment for each feature type.
+            _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
+
             Pk = project_prior(
                 crop_seq,
                 tpl["seq"],
@@ -150,6 +211,7 @@ class PriorBuilder:
                 min_seq_sep=0,
                 symmetrize=True,
                 use_blosum=self.use_blosum,
+                query_to_template=q2t,
             )
 
             if self.only_positive_transfer:
@@ -173,7 +235,68 @@ class PriorBuilder:
             prior_acc += wk * Pk_pos
             count_acc += cnt
 
-        return prior_acc, count_acc
+            if rich:
+                # Per-template binary projected contacts (used for agreement).
+                if self.compute_agreement:
+                    per_tpl_contacts.append(Pk_pos.copy())
+
+                if self.compute_dist_bins:
+                    dbin = project_distance(
+                        crop_seq,
+                        tpl["seq"],
+                        tpl["coords"],
+                        q2t,
+                        min_seq_sep=self.min_seq_sep,
+                        symmetrize=True,
+                    )  # (Lc, Lc) int8 ∈ [0..8]
+                    oh = np.eye(N_DIST_BINS, dtype=np.float32)[dbin]  # (Lc, Lc, 9)
+                    dist_bins_acc += wk * oh
+
+                if self.compute_dist_stats:
+                    draw = project_raw_distance(
+                        crop_seq,
+                        tpl["coords"],
+                        q2t,
+                        min_seq_sep=self.min_seq_sep,
+                        symmetrize=True,
+                    )  # (Lc, Lc) float32 with NaN
+                    per_tpl_distances.append(draw)
+
+        if not rich:
+            return prior_acc, count_acc
+
+        out: Dict[str, np.ndarray] = {"prior": prior_acc, "count": count_acc}
+
+        if self.compute_dist_bins:
+            # Transpose to channel-first to match pair feature convention.
+            out["dist_bins"] = dist_bins_acc.transpose(2, 0, 1).astype(np.float32)
+
+        if self.compute_agreement:
+            if len(per_tpl_contacts) >= 2:
+                stacked = np.stack(per_tpl_contacts)  # (K, Lc, Lc)
+                agreement = 1.0 - stacked.std(axis=0)
+                np.clip(agreement, 0.0, 1.0, out=agreement)
+            else:
+                agreement = np.zeros((Lc, Lc), dtype=np.float32)
+            out["agreement"] = agreement[None].astype(np.float32)
+
+        if self.compute_dist_stats:
+            if per_tpl_distances:
+                stacked = np.stack(per_tpl_distances)  # (K, Lc, Lc)
+                with np.errstate(invalid="ignore", all="ignore"):
+                    dist_mean = np.nanmean(stacked, axis=0)
+                    dist_std = np.nanstd(stacked, axis=0)
+                dist_mean = np.nan_to_num(dist_mean, nan=0.0)
+                dist_std = np.nan_to_num(dist_std, nan=0.0)
+                # Normalise to roughly [0, 1] using physically reasonable clips.
+                dist_mean = np.clip(dist_mean, 0.0, 30.0) / 30.0
+                dist_std = np.clip(dist_std, 0.0, 15.0) / 15.0
+            else:
+                dist_mean = np.zeros((Lc, Lc), dtype=np.float32)
+                dist_std = np.zeros((Lc, Lc), dtype=np.float32)
+            out["dist_stats"] = np.stack([dist_mean, dist_std], axis=0).astype(np.float32)
+
+        return out
 
 
 # Subset definitions for test set evaluation
@@ -361,6 +484,10 @@ class ContactDataset(Dataset):
             mask = data["mask"].astype(np.uint8)  # (L,) - 1 if CA present
             L = int(data["L"])
             subset = self._get_subset(pid)
+            # Stage 4: optionally include query Cα coords for distogram target.
+            coords = None
+            if "coords" in data.files:
+                coords = data["coords"].astype(np.float32)
         finally:
             data.close()
 
@@ -371,6 +498,7 @@ class ContactDataset(Dataset):
             "mask": mask,
             "L": L,
             "subset": subset,
+            "coords": coords,
         }
 
 
@@ -401,6 +529,7 @@ def collate_padded(
     include_diagonal: bool = False,  # usually set diagonal to 0 in pair masks
     prior_builder: Optional[PriorBuilder] = None,
     esm_embeddings_dir: Optional[Path] = None,
+    compute_gt_dist_bins: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """
     Collate function with cropping and padding to batch max length.
@@ -455,6 +584,11 @@ def collate_padded(
                 "mask": item["mask"][crop_start:crop_end],
                 "L": crop_end - crop_start,
                 "crop_bounds": (crop_start, crop_end),
+                "coords": (
+                    item["coords"][crop_start:crop_end]
+                    if item.get("coords") is not None
+                    else None
+                ),
             }
         )
 
@@ -514,18 +648,90 @@ def collate_padded(
     if prior_builder is not None:
         prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
         count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+
+        # Stage 2 rich features — pre-allocate only if PriorBuilder is
+        # configured to produce them; otherwise save the memory.
+        dist_bins = None
+        agreement = None
+        dist_stats = None
+        if getattr(prior_builder, "compute_dist_bins", False):
+            # N_DIST_BINS = 9 channels (unknown + 8 finite bins).
+            from src.data.utils.align import N_DIST_BINS
+            dist_bins = torch.zeros(
+                (B, N_DIST_BINS, Lmax, Lmax), dtype=torch.float32
+            )
+        if getattr(prior_builder, "compute_agreement", False):
+            agreement = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+        if getattr(prior_builder, "compute_dist_stats", False):
+            dist_stats = torch.zeros((B, 2, Lmax, Lmax), dtype=torch.float32)
+
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
-            p_np, c_np = prior_builder.build_one(
+            built = prior_builder.build_one(
                 item["pid"], item["seq"], cb[0], cb[1]
             )
-            # p_np, c_np are (Lc, Lc); place into padded tensors
+            if isinstance(built, tuple):
+                p_np, c_np = built
+                extra = {}
+            else:
+                p_np = built["prior"]
+                c_np = built["count"]
+                extra = built
+
             L_use = min(Lc, Lmax)
             prior[b, 0, :L_use, :L_use] = torch.from_numpy(p_np[:L_use, :L_use])
             count[b, 0, :L_use, :L_use] = torch.from_numpy(c_np[:L_use, :L_use])
+
+            if dist_bins is not None and "dist_bins" in extra:
+                arr = extra["dist_bins"]  # (9, Lc, Lc)
+                dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(
+                    arr[:, :L_use, :L_use]
+                )
+            if agreement is not None and "agreement" in extra:
+                arr = extra["agreement"]  # (1, Lc, Lc)
+                agreement[b, :, :L_use, :L_use] = torch.from_numpy(
+                    arr[:, :L_use, :L_use]
+                )
+            if dist_stats is not None and "dist_stats" in extra:
+                arr = extra["dist_stats"]  # (2, Lc, Lc)
+                dist_stats[b, :, :L_use, :L_use] = torch.from_numpy(
+                    arr[:, :L_use, :L_use]
+                )
+
         batch_out["prior"] = prior
         batch_out["count"] = count
+        if dist_bins is not None:
+            batch_out["tpl_dist_bins"] = dist_bins
+        if agreement is not None:
+            batch_out["tpl_agreement"] = agreement
+        if dist_stats is not None:
+            batch_out["tpl_dist_stats"] = dist_stats
+
+    # ── Stage 4: ground-truth distogram bins (one-hot, 8 finite bins) ──
+    if compute_gt_dist_bins:
+        # Bin edges (Å): [0,4), [4,6), [6,8), [8,10), [10,12), [12,16), [16,20), [20,∞)
+        bin_edges = torch.tensor(
+            [4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0], dtype=torch.float32
+        )
+        n_bins = int(bin_edges.numel()) + 1  # 8
+        gt_dist_bins = torch.zeros((B, n_bins, Lmax, Lmax), dtype=torch.float32)
+        gt_dist_valid = torch.zeros((B, Lmax, Lmax), dtype=torch.float32)
+        for b, item in enumerate(cropped):
+            coords = item.get("coords")
+            if coords is None:
+                continue
+            Lc = item["L"]
+            c = torch.from_numpy(np.asarray(coords[:Lc])).float()  # (Lc, 3)
+            res_m = residue_mask[b, :Lc]  # (Lc,)
+            valid_pair = (res_m.unsqueeze(0) * res_m.unsqueeze(1))  # (Lc, Lc)
+            dist = torch.cdist(c.unsqueeze(0), c.unsqueeze(0))[0]  # (Lc, Lc)
+            bin_idx = torch.bucketize(dist, bin_edges).clamp(0, n_bins - 1)
+            oh = F.one_hot(bin_idx, num_classes=n_bins).float()  # (Lc, Lc, C)
+            gt_dist_bins[b, :, :Lc, :Lc] = oh.permute(2, 0, 1) * valid_pair.unsqueeze(0)
+            gt_dist_valid[b, :Lc, :Lc] = valid_pair
+        batch_out["gt_dist_bins"] = gt_dist_bins
+        batch_out["gt_dist_valid"] = gt_dist_valid
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

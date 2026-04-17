@@ -1,0 +1,21 @@
+# @package _global_
+# Stage 1 A/B check — GroupedFeatureFusion vs TruFor at informational parity.
+# Only feeds {prior, count} through the new grouped ingress; no new features.
+# Green light: P@L_long ep20 ∈ [baseline-0.005, baseline+0.005].
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage1_grouped_baseline"
+tags: ["stage1", "grouped", "ab-vs-trufor"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M

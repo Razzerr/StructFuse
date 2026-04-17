@@ -122,6 +122,7 @@ def project_prior(
     min_seq_sep: int = 0,
     symmetrize: bool = True,
     use_blosum: bool = True,
+    query_to_template: np.ndarray = None,
 ) -> np.ndarray:
     """
     Project template contact map onto query sequence via sequence alignment.
@@ -158,7 +159,8 @@ def project_prior(
             f"template_seq length {template_len}"
         )
 
-    _, _, query_to_template, _ = needleman_wunsch(query_seq, template_seq)
+    if query_to_template is None:
+        _, _, query_to_template, _ = needleman_wunsch(query_seq, template_seq)
 
     query_len = len(query_seq)
     
@@ -221,3 +223,115 @@ def project_prior(
         prior = (prior + prior.T) / 2.0
 
     return prior
+
+
+# Bin edges for Cα-Cα distance discretisation (AF2-style, contact-centred).
+# Bin 0 is reserved for "unknown" (unaligned pair or missing coord); real
+# distance bins start at index 1. This matches the one-hot layout used
+# downstream in PriorBuilder where dist_bins_acc has 9 channels.
+_DIST_BIN_EDGES = np.array([4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0], dtype=np.float32)
+N_DIST_BINS = len(_DIST_BIN_EDGES) + 2  # 9 = unknown + 8 finite-range bins
+
+
+def project_distance(
+    query_seq: str,
+    template_seq: str,
+    template_coords: np.ndarray,
+    query_to_template: np.ndarray,
+    min_seq_sep: int = 0,
+    symmetrize: bool = True,
+) -> np.ndarray:
+    """
+    Project pairwise Cα-Cα distances from a template onto query residue pairs
+    via the given alignment, then discretise to bin indices.
+
+    Args:
+        query_seq: query sequence of length Lq
+        template_seq: template sequence of length Lt
+        template_coords: (Lt, 3) array of Cα coordinates in Å
+        query_to_template: (Lq,) alignment map from needleman_wunsch;
+            -1 where the query position maps to a gap.
+        min_seq_sep: pairs with |i-j| < min_seq_sep are set to "unknown" (0).
+        symmetrize: average upper/lower triangle to enforce symmetry.
+
+    Returns:
+        (Lq, Lq) int8 bin indices. 0 = unknown, 1..8 = finite bins from
+        the edges in _DIST_BIN_EDGES (0-4, 4-6, 6-8, 8-10, 10-12, 12-16,
+        16-20, ≥20 Å).
+    """
+    Lq = len(query_seq)
+
+    # Pairwise distances on the template side (Lt, Lt).
+    tpl_dist = np.linalg.norm(
+        template_coords[:, None, :] - template_coords[None, :, :], axis=-1
+    ).astype(np.float32)
+
+    dist_bins = np.zeros((Lq, Lq), dtype=np.int8)
+
+    valid_mask = query_to_template >= 0
+    valid_indices = np.where(valid_mask)[0]
+    template_indices = query_to_template[valid_indices]
+
+    if len(valid_indices) > 0:
+        sub_dist = tpl_dist[np.ix_(template_indices, template_indices)]
+        # np.digitize maps into [0, len(edges)] — shift so bin 0 means "unknown".
+        bin_idx = (np.digitize(sub_dist, _DIST_BIN_EDGES) + 1).astype(np.int8)  # 1..8
+        dist_bins[np.ix_(valid_indices, valid_indices)] = bin_idx
+
+    if min_seq_sep > 0:
+        ii, jj = np.indices((Lq, Lq))
+        dist_bins[np.abs(ii - jj) < min_seq_sep] = 0
+
+    np.fill_diagonal(dist_bins, 0)
+
+    if symmetrize:
+        # Take pairwise max so any aligned evidence wins over an unknown.
+        # (Both sides *should* agree after symmetric NW but cheap to ensure.)
+        dist_bins = np.maximum(dist_bins, dist_bins.T)
+
+    return dist_bins
+
+
+def project_raw_distance(
+    query_seq: str,
+    template_coords: np.ndarray,
+    query_to_template: np.ndarray,
+    min_seq_sep: int = 0,
+    symmetrize: bool = True,
+) -> np.ndarray:
+    """
+    Project raw pairwise Cα-Cα distances onto the query. NaN marks
+    unknown positions (gap in alignment or within min_seq_sep of diagonal).
+
+    Used to compute across-template statistics (mean/std) in PriorBuilder;
+    NaN-awareness on the caller side lets templates with different
+    alignment footprints aggregate cleanly via np.nanmean.
+    """
+    Lq = len(query_seq)
+    tpl_dist = np.linalg.norm(
+        template_coords[:, None, :] - template_coords[None, :, :], axis=-1
+    ).astype(np.float32)
+
+    out = np.full((Lq, Lq), np.nan, dtype=np.float32)
+
+    valid_mask = query_to_template >= 0
+    valid_indices = np.where(valid_mask)[0]
+    template_indices = query_to_template[valid_indices]
+    if len(valid_indices) > 0:
+        out[np.ix_(valid_indices, valid_indices)] = tpl_dist[
+            np.ix_(template_indices, template_indices)
+        ]
+
+    if min_seq_sep > 0:
+        ii, jj = np.indices((Lq, Lq))
+        out[np.abs(ii - jj) < min_seq_sep] = np.nan
+
+    np.fill_diagonal(out, np.nan)
+
+    if symmetrize:
+        # Symmetrise element-wise using nanmean of (x, x.T) to preserve
+        # evidence from either triangle when one side is NaN.
+        both = np.stack([out, out.T])
+        out = np.nanmean(both, axis=0)
+
+    return out

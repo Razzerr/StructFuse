@@ -5,7 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
-from src.models.components.fusion_strategies import get_fusion_strategy
+from src.models.components.fusion_strategies import (
+    get_fusion_strategy,
+    GroupedFeatureFusion,
+)
+from src.models.components.triangle import TriangleMultiplicativeUpdate
 
 
 @functools.lru_cache(maxsize=8)
@@ -279,26 +283,30 @@ class Pair2DHead(nn.Module):
         use_depthwise: Whether to use depthwise separable convs if head_type="cnn"
     """
     def __init__(
-        self, 
+        self,
         d_pair: int,
-        width: int = 128, 
-        depth: int = 8, 
+        width: int = 128,
+        depth: int = 8,
         rel_ch: int = 14,
         fusion_strategy: str = "standard",
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
+        fusion_feature_groups: dict | None = None,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
         alternating_axial: bool = False,  # Alternating row/col instead of both per block
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
+        triangle_c: int = 32,
+        use_distogram_head: bool = False,
+        n_distogram_bins: int = 8,
     ):
         super().__init__()
-        
+
         self.head_type = head_type
         self.use_checkpoint = use_checkpoint
-        
+
         # Fusion strategy selection
         self.fusion_strategy = fusion_strategy
         self.fusion = get_fusion_strategy(
@@ -306,7 +314,8 @@ class Pair2DHead(nn.Module):
             d_pair=d_pair,
             d_rel=rel_ch,
             num_heads=fusion_num_heads,
-            reduction=fusion_reduction
+            reduction=fusion_reduction,
+            feature_groups=fusion_feature_groups,
         )
         
         # Input channels depend on fusion strategy output
@@ -327,6 +336,30 @@ class Pair2DHead(nn.Module):
                 )
                 for i in range(depth)
             ])
+        elif head_type == "axial_tri":
+            # Interleave axial blocks with triangle multiplicative updates:
+            # [ax, ax, tri_out, tri_in, ax, ax, tri_out, tri_in, ...]
+            blocks = []
+            for i in range(depth):
+                slot = i % 4
+                if slot == 2:
+                    blocks.append(
+                        TriangleMultiplicativeUpdate(width, c_triangle=triangle_c, outgoing=True)
+                    )
+                elif slot == 3:
+                    blocks.append(
+                        TriangleMultiplicativeUpdate(width, c_triangle=triangle_c, outgoing=False)
+                    )
+                else:
+                    blocks.append(
+                        AxialAttentionBlock(
+                            width,
+                            num_heads=head_num_heads,
+                            num_kv_heads=head_num_kv_heads,
+                            axis=(1 + (i % 2)) if alternating_axial else 0,
+                        )
+                    )
+            self.blocks = nn.ModuleList(blocks)
         elif head_type == "dilated":
             # Dilated convolutions with exponentially increasing dilation
             # Provides larger receptive field without attention overhead
@@ -341,7 +374,10 @@ class Pair2DHead(nn.Module):
                 for _ in range(depth)
             ])
         else:
-            raise ValueError(f"Unknown head_type: {head_type}. Must be 'cnn', 'dilated', or 'axial'")
+            raise ValueError(
+                f"Unknown head_type: {head_type}. "
+                "Must be 'cnn', 'dilated', 'axial', or 'axial_tri'"
+            )
         
         # Output projection
         self.out = nn.Conv2d(width, 1, 1)
@@ -353,7 +389,26 @@ class Pair2DHead(nn.Module):
         import math
         nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-    def forward(self, pair_feat, prior, count, rel, esm_contacts, pair_mask=None):
+        # Stage 4: optional distogram auxiliary head.
+        # Zero-init so it does not perturb the contact trunk at step 0.
+        self.use_distogram_head = bool(use_distogram_head)
+        if self.use_distogram_head:
+            self.out_disto = nn.Conv2d(width, int(n_distogram_bins), 1)
+            nn.init.zeros_(self.out_disto.weight)
+            nn.init.zeros_(self.out_disto.bias)
+
+    def forward(
+        self,
+        pair_feat,
+        prior,
+        count,
+        rel,
+        esm_contacts,
+        pair_mask=None,
+        tpl_dist_bins=None,
+        tpl_agreement=None,
+        tpl_dist_stats=None,
+    ):
         """
         Args:
             pair_feat: (B, d_pair, L, L) pairwise features
@@ -362,13 +417,26 @@ class Pair2DHead(nn.Module):
             rel: (B, rel_ch, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
-            
+            tpl_dist_bins, tpl_agreement, tpl_dist_stats: optional Stage 2
+                per-group features (only consumed by GroupedFeatureFusion).
+
         Returns:
             logits: (B, 1, L, L) contact prediction logits
         """
-        # Apply fusion strategy
-        x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
-        
+        # Apply fusion strategy — dispatch per-group features when using
+        # GroupedFeatureFusion, else fall back to the legacy signature.
+        if isinstance(self.fusion, GroupedFeatureFusion):
+            feats: dict = {"tpl_contact": torch.cat([prior, count], dim=1)}
+            if tpl_dist_bins is not None:
+                feats["tpl_dist"] = tpl_dist_bins
+            if tpl_agreement is not None:
+                feats["tpl_agree"] = tpl_agreement
+            if tpl_dist_stats is not None:
+                feats["tpl_dist_stats"] = tpl_dist_stats
+            x = self.fusion(pair_feat, esm_contacts, rel, **feats)
+        else:
+            x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
+
         # Processing
         x = self.inp(x)
         if self.head_type == "axial":
@@ -377,11 +445,30 @@ class Pair2DHead(nn.Module):
                     x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
                 else:
                     x = block(x, pair_mask=pair_mask)
+        elif self.head_type == "axial_tri":
+            # Triangle blocks run channel-last (B, L, L, C); axial blocks stay
+            # channel-first (B, C, L, L) and handle their own permute.
+            for block in self.blocks:
+                if isinstance(block, TriangleMultiplicativeUpdate):
+                    x = x.permute(0, 2, 3, 1).contiguous()
+                    if self.use_checkpoint and self.training:
+                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                    else:
+                        x = block(x, pair_mask)
+                    x = x.permute(0, 3, 1, 2).contiguous()
+                else:
+                    if self.use_checkpoint and self.training:
+                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                    else:
+                        x = block(x, pair_mask=pair_mask)
         else:
             for block in self.blocks:
                 x = block(x)
         logits = self.out(x)  # (B, 1, L, L)
-        
-        # Enforce symmetry
         logits = 0.5 * (logits + logits.transpose(-1, -2))
+
+        if self.use_distogram_head:
+            logits_disto = self.out_disto(x)  # (B, n_bins, L, L)
+            logits_disto = 0.5 * (logits_disto + logits_disto.transpose(-1, -2))
+            return logits, logits_disto
         return logits

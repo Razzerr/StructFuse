@@ -77,6 +77,14 @@ class ContactDataModule(LightningDataModule):
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
+        # Stage 2 — cheap features derived from template Cα coords inside
+        # PriorBuilder. Off by default so existing configs keep the legacy
+        # (prior, count) output shape.
+        compute_dist_bins: bool = False,
+        compute_agreement: bool = False,
+        compute_dist_stats: bool = False,
+        # Stage 4 — ground-truth Cα-Cα distogram bins for auxiliary loss.
+        compute_gt_dist_bins: bool = False,
         # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
         esm_embeddings_dir: Optional[str] = None,
     ):
@@ -115,6 +123,10 @@ class ContactDataModule(LightningDataModule):
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
         self.max_tpl_cache = int(max_tpl_cache)
+        self.compute_dist_bins = bool(compute_dist_bins)
+        self.compute_agreement = bool(compute_agreement)
+        self.compute_dist_stats = bool(compute_dist_stats)
+        self.compute_gt_dist_bins = bool(compute_gt_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
 
         # Initialize RNG for deterministic cropping
@@ -275,6 +287,9 @@ class ContactDataModule(LightningDataModule):
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
+                    compute_dist_bins=self.compute_dist_bins,
+                    compute_agreement=self.compute_agreement,
+                    compute_dist_stats=self.compute_dist_stats,
                 )
 
         if stage == "test" or stage is None:
@@ -304,6 +319,9 @@ class ContactDataModule(LightningDataModule):
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
+                    compute_dist_bins=self.compute_dist_bins,
+                    compute_agreement=self.compute_agreement,
+                    compute_dist_stats=self.compute_dist_stats,
                 )
 
     def _collate_train(self, batch):
@@ -318,6 +336,7 @@ class ContactDataModule(LightningDataModule):
             seed=rng_seed,
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
+            compute_gt_dist_bins=self.compute_gt_dist_bins,
         )
 
     def _collate_eval(self, batch):
@@ -331,6 +350,7 @@ class ContactDataModule(LightningDataModule):
             seed=42,  # fixed seed for reproducibility
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
+            compute_gt_dist_bins=self.compute_gt_dist_bins,
         )
         
     def _dl_kwargs(self, collate_fn=None):
