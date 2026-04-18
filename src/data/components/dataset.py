@@ -193,6 +193,7 @@ class PriorBuilder:
 
         # Stage 2 accumulators
         per_tpl_contacts: List[np.ndarray] = []
+        per_tpl_aligned: List[np.ndarray] = []
         per_tpl_distances: List[np.ndarray] = []
         dist_bins_acc = None
         if rich and self.compute_dist_bins:
@@ -237,8 +238,12 @@ class PriorBuilder:
 
             if rich:
                 # Per-template binary projected contacts (used for agreement).
+                # Also keep the aligned mask so agreement is only counted on
+                # pairs where the template actually mapped both endpoints —
+                # otherwise unaligned pairs look "agreeing" (all zeros, std=0).
                 if self.compute_agreement:
                     per_tpl_contacts.append(Pk_pos.copy())
+                    per_tpl_aligned.append(known.astype(bool).copy())
 
                 if self.compute_dist_bins:
                     dbin = project_distance(
@@ -272,12 +277,21 @@ class PriorBuilder:
             out["dist_bins"] = dist_bins_acc.transpose(2, 0, 1).astype(np.float32)
 
         if self.compute_agreement:
+            agreement = np.zeros((Lc, Lc), dtype=np.float32)
             if len(per_tpl_contacts) >= 2:
-                stacked = np.stack(per_tpl_contacts)  # (K, Lc, Lc)
-                agreement = 1.0 - stacked.std(axis=0)
+                stacked = np.stack(per_tpl_contacts)                 # (K, Lc, Lc)
+                aligned = np.stack(per_tpl_aligned)                  # (K, Lc, Lc) bool
+                # Std only over templates that actually aligned the pair.
+                stacked_masked = np.where(aligned, stacked, np.nan)
+                with np.errstate(invalid="ignore", all="ignore"):
+                    std = np.nanstd(stacked_masked, axis=0)          # (Lc, Lc), NaN where <2 aligned
+                sufficient = aligned.sum(axis=0) >= 2                # (Lc, Lc)
+                agreement = np.where(sufficient, 1.0 - std, 0.0).astype(np.float32)
+                np.nan_to_num(agreement, copy=False, nan=0.0)
                 np.clip(agreement, 0.0, 1.0, out=agreement)
-            else:
-                agreement = np.zeros((Lc, Lc), dtype=np.float32)
+                if self.min_seq_sep > 0:
+                    ii, jj = np.indices((Lc, Lc))
+                    agreement[np.abs(ii - jj) < self.min_seq_sep] = 0.0
             out["agreement"] = agreement[None].astype(np.float32)
 
         if self.compute_dist_stats:

@@ -532,12 +532,19 @@ class ContactLitModule(LightningModule):
             # Prefix buckets — matched against the parameter name produced by
             # self.net.named_parameters(). For GroupedFeatureFusion, each
             # per-group encoder is under head.fusion.encoders.<name>.* .
+            # Order matters: first match wins. Put specific per-group prefixes
+            # before the catch-all so that GroupedFeatureFusion subgroups get
+            # their own buckets (and we can spot dead encoders).
             branch_prefixes = {
                 "pair": ("pair.",),
                 "fusion_esm": ("head.fusion.esm_encoder.",),
+                "fusion_tpl_contact": ("head.fusion.encoders.tpl_contact.",),
+                "fusion_tpl_dist": ("head.fusion.encoders.tpl_dist.",),
+                "fusion_tpl_agree": ("head.fusion.encoders.tpl_agree.",),
+                "fusion_tpl_dist_stats": ("head.fusion.encoders.tpl_dist_stats.",),
                 "fusion_templates": (
                     "head.fusion.template_encoder.",  # TruForFusion
-                    "head.fusion.encoders.",          # GroupedFeatureFusion (ModuleDict)
+                    "head.fusion.encoders.",          # Any GroupedFeatureFusion group not listed above
                     "head.fusion.ffm.",               # TruFor's cross-attn FFM
                 ),
                 "fusion_rel": ("head.fusion.rel_proj.",),
