@@ -559,8 +559,11 @@ class ContactLitModule(LightningModule):
                     has_nan = bool(torch.isnan(g).any().item())
                 if not has_inf:
                     has_inf = bool(torch.isinf(g).any().item())
+                # torch.compile wraps net and prefixes every param name with
+                # "_orig_mod." — strip it so prefix matching works uniformly.
+                match_name = name[len("_orig_mod."):] if name.startswith("_orig_mod.") else name
                 for k, prefixes in branch_prefixes.items():
-                    if any(name.startswith(pref) for pref in prefixes):
+                    if any(match_name.startswith(pref) for pref in prefixes):
                         branch_norm_sq[k] += norm_sq
                         break
             total_norm = total_norm_sq ** 0.5
