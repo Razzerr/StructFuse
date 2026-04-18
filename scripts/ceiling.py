@@ -35,10 +35,7 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from src.models.utils.metrics import (  # noqa: E402
-    auc_pr_masked,
-    precision_at_k_by_range,
-)
+from src.models.utils.metrics import precision_at_k_by_range  # noqa: E402
 
 
 FEATURE_SPECS: Dict[str, List[str]] = {
@@ -94,27 +91,33 @@ def _flatten_valid_pairs(
 def _predict_prob_maps(
     lr: LogisticRegression, feat: torch.Tensor
 ) -> torch.Tensor:
-    """Run LR on full (B, C, L, L) tensor → (B, L, L) probabilities."""
-    B, C, H, W = feat.shape
-    flat = feat.permute(0, 2, 3, 1).reshape(-1, C).cpu().numpy().astype(np.float32)
+    """
+    Run LR on full (B, C, L, L) tensor → (B, L, L) linear score.
+    We skip the sigmoid because P@L only uses rank-ordering.
+    """
     if len(lr.classes_) == 1:
-        # Degenerate single-class fit: constant prediction.
+        B, _, H, W = feat.shape
         const = float(lr.classes_[0])
-        probs = np.full(flat.shape[0], const, dtype=np.float32)
-    else:
-        probs = lr.predict_proba(flat)[:, 1].astype(np.float32)
-    return torch.from_numpy(probs.reshape(B, H, W))
+        return torch.full((B, H, W), const, dtype=torch.float32)
+    w = torch.from_numpy(lr.coef_[0].astype(np.float32))       # (C,)
+    b = float(lr.intercept_[0])
+    # (B, C, H, W) · (C,) → (B, H, W)
+    score = torch.einsum("bchw,c->bhw", feat, w) + b
+    return score
 
 
 def _per_range_metrics(
-    probs: torch.Tensor, contact: torch.Tensor, long_mask: torch.Tensor
+    probs: torch.Tensor, contact: torch.Tensor, long_mask: torch.Tensor,
+    with_auc: bool = False,
 ) -> Dict[str, float]:
+    """P@L by range; AUC-PR is expensive, only compute when explicitly asked."""
     if probs.dim() == 3:
         probs_4d = probs.unsqueeze(1)
     else:
         probs_4d = probs
     ranges = precision_at_k_by_range(probs_4d, contact, long_mask, k_mode="L")
-    ranges["AUC_PR_long"] = auc_pr_masked(probs_4d, contact, long_mask, range_type="long")
+    if with_auc:
+        ranges["AUC_PR_long"] = auc_pr_masked(probs_4d, contact, long_mask, range_type="long")
     return ranges
 
 
@@ -145,14 +148,28 @@ def fit_logistic_regressions(
 
     n_batches = 0
     n_pairs_total = 0
-    for batch in _run_val_loader(datamodule, max_batches):
+    for i, batch in enumerate(_run_val_loader(datamodule, max_batches)):
+        if i == 0:
+            # Diagnostic: per-feature stats from the very first batch, so we
+            # can tell at a glance whether prior/tpl_* are being populated.
+            for key in ("prior", "count", "tpl_dist_bins", "tpl_agreement",
+                        "tpl_dist_stats", "esm_contacts"):
+                if key in batch:
+                    t = batch[key]
+                    print(
+                        f"  [batch0] {key} shape={tuple(t.shape)} "
+                        f"min={float(t.min()):.4g} max={float(t.max()):.4g} "
+                        f"mean={float(t.mean()):.4g} "
+                        f"nonzero_frac={float((t != 0).float().mean()):.4g}",
+                        flush=True,
+                    )
+                else:
+                    print(f"  [batch0] {key} MISSING", flush=True)
         mask = batch["long_mask"]          # (B, L, L)
         if not mask.any():
             continue
         target = batch["contact"]
 
-        # Collect targets once; valid-pair ordering is shared across feature
-        # sets because we always flatten with the same mask.
         any_feat = _stack_feature_set(batch, FEATURE_SPECS["lr_minimal"])
         _, y = _flatten_valid_pairs(any_feat, target, mask)
 
@@ -296,8 +313,8 @@ def write_results_tsv(
 ) -> None:
     (a, b), _ = weighted
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cols = ["P_L_short", "P_L_medium", "P_L_long", "AUC_PR_long"]
-    key_map = {"P_L_short": "short", "P_L_medium": "medium", "P_L_long": "long", "AUC_PR_long": "AUC_PR_long"}
+    cols = ["P_L_short", "P_L_medium", "P_L_long"]
+    key_map = {"P_L_short": "short", "P_L_medium": "medium", "P_L_long": "long"}
     lines = ["\t".join(["feature_set", *cols])]
     method_order = [
         "prior_alone", "esm_alone", "weighted_sum_best",

@@ -151,13 +151,29 @@ def collect_pairs(
     print(f"=== Collecting pair-level features (max_pairs={max_pairs}) ===", flush=True)
     chunks: Dict[str, List[np.ndarray]] = {}
     total = 0
-    for batch in _run_val_loader(datamodule, max_batches):
+    batch_keys_seen: List[str] = []
+    for i, batch in enumerate(_run_val_loader(datamodule, max_batches)):
+        if i == 0:
+            batch_keys_seen = sorted(batch.keys())
+            print(f"  first batch keys: {batch_keys_seen}", flush=True)
+            # Quick per-feature stats from the raw batch tensors.
+            for key in ("prior", "count", "tpl_dist_bins", "tpl_agreement",
+                        "tpl_dist_stats", "esm_contacts"):
+                if key in batch:
+                    t = batch[key]
+                    print(
+                        f"  stats[{key}] shape={tuple(t.shape)} "
+                        f"min={float(t.min()):.4g} max={float(t.max()):.4g} "
+                        f"mean={float(t.mean()):.4g} nonzero_frac={float((t!=0).float().mean()):.4g}",
+                        flush=True,
+                    )
+                else:
+                    print(f"  stats[{key}] MISSING from batch", flush=True)
         d = _extract_pair_scalars(batch)
         n = d["_y"].size
         if n == 0:
             continue
         if total + n > max_pairs:
-            # Reservoir-ish: take a random slice of the current batch.
             take = max(0, max_pairs - total)
             if take == 0:
                 break
@@ -172,6 +188,18 @@ def collect_pairs(
             total += n
     out = {k: np.concatenate(v) for k, v in chunks.items()}
     print(f"  collected {total} valid pairs", flush=True)
+    # Per-feature pair-level stats after masking (what MI will see).
+    print("=== Pair-level feature stats (after long_mask) ===", flush=True)
+    for name in ("prior", "count", "esm", "dist_argmax", "dist_mean", "dist_std", "agreement"):
+        if name not in out:
+            print(f"  {name}: MISSING", flush=True)
+            continue
+        x = out[name]
+        print(
+            f"  {name}: n={x.size} min={x.min():.4g} max={x.max():.4g} "
+            f"mean={x.mean():.4g} std={x.std():.4g} nonzero_frac={(x != 0).mean():.4g}",
+            flush=True,
+        )
     return out
 
 

@@ -21,7 +21,8 @@ DRY_RUN=false
 
 PROJECT_DIR="/mnt/storage_3/home/nszostak/pl0735-01/project_data/old_pl0468-02/StructFuse"
 LOGS_DIR="${PROJECT_DIR}/logs"
-mkdir -p "${LOGS_DIR}"
+TEMP_DIR="${PROJECT_DIR}/.temp"
+mkdir -p "${LOGS_DIR}" "${TEMP_DIR}"
 
 # --------------------------------------------------------------------------
 # submit <script_path> <job_name> [time_limit]
@@ -34,7 +35,9 @@ submit() {
     local job_name="$2"
     local time_limit="${3:-01:00:00}"
 
-    local cmd="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python ${script} experiment=diagnostics/ceiling"
+    # Predictable tee path in .temp so we don't have to hunt slurm logs.
+    local temp_log="${TEMP_DIR}/${job_name}.log"
+    local cmd="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python ${script} experiment=diagnostics/ceiling 2>&1 | tee ${temp_log}"
 
     if $DRY_RUN; then
         echo "[DRY-RUN] sbatch  job=${job_name}  time=${time_limit}  script=${script}"
@@ -89,5 +92,6 @@ submit "scripts/feature_correlation.py"  "feat_corr_stage2"       "00:30:00"
 
 echo "================================================"
 echo " Total: 2 jobs"
-echo " Outputs: .temp/ceiling_results.tsv, .temp/feature_correlation.tsv"
+echo " Results: .temp/ceiling_results.tsv, .temp/feature_correlation.tsv"
+echo " Full stdout+stderr: .temp/ceiling_stage2.log, .temp/feat_corr_stage2.log"
 echo "================================================"

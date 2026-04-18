@@ -30,8 +30,9 @@ train: false
 test: false
 
 ceiling:
-  # -1 = full val set. Reduce for iteration.
-  max_batches: -1
+  # -1 = full val set. 100 batches (~800 samples) is already tight on ceiling
+  # estimate noise; use that as default so the job fits inside 1h wall time.
+  max_batches: 100
   # Per-batch balanced subsample for logistic regression fitting.
   max_pairs_per_batch: 20000
   out_path: .temp/ceiling_results.tsv
