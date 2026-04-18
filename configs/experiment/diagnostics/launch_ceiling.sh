@@ -89,6 +89,7 @@ echo "================================================"
 
 submit "scripts/ceiling.py"              "ceiling_stage2"         "01:00:00"
 submit "scripts/feature_correlation.py"  "feat_corr_stage2"       "00:30:00"
+submit "scripts/template_coverage.py"    "tpl_coverage"           "00:20:00"
 
 echo "================================================"
 echo " Total: 2 jobs"
