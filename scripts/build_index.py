@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
@@ -99,6 +100,117 @@ def load_cluster_map(cluster_file: str) -> Dict[str, int]:
         f"Loaded {n_clusters} clusters covering {len(prot2cluster)} proteins"
     )
     return prot2cluster
+
+
+def _load_precomputed_rep(pc_path: Path) -> Tuple[str, int, np.ndarray]:
+    """Load one precomputed ESM2 embedding NPZ, mean-pool across residues.
+
+    Returns ``(stem, seq_len, emb_1280)``. ``rep`` is already BOS/EOS-stripped
+    by ``scripts/precompute_esm2_embeddings.py``.
+    """
+    with np.load(pc_path) as d:
+        rep = d["rep"]  # (L, D) float16
+    L = int(rep.shape[0])
+    emb = rep.astype(np.float32).mean(axis=0)  # (D,)
+    return pc_path.stem, L, emb
+
+
+def build_faiss_index_from_precomputed(
+    precomputed_dir: Path,
+    processed_dir: Path,
+    out_dir: Path,
+    exclude_ids: Set[str] = None,
+    prot2cluster: Dict[str, int] = None,
+    num_threads: int = 16,
+) -> None:
+    """Fast path: build FAISS index directly from precomputed ESM2 embeddings.
+
+    Skips the ESM2 forward entirely (~4h → ~3min on 40k chains) by reading
+    the per-residue ``rep`` tensors already cached at
+    ``data/precomputed/esm_t33_650M/*.npz`` and mean-pooling them.
+
+    Long sequences: ``precompute_esm2_embeddings.py`` truncates at
+    ``max_len=1022`` whereas the ESM-forward path chunk-averages. For
+    FAISS retrieval this is acceptable — and in fact MORE consistent, since
+    at training time FAISS queries use the same precomputed embeddings.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    exclude_ids = exclude_ids or set()
+    prot2cluster = prot2cluster or {}
+
+    processed_map = {p.stem: p for p in processed_dir.glob("*.npz")}
+    logger.info(f"Found {len(processed_map)} NPZs in {processed_dir}")
+
+    pc_files = sorted(precomputed_dir.glob("*.npz"))
+    logger.info(f"Found {len(pc_files)} precomputed embeddings in {precomputed_dir}")
+
+    # Filter out excluded PDB prefixes and stems without a processed NPZ.
+    todo: List[Path] = []
+    skipped_excluded = 0
+    skipped_no_npz = 0
+    for pc_path in pc_files:
+        stem = pc_path.stem
+        pdb_id = stem.split("_")[0]
+        if pdb_id in exclude_ids:
+            skipped_excluded += 1
+            continue
+        if stem not in processed_map:
+            skipped_no_npz += 1
+            continue
+        todo.append(pc_path)
+    logger.info(
+        f"To embed: {len(todo)} (excluded={skipped_excluded}, no-npz={skipped_no_npz})"
+    )
+
+    ids_meta: List[Dict] = []
+    emb_rows: List[np.ndarray] = []
+
+    # Parallel I/O: np.load is the bottleneck (disk-bound), threads are enough.
+    with ThreadPoolExecutor(max_workers=num_threads) as pool:
+        for stem, L, emb in tqdm(
+            pool.map(_load_precomputed_rep, todo),
+            total=len(todo),
+            desc="Mean-pooling precomputed embeddings",
+        ):
+            if L == 0:
+                continue
+            prot_id = _get_protein_id(stem)
+            ids_meta.append({
+                "id": stem,
+                "seq_len": L,
+                "npz": str(processed_map[stem]),
+                "cluster_id": prot2cluster.get(prot_id, -1),
+            })
+            emb_rows.append(emb)
+
+    if not emb_rows:
+        raise RuntimeError("No embeddings collected — check precomputed/processed dirs")
+
+    embeddings = np.stack(emb_rows).astype(np.float32)  # (N, D)
+
+    logger.info("L2-normalising embeddings")
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
+    embeddings /= norms
+
+    dim = embeddings.shape[1]
+    logger.info(f"Building FAISS index (dim={dim}, n={len(ids_meta)})")
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+
+    logger.info(f"Saving index artifacts to {out_dir}")
+    faiss.write_index(index, str(out_dir / "faiss.index"))
+    np.save(out_dir / "embeddings.npy", embeddings)
+    with open(out_dir / "ids.json", "w") as f:
+        json.dump(ids_meta, f, indent=2)
+
+    logger.info("=" * 80)
+    logger.info("FAISS index built via precomputed-embedding fast path:")
+    logger.info(f"  Entries:    {len(ids_meta)}")
+    logger.info(f"  Dimension:  {dim}")
+    logger.info(f"  Output:     {out_dir / 'faiss.index'}")
+    logger.info(f"  Metadata:   {out_dir / 'ids.json'}")
+    logger.info(f"  Embeddings: {out_dir / 'embeddings.npy'}")
+    logger.info("=" * 80)
 
 
 def build_faiss_index(
@@ -299,6 +411,21 @@ def main():
         help="Path to cluster file (one cluster per line, space-separated chain IDs). "
              "Used to embed cluster_id in index metadata for homolog filtering.",
     )
+    ap.add_argument(
+        "--precomputed_embeddings_dir",
+        type=str,
+        default=None,
+        help="If set, skip the ESM2 forward and build the index by mean-pooling "
+             "per-residue embeddings from this directory (one NPZ per chain with "
+             "key 'rep', as produced by scripts/precompute_esm2_embeddings.py). "
+             "Dramatically faster (~4h → ~3min).",
+    )
+    ap.add_argument(
+        "--num_threads",
+        type=int,
+        default=16,
+        help="Threads for parallel NPZ loading in the precomputed fast path.",
+    )
     args = ap.parse_args()
 
     processed_dir = Path(args.processed_dir)
@@ -316,13 +443,6 @@ def main():
     else:
         logger.info("No exclusion list — building FULL index (val/test included)")
 
-    # Find NPZ files
-    npz_files = sorted(processed_dir.glob("*.npz"))
-    if len(npz_files) == 0:
-        raise RuntimeError(f"No NPZ files found in {processed_dir}")
-
-    logger.info(f"Found {len(npz_files)} NPZ files in {processed_dir}")
-
     # Load cluster mapping
     prot2cluster: Dict[str, int] = {}
     if args.cluster_file:
@@ -332,7 +452,29 @@ def main():
         else:
             logger.warning(f"Cluster file not found: {cluster_path} — building without cluster IDs")
 
-    # Build FAISS index
+    # Fast path: precomputed embeddings (skip ESM2 entirely)
+    if args.precomputed_embeddings_dir:
+        precomputed_dir = Path(args.precomputed_embeddings_dir)
+        if not precomputed_dir.exists():
+            raise RuntimeError(f"Precomputed dir not found: {precomputed_dir}")
+        build_faiss_index_from_precomputed(
+            precomputed_dir=precomputed_dir,
+            processed_dir=processed_dir,
+            out_dir=out_dir,
+            exclude_ids=exclude_ids,
+            prot2cluster=prot2cluster,
+            num_threads=args.num_threads,
+        )
+        return
+
+    # Find NPZ files
+    npz_files = sorted(processed_dir.glob("*.npz"))
+    if len(npz_files) == 0:
+        raise RuntimeError(f"No NPZ files found in {processed_dir}")
+
+    logger.info(f"Found {len(npz_files)} NPZ files in {processed_dir}")
+
+    # Build FAISS index (legacy path: run ESM2 forward)
     build_faiss_index(
         npz_files=npz_files,
         out_dir=out_dir,
