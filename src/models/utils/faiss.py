@@ -74,6 +74,15 @@ class FaissIndex:
             cid = m.get("cluster_id", -1)
             if cid != -1:
                 self.prot2cluster[pid] = cid
+        # cluster_id -> #chains in that cluster. Used to expand search_k when a
+        # query sits in a mega-cluster (e.g. ribosomal proteins, ~63k chains):
+        # the top-500 FAISS neighbours would all be same-cluster and get
+        # filtered, leaving zero hits. We need search_k ≥ cluster_size to see
+        # the first out-of-cluster neighbour.
+        self.cluster2size: Dict[int, int] = {}
+        for cid in self.row2cluster:
+            if cid != -1:
+                self.cluster2size[cid] = self.cluster2size.get(cid, 0) + 1
 
         # Precomputed embeddings: chain_id → row index for O(1) lookup
         # Eliminates per-query ESM2 forward passes during training
@@ -171,8 +180,13 @@ class FaissIndex:
         if (self._emb_hit + self._emb_miss) == 100:
             log.info(f"[FaissIndex] After 100 queries: {self._emb_hit} hits, {self._emb_miss} misses")
 
-        # Large buffer: cluster filtering can remove hundreds of neighbors
-        search_k = max(k * 3, k + 500)
+        # Adaptive over-fetch: the query may sit in a mega-cluster (e.g. cluster=1
+        # ≈ 63k ribosomal chains) where the top-500 FAISS neighbours are all
+        # same-cluster and would be filtered out.
+        extra_holdout = len(self.holdout_prot_ids) if filter_holdout else 0
+        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        search_k = max(k * 3, k + 500 + extra_holdout + extra_cluster)
+        search_k = min(search_k, self.index.ntotal)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
         sims = sims[0].tolist()
         idxs = idxs[0].tolist()
@@ -270,10 +284,14 @@ class FaissIndex:
         row = self._id2row[query_name]
         x = self._embeddings[row : row + 1]  # (1, D)
 
-        # When filtering a large holdout set we may need to over-fetch more
-        # to still land k valid hits.
-        extra = len(self.holdout_prot_ids) if filter_holdout else 0
-        search_k = max(k * 3, k + 500 + extra)
+        # Adaptive over-fetch: the query may sit in a mega-cluster (e.g. cluster=1
+        # ≈ 63k ribosomal chains) where the top-500 FAISS neighbours are all
+        # same-cluster and would be filtered out. search_k must at least cover
+        # the query's cluster so the first out-of-cluster hit is returned.
+        extra_holdout = len(self.holdout_prot_ids) if filter_holdout else 0
+        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        search_k = max(k * 3, k + 500 + extra_holdout + extra_cluster)
+        search_k = min(search_k, self.index.ntotal)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
         sims = sims[0].tolist()
         idxs = idxs[0].tolist()
