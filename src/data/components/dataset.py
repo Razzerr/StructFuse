@@ -437,18 +437,19 @@ class ContactDataset(Dataset):
     """
 
     def __init__(
-        self, 
-        id_list_file: Path, 
-        root: Path = Path("data/processed"), 
+        self,
+        id_list_file: Path,
+        root: Path = Path("data/processed"),
         min_len: int = 1,
         splits_json_path: Optional[Path] = None,
         exclude_subsets: Optional[List[str]] = None,
         index_dir: Optional[Path] = None,
+        skip_ids_file: Optional[Path] = None,
     ):
         self.root = root
         self.ids = []
         self._chain2cluster: Dict[str, int] = {}
-        
+
         # Load subset mapping if available
         if splits_json_path is not None:
             self.subset_map = load_subset_mapping(Path(splits_json_path))
@@ -464,15 +465,34 @@ class ContactDataset(Dataset):
         raw_id_set = set(raw_ids)
         _exclude = set(exclude_subsets) if exclude_subsets else set()
 
+        # Skip-list of chain stems whose NPZ (processed or precomputed ESM) is
+        # known-corrupt. Training crashes hard if the query side fails to load,
+        # so such chains must be excluded from the dataset upfront.
+        skip_stems: Set[str] = set()
+        if skip_ids_file is not None:
+            p = Path(skip_ids_file)
+            if p.exists():
+                with open(p) as f:
+                    skip_stems = {ln.strip() for ln in f if ln.strip()}
+                log.info(f"  Loaded {len(skip_stems)} skip stems from {p}")
+            else:
+                log.warning(f"  skip_ids_file not found: {p}")
+
         # Filter index entries by PDB ID and min_len (pure dict lookups, instant)
         n_excluded = 0
+        n_skipped_corrupt = 0
         for stem, L in index.items():
             pdb_id = stem.split("_")[0]
             if pdb_id in raw_id_set and L >= min_len:
                 if _exclude and self.subset_map.get(pdb_id.lower(), SUBSET_ALL) in _exclude:
                     n_excluded += 1
                     continue
+                if stem in skip_stems:
+                    n_skipped_corrupt += 1
+                    continue
                 self.ids.append(stem)
+        if n_skipped_corrupt:
+            log.info(f"  Skipped {n_skipped_corrupt} chains from skip_ids_file")
 
         log.info(f"Loaded {len(self.ids)} chains (min_len={min_len})")
         if n_excluded:

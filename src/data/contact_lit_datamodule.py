@@ -93,6 +93,9 @@ class ContactDataModule(LightningDataModule):
         # train query ever retrieves a val/test structure; val/test collate
         # uses filter_holdout=False so inference sees the full index.
         holdout_id_files: Optional[List[str]] = None,
+        # Plaintext file of chain stems whose NPZ (processed or precomputed ESM)
+        # is known-corrupt. Filtered out of every dataset at setup time.
+        skip_ids_file: Optional[str] = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -135,6 +138,7 @@ class ContactDataModule(LightningDataModule):
         self.compute_gt_dist_bins = bool(compute_gt_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
         self.holdout_id_files: List[str] = [str(p) for p in (holdout_id_files or [])]
+        self.skip_ids_file: Optional[str] = str(skip_ids_file) if skip_ids_file else None
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -220,6 +224,7 @@ class ContactDataModule(LightningDataModule):
                     root=self.data_root,
                     min_len=self.min_len,
                     splits_json_path=self.splits_json_path,
+                    skip_ids_file=self.skip_ids_file,
                     index_dir=self.index_dir,
                 )
                 log.info(f"  TrainVal: {len(self.dset_trainval)} chains from {all_train_path}")
@@ -247,6 +252,7 @@ class ContactDataModule(LightningDataModule):
                         root=self.data_root,
                         min_len=self.min_len,
                         splits_json_path=self.splits_json_path,
+                    skip_ids_file=self.skip_ids_file,
                         exclude_subsets=self.test_exclude_subsets,
                     )
                     log.info(f"  Val (static): {len(self.dset_val)} samples")
@@ -270,12 +276,14 @@ class ContactDataModule(LightningDataModule):
                     root=self.data_root,
                     min_len=self.min_len,
                     splits_json_path=self.splits_json_path,
+                    skip_ids_file=self.skip_ids_file,
                 )
                 self.dset_val = ContactDataset(
                     val_split_path,
                     root=self.data_root,
                     min_len=self.min_len,
                     splits_json_path=self.splits_json_path,
+                    skip_ids_file=self.skip_ids_file,
                 )
                 log.info(f"  Train: {len(self.dset_train)} | Val: {len(self.dset_val)}")
 
@@ -304,10 +312,11 @@ class ContactDataModule(LightningDataModule):
             assert test_split_path.exists(), f"Test split file not found: {test_split_path}"
             log.info("Creating test dataset with subset info")
             self.dset_test = ContactDataset(
-                test_split_path, 
-                root=self.data_root, 
+                test_split_path,
+                root=self.data_root,
                 min_len=self.min_len,
                 splits_json_path=self.splits_json_path,
+                skip_ids_file=self.skip_ids_file,
                 exclude_subsets=self.test_exclude_subsets,
             )
             log.info(f"  Test:  {len(self.dset_test)} samples from {test_split_path}")

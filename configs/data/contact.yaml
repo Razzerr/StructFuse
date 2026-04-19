@@ -53,3 +53,8 @@ holdout_id_files:
 # Precomputed ESM2 embeddings (skip frozen ESM2 forward during training)
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
 esm_embeddings_dir: data/precomputed/esm_t6_8M
+
+# Skip-list of chain stems with known-corrupt NPZs (processed or precomputed
+# ESM). Each line is one stem (e.g. `8tz6_B`). Filtered out of every dataset
+# at setup time so training/eval never tries to load them.
+skip_ids_file: data/corrupt_ids.txt
