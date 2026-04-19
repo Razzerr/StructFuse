@@ -21,9 +21,10 @@ Usage:
 import argparse
 import json
 import logging
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set
 
 import rootutils
 import numpy as np
@@ -102,17 +103,24 @@ def load_cluster_map(cluster_file: str) -> Dict[str, int]:
     return prot2cluster
 
 
-def _load_precomputed_rep(pc_path: Path) -> Tuple[str, int, np.ndarray]:
+def _load_precomputed_rep(
+    pc_path: Path,
+) -> Optional[Tuple[str, int, np.ndarray]]:
     """Load one precomputed ESM2 embedding NPZ, mean-pool across residues.
 
-    Returns ``(stem, seq_len, emb_1280)``. ``rep`` is already BOS/EOS-stripped
+    Returns ``(stem, seq_len, emb_1280)`` or ``None`` if the file is
+    unreadable/corrupted (caller skips). ``rep`` is already BOS/EOS-stripped
     by ``scripts/precompute_esm2_embeddings.py``.
     """
-    with np.load(pc_path) as d:
-        rep = d["rep"]  # (L, D) float16
-    L = int(rep.shape[0])
-    emb = rep.astype(np.float32).mean(axis=0)  # (D,)
-    return pc_path.stem, L, emb
+    try:
+        with np.load(pc_path) as d:
+            rep = d["rep"]  # (L, D) float16
+            L = int(rep.shape[0])
+            emb = rep.astype(np.float32).mean(axis=0)  # (D,)
+        return pc_path.stem, L, emb
+    except (EOFError, OSError, ValueError, KeyError, zipfile.BadZipFile) as e:
+        logger.warning(f"Skipping corrupted precomputed NPZ {pc_path.name}: {e}")
+        return None
 
 
 def build_faiss_index_from_precomputed(
@@ -164,14 +172,19 @@ def build_faiss_index_from_precomputed(
 
     ids_meta: List[Dict] = []
     emb_rows: List[np.ndarray] = []
+    n_corrupt = 0
 
     # Parallel I/O: np.load is the bottleneck (disk-bound), threads are enough.
     with ThreadPoolExecutor(max_workers=num_threads) as pool:
-        for stem, L, emb in tqdm(
+        for result in tqdm(
             pool.map(_load_precomputed_rep, todo),
             total=len(todo),
             desc="Mean-pooling precomputed embeddings",
         ):
+            if result is None:
+                n_corrupt += 1
+                continue
+            stem, L, emb = result
             if L == 0:
                 continue
             prot_id = _get_protein_id(stem)
@@ -182,6 +195,9 @@ def build_faiss_index_from_precomputed(
                 "cluster_id": prot2cluster.get(prot_id, -1),
             })
             emb_rows.append(emb)
+
+    if n_corrupt > 0:
+        logger.warning(f"Skipped {n_corrupt} corrupted precomputed NPZs (logged above)")
 
     if not emb_rows:
         raise RuntimeError("No embeddings collected — check precomputed/processed dirs")
