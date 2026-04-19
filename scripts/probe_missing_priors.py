@@ -44,7 +44,8 @@ HOLDOUT_FILES = [
 ]
 TOPK = 4
 MIN_SIMILARITY = 0.0  # match default; inspect a wider net
-SEARCH_K = 50  # over-fetch for diagnostic visibility
+SEARCH_K = 50  # shown in header
+DEEP_SEARCH_K = 20000  # to find first out-of-cluster / out-of-holdout hit
 
 
 def load_holdout(files):
@@ -113,9 +114,39 @@ def probe(idx: FaissIndex, pid: str, filter_holdout: bool):
         random_retrieval=False,
         filter_holdout=filter_holdout,
     )
-    print(f"  → kept after all filters: {len(kept)}")
+    print(f"  → kept after all filters (default search_k): {len(kept)}")
     for tid, s in kept:
         print(f"      OK {tid}  sim={s:.4f}")
+
+    # Deep search: how deep do we have to go to find the first non-same-cluster,
+    # non-same-protein, non-holdout (if filter on) hit?
+    print(f"  deep-search k={DEEP_SEARCH_K} for first OUT-OF-CLUSTER hit:")
+    deep_sims, deep_idxs = idx.index.search(x, DEEP_SEARCH_K)
+    deep_sims = deep_sims[0].tolist()
+    deep_idxs = deep_idxs[0].tolist()
+    n_same_prot = n_same_cluster = n_holdout = 0
+    first_ok_rank = None
+    for rank, (sim, row_idx) in enumerate(zip(deep_sims, deep_idxs)):
+        if row_idx < 0:
+            continue
+        tpl_id = idx.row2id[row_idx]
+        tpl_prot = _get_protein_id(tpl_id)
+        if tpl_prot == query_prot_id:
+            n_same_prot += 1
+            continue
+        if filter_holdout and tpl_prot in idx.holdout_prot_ids:
+            n_holdout += 1
+            continue
+        if query_cluster != -1 and idx.row2cluster[row_idx] == query_cluster:
+            n_same_cluster += 1
+            continue
+        first_ok_rank = rank
+        print(f"    first OK at rank {rank}: {tpl_id}  sim={sim:.4f}")
+        break
+    print(f"    cumulative filtered within k={DEEP_SEARCH_K}: "
+          f"same_prot={n_same_prot}  same_cluster={n_same_cluster}  holdout={n_holdout}")
+    if first_ok_rank is None:
+        print(f"    !! NO out-of-cluster hit found within first {DEEP_SEARCH_K} neighbours")
 
 
 def main():
