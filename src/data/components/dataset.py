@@ -116,7 +116,14 @@ class PriorBuilder:
 
     # -- template loading (with FIFO cache) --------------------------------
 
-    def _get_tpl(self, tpl_id: str) -> Dict[str, np.ndarray]:
+    def _get_tpl(self, tpl_id: str) -> Optional[Dict[str, np.ndarray]]:
+        """Load (or return cached) template data.
+
+        Returns ``None`` if the NPZ is unreadable/corrupt after retries —
+        callers must skip that template. This keeps training robust to rare
+        partial-write corruption in ``data/processed/*.npz`` (e.g. 8tz6_B)
+        without crashing an entire epoch.
+        """
         if tpl_id in self._tpl_cache:
             return self._tpl_cache[tpl_id]
 
@@ -125,20 +132,22 @@ class PriorBuilder:
             del self._tpl_cache[oldest]
 
         npz_path = self._id_to_npz.get(tpl_id)
-        td = _load_npz_with_retry(npz_path, allow_pickle=True)
-        tseq_arr = td["seq"]
-        tseq = (
-            str(tseq_arr.item())
-            if isinstance(tseq_arr, np.ndarray) and tseq_arr.shape == ()
-            else str(tseq_arr)
-        )
-        tC = td["contact"].astype(np.uint8).copy()
-        entry: Dict[str, np.ndarray] = {"seq": tseq, "contact": tC}
-        if self._needs_coords:
-            # Templates cached with contact/coords for downstream Stage 2
-            # features. Coords are Cα-only (from scripts/build_contacts.py).
-            entry["coords"] = td["coords"].astype(np.float32).copy()
-        td.close()
+        try:
+            td = _load_npz_with_retry(npz_path, allow_pickle=True)
+            tseq_arr = td["seq"]
+            tseq = (
+                str(tseq_arr.item())
+                if isinstance(tseq_arr, np.ndarray) and tseq_arr.shape == ()
+                else str(tseq_arr)
+            )
+            tC = td["contact"].astype(np.uint8).copy()
+            entry: Dict[str, np.ndarray] = {"seq": tseq, "contact": tC}
+            if self._needs_coords:
+                entry["coords"] = td["coords"].astype(np.float32).copy()
+            td.close()
+        except (EOFError, OSError, zipfile.BadZipFile, KeyError, ValueError) as exc:
+            log.warning(f"Skipping corrupt template NPZ {tpl_id} ({npz_path}): {exc}")
+            return None
         self._tpl_cache[tpl_id] = entry
         return self._tpl_cache[tpl_id]
 
@@ -224,6 +233,8 @@ class PriorBuilder:
 
         for (tpl_id, _sim), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
+            if tpl is None:
+                continue  # corrupt NPZ — logged in _get_tpl, skip this template
             # Compute NW once; feed into every projector to avoid recomputing
             # the O(Lq·Lt) alignment for each feature type.
             _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
