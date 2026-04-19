@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 import random
 
 import numpy as np
@@ -37,8 +37,26 @@ class FaissIndex:
     This mirrors the test-set construction (cluster promotion) and
     prevents the model from learning to copy near-identical templates.
     """
-    def __init__(self, index_dir: str):
+    def __init__(
+        self,
+        index_dir: str,
+        holdout_ids: Optional[Iterable[str]] = None,
+    ):
         self.index_dir = index_dir
+        # Protein-level holdout set: any retrieved template whose protein-ID
+        # matches one of these is dropped when `filter_holdout=True` is passed
+        # to topk*. Used at training time to prevent train queries from
+        # retrieving val/test structures (while keeping those chains in the
+        # index so val/test queries themselves can retrieve meaningful
+        # neighbours at inference).
+        self.holdout_prot_ids: Set[str] = {
+            _get_protein_id(x) for x in (holdout_ids or [])
+        }
+        if self.holdout_prot_ids:
+            log.info(
+                f"[FaissIndex] Loaded {len(self.holdout_prot_ids)} holdout protein IDs "
+                f"(filter_holdout=True queries will skip them)"
+            )
         self.index = faiss.read_index(os.path.join(index_dir, "faiss.index"))
         with open(os.path.join(index_dir, "ids.json")) as f:
             self.meta = json.load(f)   # list of dicts: id, seq_len, npz, cluster_id
@@ -103,14 +121,16 @@ class FaissIndex:
         debug: bool = False,
         min_similarity: float = 0.0,
         random_retrieval: bool = False,
+        filter_holdout: bool = True,
     ) -> List[Tuple[str, float]]:
         """
         Retrieve top-k template candidates for a query sequence.
 
         Filtering order (all applied in a single pass):
           1. Same protein (same protein-level ID) → always blocked
-          2. Same 30 % seq-id cluster → blocked (prevents homolog leakage)
-          3. min_similarity floor → blocked
+          2. Holdout protein IDs (val/test) → blocked when ``filter_holdout``
+          3. Same 30 % seq-id cluster → blocked (prevents homolog leakage)
+          4. min_similarity floor → blocked
 
         Args:
             esm_model: ESM2 model for embedding
@@ -131,7 +151,9 @@ class FaissIndex:
         query_cluster = self.prot2cluster.get(query_prot_id, -1)
 
         if random_retrieval:
-            return self._random_topk(query_prot_id, query_cluster, k)
+            return self._random_topk(
+                query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+            )
 
         # Use precomputed embedding if available (skips ESM2 forward entirely)
         if self._embeddings is not None and query_name in self._id2row:
@@ -157,6 +179,7 @@ class FaissIndex:
 
         out: List[Tuple[str, float]] = []
         filtered_same_prot = []
+        filtered_holdout = []
         filtered_cluster = []
         filtered_low_sim = []
 
@@ -171,14 +194,19 @@ class FaissIndex:
                 filtered_same_prot.append((tpl_id, float(sim)))
                 continue
 
-            # 2. Skip same 30 % seq-id cluster (prevents homolog leakage)
+            # 2. Skip val/test holdout proteins (train-time leak prevention)
+            if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
+                filtered_holdout.append((tpl_id, float(sim)))
+                continue
+
+            # 3. Skip same 30 % seq-id cluster (prevents homolog leakage)
             if query_cluster != -1:
                 tpl_cluster = self.row2cluster[row]
                 if tpl_cluster == query_cluster:
                     filtered_cluster.append((tpl_id, float(sim)))
                     continue
 
-            # 3. min_similarity floor
+            # 4. min_similarity floor
             if sim < min_similarity:
                 filtered_low_sim.append((tpl_id, float(sim)))
                 continue
@@ -192,6 +220,10 @@ class FaissIndex:
             log.info(f"  Filtered {len(filtered_same_prot)} same-protein templates")
             for tid, s in filtered_same_prot[:3]:
                 log.info(f"    SAME_PROT: {tid} (sim={s:.4f})")
+            if filtered_holdout:
+                log.info(f"  Filtered {len(filtered_holdout)} holdout (val/test) templates")
+                for tid, s in filtered_holdout[:3]:
+                    log.info(f"    HOLDOUT:   {tid} (sim={s:.4f})")
             log.info(f"  Filtered {len(filtered_cluster)} same-cluster templates")
             for tid, s in filtered_cluster[:3]:
                 log.info(f"    CLUSTER:   {tid} (sim={s:.4f})")
@@ -209,12 +241,17 @@ class FaissIndex:
         k: int,
         min_similarity: float = 0.0,
         random_retrieval: bool = False,
+        filter_holdout: bool = True,
     ) -> List[Tuple[str, float]]:
         """Retrieve top-k templates using only precomputed embeddings (no ESM model).
 
         Designed for use in DataLoader workers where no GPU/ESM model is
         available.  Falls back to an empty list if the query is not found in
         the precomputed embedding table.
+
+        ``filter_holdout=True`` (default) drops any candidate whose protein-ID
+        is in ``self.holdout_prot_ids``.  Training loaders should pass True;
+        val/test loaders should pass False so inference can see the full index.
 
         Returns:
             List of (template_id, similarity) tuples (may be shorter than *k*).
@@ -223,7 +260,9 @@ class FaissIndex:
         query_cluster = self.prot2cluster.get(query_prot_id, -1)
 
         if random_retrieval:
-            return self._random_topk(query_prot_id, query_cluster, k)
+            return self._random_topk(
+                query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+            )
 
         if self._embeddings is None or query_name not in self._id2row:
             return []  # graceful fallback: no prior for this query
@@ -231,7 +270,10 @@ class FaissIndex:
         row = self._id2row[query_name]
         x = self._embeddings[row : row + 1]  # (1, D)
 
-        search_k = max(k * 3, k + 500)
+        # When filtering a large holdout set we may need to over-fetch more
+        # to still land k valid hits.
+        extra = len(self.holdout_prot_ids) if filter_holdout else 0
+        search_k = max(k * 3, k + 500 + extra)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
         sims = sims[0].tolist()
         idxs = idxs[0].tolist()
@@ -243,6 +285,8 @@ class FaissIndex:
             tpl_id = self.row2id[row_idx]
             tpl_prot_id = _get_protein_id(tpl_id)
             if tpl_prot_id == query_prot_id:
+                continue
+            if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
                 continue
             if query_cluster != -1:
                 tpl_cluster = self.row2cluster[row_idx]
@@ -256,7 +300,11 @@ class FaissIndex:
         return out
 
     def _random_topk(
-        self, query_prot_id: str, query_cluster: int, k: int
+        self,
+        query_prot_id: str,
+        query_cluster: int,
+        k: int,
+        filter_holdout: bool = True,
     ) -> List[Tuple[str, float]]:
         """Return *k* random templates (excluding same protein & cluster).
 
@@ -265,7 +313,10 @@ class FaissIndex:
         """
         valid_indices = []
         for i, tpl_id in enumerate(self.row2id):
-            if _get_protein_id(tpl_id) == query_prot_id:
+            tpl_prot_id = _get_protein_id(tpl_id)
+            if tpl_prot_id == query_prot_id:
+                continue
+            if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
                 continue
             if query_cluster != -1 and self.row2cluster[i] == query_cluster:
                 continue

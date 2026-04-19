@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 import json
 import time
 import zipfile
@@ -71,10 +71,31 @@ class PriorBuilder:
         compute_dist_bins: bool = False,
         compute_agreement: bool = False,
         compute_dist_stats: bool = False,
+        # Holdout filtering. Each file is a text file of chain/PDB IDs (one per
+        # line). The union is passed to FaissIndex, which normalises to
+        # protein-level IDs and drops them from retrieval when build_one is
+        # called with filter_holdout=True (the default). Training loaders
+        # pass True; val/test loaders pass False so inference can retrieve
+        # from the full index.
+        holdout_id_files: Optional[List[str]] = None,
     ):
         from src.models.utils.faiss import FaissIndex
 
-        self.faiss_index = FaissIndex(index_dir)
+        holdout_ids: Set[str] = set()
+        for path in (holdout_id_files or []):
+            if not path:
+                continue
+            try:
+                with open(path) as f:
+                    for line in f:
+                        tok = line.strip()
+                        if tok:
+                            holdout_ids.add(tok)
+            except FileNotFoundError:
+                # Silently skip missing files — lets ablation configs omit them.
+                pass
+
+        self.faiss_index = FaissIndex(index_dir, holdout_ids=holdout_ids)
         self.topk = int(topk)
         self.use_blosum = bool(use_blosum)
         self.only_positive_transfer = bool(only_positive_transfer)
@@ -129,6 +150,7 @@ class PriorBuilder:
         full_seq: str,
         crop_start: int,
         crop_end: int,
+        filter_holdout: bool = True,
     ):
         """Build aggregated template prior for one sample.
 
@@ -179,6 +201,7 @@ class PriorBuilder:
             self.topk,
             min_similarity=self.min_template_similarity,
             random_retrieval=self.random_retrieval,
+            filter_holdout=filter_holdout,
         )
         if not hits:
             return _empty_return()
@@ -544,6 +567,7 @@ def collate_padded(
     prior_builder: Optional[PriorBuilder] = None,
     esm_embeddings_dir: Optional[Path] = None,
     compute_gt_dist_bins: bool = False,
+    filter_holdout: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
     Collate function with cropping and padding to batch max length.
@@ -683,7 +707,8 @@ def collate_padded(
             Lc = item["L"]
             cb = item["crop_bounds"]
             built = prior_builder.build_one(
-                item["pid"], item["seq"], cb[0], cb[1]
+                item["pid"], item["seq"], cb[0], cb[1],
+                filter_holdout=filter_holdout,
             )
             if isinstance(built, tuple):
                 p_np, c_np = built

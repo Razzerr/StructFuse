@@ -41,6 +41,15 @@ min_template_similarity: 0.0
 random_retrieval: false       # ablation: random templates instead of FAISS
 max_tpl_cache: 5000
 
+# Holdout protein IDs (val + test). The FAISS index now INCLUDES these
+# chains so val/test queries can retrieve meaningful templates at eval
+# time; PriorBuilder filters them out at query-time during training so no
+# train sample ever sees a val/test structure (leakage prevention).
+# Set to null or [] to disable (e.g. if the index itself already excludes them).
+holdout_id_files:
+  - data/output_splits/val_holdout_ids.txt
+  - data/output_splits/test_ids.txt
+
 # Precomputed ESM2 embeddings (skip frozen ESM2 forward during training)
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
 esm_embeddings_dir: data/precomputed/esm_t6_8M

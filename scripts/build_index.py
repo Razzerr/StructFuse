@@ -304,13 +304,17 @@ def main():
     processed_dir = Path(args.processed_dir)
     out_dir = Path(args.out_dir)
 
-    # Load exclusion list
-    exclude_ids = set()
+    # Load exclusion list. Empty string → build FULL index (no exclusions).
+    # Use-case: we now keep val/test chains in the index and filter them at
+    # query-time in FaissIndex.topk*; see PriorBuilder(holdout_id_files=...).
+    exclude_ids: Set[str] = set()
     if args.exclude_ids:
         exclude_path = Path(args.exclude_ids)
         with open(exclude_path) as f:
             exclude_ids = set(line.strip() for line in f if line.strip())
         logger.info(f"Loaded {len(exclude_ids)} PDB IDs to exclude from {exclude_path}")
+    else:
+        logger.info("No exclusion list — building FULL index (val/test included)")
 
     # Find NPZ files
     npz_files = sorted(processed_dir.glob("*.npz"))

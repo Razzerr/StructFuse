@@ -87,6 +87,12 @@ class ContactDataModule(LightningDataModule):
         compute_gt_dist_bins: bool = False,
         # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
         esm_embeddings_dir: Optional[str] = None,
+        # Holdout protein IDs (val + test): each file is one chain/PDB ID per
+        # line. PriorBuilder passes the union to FaissIndex (normalised to
+        # protein-level). Training collate uses filter_holdout=True so no
+        # train query ever retrieves a val/test structure; val/test collate
+        # uses filter_holdout=False so inference sees the full index.
+        holdout_id_files: Optional[List[str]] = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -128,6 +134,7 @@ class ContactDataModule(LightningDataModule):
         self.compute_dist_stats = bool(compute_dist_stats)
         self.compute_gt_dist_bins = bool(compute_gt_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
+        self.holdout_id_files: List[str] = [str(p) for p in (holdout_id_files or [])]
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -290,6 +297,7 @@ class ContactDataModule(LightningDataModule):
                     compute_dist_bins=self.compute_dist_bins,
                     compute_agreement=self.compute_agreement,
                     compute_dist_stats=self.compute_dist_stats,
+                    holdout_id_files=self.holdout_id_files,
                 )
 
         if stage == "test" or stage is None:
@@ -322,10 +330,16 @@ class ContactDataModule(LightningDataModule):
                     compute_dist_bins=self.compute_dist_bins,
                     compute_agreement=self.compute_agreement,
                     compute_dist_stats=self.compute_dist_stats,
+                    holdout_id_files=self.holdout_id_files,
                 )
 
     def _collate_train(self, batch):
-        """Collate with random cropping for training."""
+        """Collate with random cropping for training.
+
+        ``filter_holdout=True`` ensures no train query retrieves a val/test
+        structure — leakage prevention is enforced at query-time rather than
+        by excluding val/test from the index.
+        """
         rng_seed = self.crop_rng.randint(0, 2**31)
         return collate_padded(
             batch,
@@ -337,10 +351,17 @@ class ContactDataModule(LightningDataModule):
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
             compute_gt_dist_bins=self.compute_gt_dist_bins,
+            filter_holdout=True,
         )
 
     def _collate_eval(self, batch):
-        """Collate with center cropping for deterministic val/test."""
+        """Collate with center cropping for deterministic val/test.
+
+        ``filter_holdout=False``: val/test queries may retrieve any chain in
+        the full index (including other val/test chains). This is safe —
+        we're not updating gradients from val/test retrieval — and gives the
+        model real template context at eval time.
+        """
         return collate_padded(
             batch,
             crop_size=self.crop_size,
@@ -351,6 +372,7 @@ class ContactDataModule(LightningDataModule):
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
             compute_gt_dist_bins=self.compute_gt_dist_bins,
+            filter_holdout=False,
         )
         
     def _dl_kwargs(self, collate_fn=None):
