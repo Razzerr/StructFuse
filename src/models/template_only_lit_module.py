@@ -119,7 +119,8 @@ class TemplateOnlyLitModule(LightningModule):
         # Cache
         max_tpl_cache: int = 1000,
         # Scheduler
-        warmup_steps: int = 1000,
+        warmup_steps: int = 0,  # 0 → use warmup_fraction
+        warmup_fraction: float = 0.02,
         min_lr_ratio: float = 0.1,
     ):
         super().__init__()
@@ -134,6 +135,7 @@ class TemplateOnlyLitModule(LightningModule):
         self.label_smoothing = label_smoothing
         self.use_blosum = use_blosum
         self.warmup_steps = int(warmup_steps)
+        self.warmup_fraction = float(warmup_fraction)
         self.min_lr_ratio = float(min_lr_ratio)
 
         # PriorBuilder — lazy init (needs FAISS index on disk)
@@ -466,10 +468,20 @@ class TemplateOnlyLitModule(LightningModule):
             else 10000
         )
 
+        effective_warmup = (
+            self.warmup_steps
+            if self.warmup_steps > 0
+            else max(1, int(total_steps * self.warmup_fraction))
+        )
+        warmup_source = "explicit" if self.warmup_steps > 0 else f"{self.warmup_fraction:.1%} of total"
+        log.info(
+            f"LR schedule: total_steps={total_steps}, warmup={effective_warmup} ({warmup_source})"
+        )
+
         def lr_lambda(step: int) -> float:
-            if step < self.warmup_steps:
-                return float(step) / float(max(1, self.warmup_steps))
-            progress = float(step - self.warmup_steps) / float(max(1, total_steps - self.warmup_steps))
+            if step < effective_warmup:
+                return float(step) / float(max(1, effective_warmup))
+            progress = float(step - effective_warmup) / float(max(1, total_steps - effective_warmup))
             return max(self.min_lr_ratio, 0.5 * (1.0 + np.cos(np.pi * progress)))
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)

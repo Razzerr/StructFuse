@@ -74,7 +74,8 @@ class ContactLitModule(LightningModule):
         tversky_gamma: float = 1.0,
         max_tpl_cache: int = 1000,
         # Scheduler parameters
-        warmup_steps: int = 1000,
+        warmup_steps: int = 0,  # 0 → use warmup_fraction
+        warmup_fraction: float = 0.02,  # fraction of total_steps used for warmup when warmup_steps <= 0
         total_steps: int = 0,  # 0 = auto-calculate from trainer
         min_lr_ratio: float = 0.01,  # min_lr = lr * min_lr_ratio
         # Ablation parameters for retrieval
@@ -146,6 +147,7 @@ class ContactLitModule(LightningModule):
 
         # Scheduler parameters
         self.warmup_steps = int(warmup_steps)
+        self.warmup_fraction = float(warmup_fraction)
         self.total_steps = int(total_steps)
         self.min_lr_ratio = float(min_lr_ratio)
 
@@ -215,15 +217,25 @@ class ContactLitModule(LightningModule):
         else:
             total_steps = self.total_steps
 
+        effective_warmup = (
+            self.warmup_steps
+            if self.warmup_steps > 0
+            else max(1, int(total_steps * self.warmup_fraction))
+        )
+        warmup_source = "explicit" if self.warmup_steps > 0 else f"{self.warmup_fraction:.1%} of total"
+        log.info(
+            f"LR schedule: total_steps={total_steps}, warmup={effective_warmup} ({warmup_source})"
+        )
+
         # Linear warmup + cosine annealing scheduler
         def lr_lambda(current_step: int) -> float:
-            if current_step < self.warmup_steps:
+            if current_step < effective_warmup:
                 # Linear warmup
-                return float(current_step) / float(max(1, self.warmup_steps))
+                return float(current_step) / float(max(1, effective_warmup))
             else:
                 # Cosine annealing
-                progress = float(current_step - self.warmup_steps) / float(
-                    max(1, total_steps - self.warmup_steps)
+                progress = float(current_step - effective_warmup) / float(
+                    max(1, total_steps - effective_warmup)
                 )
                 cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
                 return max(self.min_lr_ratio, cosine_decay)

@@ -23,5 +23,6 @@ use_blosum: true
 # Cache
 max_tpl_cache: 1000
 
-warmup_steps: 1000
+warmup_steps: 0          # 0 → use warmup_fraction
+warmup_fraction: 0.02    # 2% of total scheduled steps
 min_lr_ratio: 0.1

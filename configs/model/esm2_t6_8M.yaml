@@ -49,6 +49,7 @@ tversky_gamma: 1.0         # Focal modulation strength
 
 max_tpl_cache: 1000
 
-warmup_steps: 400
+warmup_steps: 0          # 0 → use warmup_fraction
+warmup_fraction: 0.02    # 2% of total scheduled steps
 min_lr_ratio: 0.1
 compile_model: true
