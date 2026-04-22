@@ -33,7 +33,7 @@ fusion_num_heads: 4
 fusion_reduction: 1
 
 # optim (handled by module.configure_optimizers)
-lr: 5.0e-4
+lr: 3.0e-4
 wd: 1.0e-2
 
 # loss hyperparameters
@@ -50,6 +50,6 @@ tversky_gamma: 1.0         # Focal modulation strength
 max_tpl_cache: 1000
 
 warmup_steps: 0          # 0 → use warmup_fraction
-warmup_fraction: 0.02    # 2% of total scheduled steps
+warmup_fraction: 0.05    # 5% of total scheduled steps
 min_lr_ratio: 0.1
 compile_model: true
