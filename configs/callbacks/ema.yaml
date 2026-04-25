@@ -1,0 +1,5 @@
+ema:
+  _target_: src.models.callbacks.ema.EMACallback
+  decay: 0.999
+  warmup_steps: 1000
+  validate_with_ema: true
