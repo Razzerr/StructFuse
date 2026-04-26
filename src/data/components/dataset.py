@@ -1059,6 +1059,13 @@ class ClusterTrainValSampler:
                 rng.shuffle(bucket)
             for i in range(0, len(bucket), batch_size):
                 batches.append(bucket[i : i + batch_size])
+        # Shuffle batch order so limit_train_batches samples uniformly
+        # across all length ranges instead of always taking the longest.
+        # Without this, ltb=0.1 silently restricted training to the longest
+        # ~10% of sequences, and full-data runs ended every epoch on the
+        # shortest batches, biasing the pre-validation weight state.
+        if shuffle:
+            rng.shuffle(batches)
         return batches
 
     def train_batches(self):
