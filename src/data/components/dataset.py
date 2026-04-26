@@ -970,11 +970,13 @@ class ClusterTrainValSampler:
         lengths: List[int],
         batch_size: int,
         seed: int = 0,
+        rotate_val: bool = True,
     ):
         self.lengths = np.asarray(lengths)
         self.batch_size = batch_size
         self.base_seed = seed
         self.epoch = 0
+        self.rotate_val = bool(rotate_val)
 
         # Build cluster → list of dataset indices
         cluster_to_indices: Dict[int, List[int]] = {}
@@ -1069,8 +1071,13 @@ class ClusterTrainValSampler:
         )
 
     def val_batches(self):
-        """Return list of val batch index-lists for the current epoch."""
-        epoch = self.epoch
+        """Return list of val batch index-lists for the current epoch.
+
+        When rotate_val=False (recommended for stable trajectory measurement),
+        the val composition is fixed to the epoch=0 sample regardless of how
+        many epochs have elapsed.
+        """
+        epoch = self.epoch if self.rotate_val else 0
         _, val_idx = self._sample_epoch(epoch)
         rng = np.random.RandomState(self.base_seed + epoch + 200000)
         return self._bucketed_batches(

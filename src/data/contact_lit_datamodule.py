@@ -69,6 +69,12 @@ class ContactDataModule(LightningDataModule):
         test_exclude_subsets: Optional[List[str]] = None,
         # Cluster-aware sampling: 1 chain per cluster per epoch
         cluster_sampling: bool = True,
+        # When True, the val sample composition is re-rolled every epoch (one
+        # rotating chain per multi-cluster). This adds inter-epoch noise to val
+        # metrics that can mask the actual training trajectory. Default False
+        # → val composition pinned to epoch=0 for stable measurement; train
+        # rotation is unaffected.
+        rotate_val: bool = False,
         index_dir: Optional[str] = None,
         # Retrieval / prior-building params (used by PriorBuilder in workers)
         topk: int = 4,
@@ -123,6 +129,7 @@ class ContactDataModule(LightningDataModule):
         self.splits_json_path = Path(splits_json_path) if splits_json_path else None
         self.test_exclude_subsets = test_exclude_subsets
         self.cluster_sampling = bool(cluster_sampling)
+        self.rotate_val = bool(rotate_val)
         self.index_dir = Path(index_dir) if index_dir else None
 
         # Retrieval / prior-building params
@@ -240,6 +247,7 @@ class ContactDataModule(LightningDataModule):
                     lengths=self.dset_trainval.cached_lengths,
                     batch_size=self.batch_size,
                     seed=self.split_seed,
+                    rotate_val=self.rotate_val,
                 )
 
                 # ── Static val from held-out test split ──

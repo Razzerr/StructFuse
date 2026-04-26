@@ -31,6 +31,11 @@ min_len: 20
 # Cluster-aware train sampling: each epoch samples 1 chain per cluster.
 # Val is always loaded from val_ids (static, from test-distribution holdout).
 cluster_sampling: true
+# Rotate the val sample composition (1 chain per multi-cluster) every epoch.
+# Default false — pinning val to epoch=0 eliminates inter-epoch val-set noise
+# so the trajectory reflects model improvement, not which chains were sampled.
+# Train rotation is independent and unaffected.
+rotate_val: false
 index_dir: data/index_t6
 
 # Retrieval / prior-building (PriorBuilder runs in DataLoader workers)
