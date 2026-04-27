@@ -21,6 +21,11 @@ model:
   lr: 3.0e-4
   warmup_steps: 1000
   use_checkpoint: true
+  # torch.compile inductor backend fails on triangle einsum + gradient
+  # checkpointing + bf16 (AOT partitioner "invalid output node" assertion).
+  # Cost: ~20-30% slower training. Re-enable when triangle path is
+  # compile-clean.
+  compile_model: false
 
 data:
   batch_size: 8
