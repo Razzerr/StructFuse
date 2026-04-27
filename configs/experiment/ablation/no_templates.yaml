@@ -1,10 +1,15 @@
 # @package _global_
 # ABLATION: No template retrieval - pure ESM2 baseline
-# This isolates the contribution of ESM2 embeddings alone
+# This isolates the contribution of ESM2 embeddings alone.
+# IMPORTANT: PriorBuilder lives in ContactDataModule (DataLoader workers),
+# so the override MUST hit data.topk — model.topk alone does nothing.
 
 task_name: "ablation_no_templates"
 tags: ["ablation", "no-templates"]
 seed: 42
+
+data:
+  topk: 0
 
 model:
   topk: 0

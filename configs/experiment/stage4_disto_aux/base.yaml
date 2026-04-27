@@ -1,32 +1,40 @@
 # @package _global_
-# Stage 4 frontier — Stage 3 + distogram auxiliary head & loss (λ=0.05).
-# Multi-task regularization: second head predicts 8-bin Cα-Cα distance
-# distribution alongside primary contact BCE. Aux is *light* by design —
-# BCE stays the optimization target.
+# Stage 4 frontier — direct continuation of Stage 3 `dist_tri` (z7wjktw1
+# peak P@L_long = 0.7605 ep26). Adds distogram auxiliary head & loss
+# (λ=0.05): second head predicts 8-bin Cα-Cα distance distribution
+# alongside primary contact BCE. Aux is *light* by design — BCE+Tversky
+# stays the optimization target.
+#
+# Green light: ep26 P@L_long ≥ 0.770 (+1pp over Stage 3) AND
+# val/loss_disto monotonically decreasing.
+#
+# NOTE: tpl_agreement & tpl_dist_stats were KILLED in Stage 2 ablations
+# (memory-decisions 2026-04-20). Stage 4 inherits dist_only feature set.
 
 defaults:
   - override /model: esm2_t33_650M
 
-task_name: "stage4_base"
-tags: ["stage4", "distogram", "aux-loss", "frontier"]
+task_name: "stage4_disto_aux"
+tags: ["stage4", "distogram", "aux-loss", "frontier", "dist_only"]
 seed: 42
 
 model:
+  # ↓↓↓ identical to stage3_triangle/dist_tri — keep in sync
   fusion_strategy: "grouped"
   fusion_feature_groups:
     tpl_contact: 2
     tpl_dist: 9
-    tpl_agree: 1
-    tpl_dist_stats: 2
   use_tpl_dist_bins: true
-  use_tpl_agreement: true
-  use_tpl_dist_stats: true
   head_type: "axial_tri"
   triangle_c: 32
   lr: 3.0e-4
-  warmup_steps: 1000
+  warmup_fraction: 0.05
   use_checkpoint: true
-  # Distogram aux
+  # torch.compile inductor backend fails on triangle einsum + gradient
+  # checkpointing + bf16 (AOT partitioner "invalid output node").
+  compile_model: false
+  # ↑↑↑ Stage 3 inheritance ends here
+  # ↓↓↓ Stage 4 additions
   use_distogram_head: true
   n_distogram_bins: 8
   lambda_disto: 0.05
@@ -36,6 +44,4 @@ data:
   index_dir: data/index_t33
   esm_embeddings_dir: data/precomputed/esm_t33_650M
   compute_dist_bins: true
-  compute_agreement: true
-  compute_dist_stats: true
-  compute_gt_dist_bins: true
+  compute_gt_dist_bins: true   # GT distogram targets for aux CE loss

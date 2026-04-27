@@ -1,39 +1,37 @@
 # @package _global_
-# Stage 4 risk comparison — lambda_disto=0.1 (2x default).
-# If P@L_long regresses vs base.yaml, the aux signal is competing with BCE
-# for capacity; in that case revert to λ=0.02 or drop the head entirely.
+# Stage 4 risk comparison — lambda_disto=0.1 (2× default in base.yaml).
+# Inherits the same architecture as base.yaml (Stage 3 dist_tri + disto aux).
+# If P@L_long regresses vs base, aux signal is competing with BCE for
+# capacity; revert to λ=0.02 or drop the head entirely.
 
 defaults:
   - override /model: esm2_t33_650M
 
 task_name: "stage4_lambda_high"
-tags: ["stage4", "distogram", "lambda-high"]
+tags: ["stage4", "distogram", "lambda-high", "dist_only"]
 seed: 42
 
 model:
+  # ↓↓↓ identical to base.yaml / stage3_triangle/dist_tri
   fusion_strategy: "grouped"
   fusion_feature_groups:
     tpl_contact: 2
     tpl_dist: 9
-    tpl_agree: 1
-    tpl_dist_stats: 2
   use_tpl_dist_bins: true
-  use_tpl_agreement: true
-  use_tpl_dist_stats: true
   head_type: "axial_tri"
   triangle_c: 32
   lr: 3.0e-4
-  warmup_steps: 1000
+  warmup_fraction: 0.05
   use_checkpoint: true
+  compile_model: false   # triangle + checkpoint + bf16 ↯ torch.compile AOT
+  # ↑↑↑ shared frontier
   use_distogram_head: true
   n_distogram_bins: 8
-  lambda_disto: 0.1
+  lambda_disto: 0.1      # ← only difference vs base.yaml
 
 data:
   batch_size: 8
   index_dir: data/index_t33
   esm_embeddings_dir: data/precomputed/esm_t33_650M
   compute_dist_bins: true
-  compute_agreement: true
-  compute_dist_stats: true
   compute_gt_dist_bins: true

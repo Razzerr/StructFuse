@@ -1,7 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# Stage 4 — distogram auxiliary loss (λ·CE) on top of Stage 3.
-# Green light (base.yaml): ep15 P@L_long ≥ 0.61, val/loss_disto spada.
+# Stage 4 — distogram auxiliary loss (λ·CE) on top of Stage 3 dist_tri.
+# Stage 3 baseline (z7wjktw1): peak P@L_long = 0.7605 ep26.
+# Green light (base.yaml): ep26 P@L_long ≥ 0.770 (+1pp) AND
+#                          val/loss_disto monotonically decreasing.
+#
+# lambda_high.yaml = risk comparison (λ=0.1). Only run AFTER base.yaml
+# delivers green light — wasted GPU otherwise.
 #
 # Usage:
 #   ./configs/experiment/stage4_disto_aux/launch.sh              # submit all jobs
@@ -84,8 +89,9 @@ echo " dry-run: ${DRY_RUN}"
 echo "================================================"
 
 submit "stage4_disto_aux/base"        "s4_base_s42"    42 "14:00:00"
-submit "stage4_disto_aux/lambda_high" "s4_lambda01_s42" 42 "14:00:00"
+# lambda_high commented out — only launch after base.yaml delivers green light.
+# submit "stage4_disto_aux/lambda_high" "s4_lambda01_s42" 42 "14:00:00"
 
 echo "================================================"
-echo " Total: 2 jobs"
+echo " Total: 1 job"
 echo "================================================"

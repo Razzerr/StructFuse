@@ -69,12 +69,12 @@ def _fmt(v) -> str:
     return str(v)
 
 
-def build_metric_tables(run: wandb.apis.public.Run, max_rows: int, console: Console) -> None:
+def build_metric_tables(run: wandb.apis.public.Run, max_rows: int | None, console: Console) -> None:
     # scan_history pages through data (page_size rows per request) — avoids single large HTTP call
     rows = []
-    for row in run.scan_history(page_size=200):
+    for row in run.scan_history(page_size=500):
         rows.append(row)
-        if len(rows) >= max_rows:
+        if max_rows is not None and len(rows) >= max_rows:
             break
 
     if not rows:
@@ -137,8 +137,8 @@ def main() -> None:
     parser.add_argument(
         "--max-rows",
         type=int,
-        default=5000,
-        help="Maximum number of raw history rows to fetch before epoch-aggregation (default: 5000)",
+        default=None,
+        help="Maximum number of raw history rows to fetch before epoch-aggregation (default: unlimited)",
     )
     args = parser.parse_args()
 
