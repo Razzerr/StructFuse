@@ -1,0 +1,29 @@
+# @package _global_
+# Stage 3 frontier — Stage 2 dist_only + triangle multiplicative update.
+# Pattern: 8 blocks [ax, ax, tri_out, tri_in, ax, ax, tri_out, tri_in].
+# Green light: P@L_long ep15 ≥ 0.75 (+2pp over Stage 2 dist_only 0.7362).
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "stage3_dist_tri"
+tags: ["stage3", "triangle", "frontier", "dist_only"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist: 9
+  use_tpl_dist_bins: true
+  head_type: "axial_tri"
+  triangle_c: 32
+  lr: 3.0e-4
+  warmup_steps: 1000
+  use_checkpoint: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true

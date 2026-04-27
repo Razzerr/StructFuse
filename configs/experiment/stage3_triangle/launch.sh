@@ -83,9 +83,11 @@ echo " Stage 3 — Triangle multiplicative update"
 echo " dry-run: ${DRY_RUN}"
 echo "================================================"
 
-submit "stage3_triangle/tri_mult_only" "s3_trionly_s42" 42 "14:00:00"
-submit "stage3_triangle/base"          "s3_base_s42"    42 "14:00:00"
-submit "stage3_triangle/tri_full"      "s3_full_s42"    42 "16:00:00"
+submit "stage3_triangle/dist_tri"      "s3_disttri_s42" 42 "14:00:00"
+
+echo "================================================"
+echo " Total: 1 job"
+echo "================================================"
 
 echo "================================================"
 echo " Total: 3 jobs"
