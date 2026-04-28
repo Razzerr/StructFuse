@@ -1,9 +1,14 @@
 # @package _global_
 # Stage 4 frontier — direct continuation of Stage 3 `dist_tri` (z7wjktw1
 # peak P@L_long = 0.7605 ep26). Adds distogram auxiliary head & loss
-# (λ=0.05): second head predicts 8-bin Cα-Cα distance distribution
-# alongside primary contact BCE. Aux is *light* by design — BCE+Tversky
-# stays the optimization target.
+# (λ=0.3, AF2-like): second head predicts 8-bin Cα-Cα distance
+# distribution alongside primary contact BCE.
+#
+# λ raised from 0.05 → 0.3 after `1tsf4vgs` showed neutral result: the
+# /log(C) normalization in masked_ce_distogram pushed disto loss to ~0.02
+# vs BCE 0.27, so λ=0.05 contributed only ~0.3% of total loss → no
+# representational pressure. Fix (2026-04-28): removed /log(C); λ=0.3
+# matches AF2 distogram aux-loss weighting on raw natural-log CE scale.
 #
 # Green light: ep26 P@L_long ≥ 0.770 (+1pp over Stage 3) AND
 # val/loss_disto monotonically decreasing.
@@ -37,7 +42,7 @@ model:
   # ↓↓↓ Stage 4 additions
   use_distogram_head: true
   n_distogram_bins: 8
-  lambda_disto: 0.05
+  lambda_disto: 0.3
 
 data:
   batch_size: 8

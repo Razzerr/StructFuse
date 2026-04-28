@@ -121,11 +121,9 @@ def masked_ce_distogram(
 ) -> torch.Tensor:
     """Class-balanced masked cross-entropy for discretized distance bins.
 
-    Returns a scalar loss normalized by log(C) so it is ~[0, 1] and
-    comparable in scale with BCE; the caller weights it with lambda_disto.
+    Returns standard masked CE (raw natural-log scale). Caller weights it
+    with lambda_disto; AF2-like λ ≈ 0.3 is a sensible starting point.
     """
-    import math
-
     B, C, L, _ = logits.shape
     log_probs = F.log_softmax(logits, dim=1)
 
@@ -139,4 +137,4 @@ def masked_ce_distogram(
     per_pix_w = (target * class_weights.view(1, C, 1, 1)).sum(dim=1)  # (B, L, L)
     ce = ce * per_pix_w * mask
     loss = ce.sum() / mask.sum().clamp(min=1)
-    return loss / math.log(C)
+    return loss
