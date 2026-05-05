@@ -69,6 +69,43 @@ def _fmt(v) -> str:
     return str(v)
 
 
+def _render_metric_table(
+    df: pd.DataFrame,
+    cols: list[str],
+    index_col: str,
+    title: str,
+    title_prefix: str,
+    console: Console,
+) -> None:
+    """Render one metric table.
+
+    `title_prefix` is stripped from each col header for display (e.g. "val/" → empty header text).
+    """
+    subset = df[[index_col] + cols].dropna(how="all", subset=cols)
+    if subset.empty:
+        return
+
+    t = Table(
+        title=f"[bold]{title}[/bold]",
+        box=box.SIMPLE_HEAD,
+        show_lines=False,
+        pad_edge=False,
+        title_justify="left",
+    )
+    t.add_column(index_col, style="dim", no_wrap=True, min_width=6)
+    for c in cols:
+        short = c[len(title_prefix) + 1:] if title_prefix and c.startswith(title_prefix + "/") else c
+        t.add_column(short, justify="right", no_wrap=True)
+
+    for _, row in subset.iterrows():
+        raw = row[index_col]
+        idx = f"{int(raw)}" if pd.notna(raw) else "?"
+        values = [_fmt(row[c]) for c in cols]
+        t.add_row(idx, *values)
+
+    console.print(t)
+
+
 def build_metric_tables(run: wandb.apis.public.Run, max_rows: int | None, console: Console) -> None:
     # scan_history pages through data (page_size rows per request) — avoids single large HTTP call
     rows = []
@@ -83,6 +120,16 @@ def build_metric_tables(run: wandb.apis.public.Run, max_rows: int | None, consol
 
     history = pd.DataFrame(rows)
 
+    # Test metrics are logged via `on_test_epoch_end` after fit finishes — they don't have an
+    # `epoch` value, so `groupby("epoch", dropna=True).last()` would silently drop them.
+    # Pull them out before the epoch aggregation and render separately.
+    test_cols = sorted(c for c in history.columns if c.startswith("test/"))
+    test_history: pd.DataFrame | None = None
+    if test_cols:
+        test_mask = history[test_cols].notna().any(axis=1)
+        test_history = history.loc[test_mask, test_cols + ["_step"]].copy()
+        history = history.drop(columns=test_cols)
+
     # Aggregate by epoch (last value per epoch per column)
     if "epoch" in history.columns:
         history = (
@@ -94,7 +141,7 @@ def build_metric_tables(run: wandb.apis.public.Run, max_rows: int | None, consol
     else:
         index_col = "_step"
 
-    # Group columns by prefix
+    # Group non-test columns by top-level prefix
     categories: dict[str, list[str]] = defaultdict(list)
     for col in history.columns:
         if col.startswith("_") or col == "epoch":
@@ -104,30 +151,47 @@ def build_metric_tables(run: wandb.apis.public.Run, max_rows: int | None, consol
 
     console.rule("[bold]Metrics[/bold]")
 
-    for category in sorted(categories):  # type: ignore[assignment]
+    for category in sorted(categories):
         cols = sorted(categories[category])
-        subset = history[[index_col] + cols].dropna(how="all", subset=cols)
-        subset = subset.dropna(how="all", subset=cols)
+        _render_metric_table(history, cols, index_col, category, category, console)
 
+    # Test rows in scan_history are typically empty (`on_test_epoch_end` writes to summary,
+    # not to step-level history). The dedicated test section is rendered from `run.summary`
+    # in `render_test_summary`.
+
+
+def render_test_summary(run: wandb.apis.public.Run, console: Console) -> None:
+    """Render final test metrics from `run.summary`.
+
+    `trainer.test` writes via `self.log(..., on_epoch=True)` which lands in summary, not in
+    step-level history (so `scan_history` doesn't see them). We pull them straight from summary.
+    """
+    test_keys = sorted(k for k in run.summary.keys() if k.startswith("test/"))
+    if not test_keys:
+        return
+
+    # Group by sub-prefix: `test/P@L_long` → "test"; `test/casp16/P@L_long` → "test/casp16".
+    groups: dict[str, list[str]] = defaultdict(list)
+    for k in test_keys:
+        parts = k.split("/")
+        grp = "/".join(parts[:-1]) if len(parts) >= 3 else parts[0]
+        groups[grp].append(k)
+
+    console.rule("[bold]Test (final)[/bold]")
+    for grp in sorted(groups):
+        items = sorted(groups[grp])
         t = Table(
-            title=f"[bold]{category}[/bold]",
+            title=f"[bold]{grp}[/bold]",
             box=box.SIMPLE_HEAD,
             show_lines=False,
             pad_edge=False,
             title_justify="left",
         )
-        t.add_column(index_col, style="dim", no_wrap=True, min_width=6)
-        short_names = []
-        for c in cols:
-            short = c[len(category) + 1:] if c.startswith(category + "/") else c
-            short_names.append(short)
-            t.add_column(short, justify="right", no_wrap=True)
-
-        for _, row in subset.iterrows():
-            idx = f"{int(row[index_col])}" if not math.isnan(float(row[index_col])) else "?"
-            values = [_fmt(row[c]) for c in cols]
-            t.add_row(idx, *values)
-
+        t.add_column("metric", style="dim", no_wrap=True)
+        t.add_column("value", justify="right", no_wrap=True)
+        for k in items:
+            short = k[len(grp) + 1:] if k.startswith(grp + "/") else k
+            t.add_row(short, _fmt(run.summary[k]))
         console.print(t)
 
 
@@ -152,6 +216,7 @@ def main() -> None:
         file_console = Console(file=f, width=500, highlight=False, markup=True, no_color=True)
         render_run_info(run, file_console)
         build_metric_tables(run, max_rows=args.max_rows, console=file_console)
+        render_test_summary(run, file_console)
 
     print(f"Saved in {out_path}")
 

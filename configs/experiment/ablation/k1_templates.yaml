@@ -1,10 +1,15 @@
 # @package _global_
 # ABLATION: Vary number of templates (k=1)
-# Tests if more templates = better, or if k=1 is enough
+# Tests if more templates = better, or if k=1 is enough.
+# IMPORTANT: PriorBuilder lives in ContactDataModule (DataLoader workers),
+# so the override MUST hit data.topk — model.topk alone does nothing.
 
 task_name: "ablation_k1"
 tags: ["ablation", "k1"]
 seed: 42
+
+data:
+  topk: 1
 
 model:
   topk: 1

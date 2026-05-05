@@ -43,6 +43,38 @@ from src.utils import (
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
+def _dump_metrics_json(metrics: Dict[str, Any], cfg: DictConfig, filename: str) -> None:
+    """Serialize Lightning callback_metrics to <output_dir>/<filename>.
+
+    Used by scripts/smoke_repro_test.py (bit-determinism check) and any post-hoc
+    analysis that wants the exact final-epoch numbers without re-fetching from W&B.
+    Defensive: silently skips on missing output_dir or non-serialisable values.
+    """
+    try:
+        import json
+        import math
+        from pathlib import Path
+
+        output_dir = cfg.get("paths", {}).get("output_dir") if hasattr(cfg, "get") else None
+        if not output_dir:
+            return
+
+        def _coerce(v: Any) -> Any:
+            if hasattr(v, "item"):
+                v = v.item()
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            return v
+
+        coerced = {str(k): _coerce(v) for k, v in dict(metrics).items()}
+        out = Path(output_dir) / filename
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(coerced, indent=2, default=str, sort_keys=True))
+        log.info(f"Wrote {filename} to {out}")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Failed to dump {filename}: {e}")
+
+
 @task_wrapper
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
@@ -97,6 +129,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     train_metrics = trainer.callback_metrics
 
+    # Dump train metrics for downstream tooling (e.g. scripts/smoke_repro_test.py).
+    # This is a no-op if there's no output_dir configured (defensive).
+    _dump_metrics_json(train_metrics, cfg, "train_metrics.json")
+
     if cfg.get("test"):
         log.info("Starting testing!")
         
@@ -122,7 +158,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             weights_only=False,
         )
 
+        # Paper-grade audit: snapshot retrieval+model config to .temp/audit/<run_id>/
+        # so supplementary Methods can cite "what was actually loaded for inference"
+        # (companion to verify_no_leak.py / template_coverage.py launched pre-train).
+        try:
+            from src.utils.audit import dump_audit_manifest
+            dump_audit_manifest(cfg, trainer, ckpt_path=ckpt_path)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Audit manifest dump failed (non-fatal): {e}")
+
     test_metrics = trainer.callback_metrics
+
+    _dump_metrics_json(test_metrics, cfg, "test_metrics.json")
 
     # merge train and test metrics
     metric_dict = {**train_metrics, **test_metrics}

@@ -1,15 +1,15 @@
 # @package _global_
-# ABLATION: Vary number of templates (k=8)
-# Tests if more templates = better performance.
+# ABLATION: Vary number of templates (k=16)
+# Paper-strong addition: top end of k-sweep (k=1 / 4 / 8 / 16).
 # IMPORTANT: PriorBuilder lives in ContactDataModule (DataLoader workers),
 # so the override MUST hit data.topk — model.topk alone does nothing.
 
-task_name: "ablation_k8"
-tags: ["ablation", "k8"]
+task_name: "ablation_k16"
+tags: ["ablation", "k16"]
 seed: 42
 
 data:
-  topk: 8
+  topk: 16
 
 model:
-  topk: 8
+  topk: 16

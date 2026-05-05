@@ -1,0 +1,38 @@
+# @package _global_
+# Canonical frontier config — the headline 650M Stage 3 model.
+# Snapshot of stage3_triangle/dist_tri with pinned reproducibility flags.
+# Pattern: 8 blocks [ax, ax, tri_out, tri_in, ax, ax, tri_out, tri_in].
+#
+# Headline runs (3 seeds): launch this with seed=0, seed=42, seed=1337 separately.
+# Default seed=42 here so single-launch matches Stage 3 prior runs.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "frontier"
+tags: ["frontier", "stage3", "triangle", "dist_only", "headline"]
+seed: 42
+
+model:
+  fusion_strategy: "grouped"
+  fusion_feature_groups:
+    tpl_contact: 2
+    tpl_dist: 9
+  use_tpl_dist_bins: true
+  head_type: "axial_tri"
+  triangle_c: 32
+  lr: 3.0e-4
+  warmup_steps: 1000
+  use_checkpoint: true
+  # torch.compile inductor backend fails on triangle einsum + gradient
+  # checkpointing + bf16 (AOT partitioner "invalid output node" assertion).
+  compile_model: false
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true
+
+trainer:
+  deterministic: true

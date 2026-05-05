@@ -17,6 +17,7 @@ from src.models.utils.loss import (
 from src.models.utils.metrics import (
     precision_at_k_masked,
     precision_at_k_by_range,
+    auc_pr_masked,
     _create_range_mask,
 )
 from src.models.utils.visualize import (
@@ -1185,12 +1186,49 @@ class ContactLitModule(LightningModule):
             rec_s = s_tp / max(1, s_tp + s_fn)
             f1_s = 2 * prec_s * rec_s / max(1e-8, prec_s + rec_s)
             pL_all = precision_at_k_masked(prob_3d, contact_3d, mask_3d, k_mode="L")
+            # Per-sample range-stratified P@L/2 and P@L/5 for long contacts
+            range_pL2 = precision_at_k_by_range(prob_3d, contact_3d, mask_3d, k_mode="L/2")
+            range_pL5 = precision_at_k_by_range(prob_3d, contact_3d, mask_3d, k_mode="L/5")
+            pL2_long = range_pL2.get("long", 0.0)
+            pL5_long = range_pL5.get("long", 0.0)
+            if isinstance(pL2_long, torch.Tensor):
+                pL2_long = pL2_long.item()
+            if isinstance(pL5_long, torch.Tensor):
+                pL5_long = pL5_long.item()
+            # Per-sample AUC-PR for long-range contacts (returns 0.0 if no positives/negatives)
+            auc_pr_long = auc_pr_masked(prob_3d, contact_3d, mask_3d, range_type="long")
+            # PDB ID and chain ID derived from sample_id (format: "<pdb>_<chain>")
+            if "_" in pid:
+                pdb_id, chain_id = pid.split("_", 1)
+            else:
+                pdb_id, chain_id = pid, ""
+            # Template stats per chain (populated by PriorBuilder via batch — see task #20).
+            # Defaults handle pre-#20 batches and ablations with topk=0.
+            n_templates_per_chain = batch.get("n_templates_retrieved")
+            best_sim_per_chain = batch.get("best_tpl_sim")
+            n_tpl = (
+                int(n_templates_per_chain[b_idx])
+                if n_templates_per_chain is not None
+                else None
+            )
+            best_sim = (
+                float(best_sim_per_chain[b_idx])
+                if best_sim_per_chain is not None
+                else None
+            )
             self._test_per_sample.append({
                 "sample_id": pid,
+                "pdb_id": pdb_id,
+                "chain_id": chain_id,
                 "subset": subset,
                 "seq_len": seq_len,
+                "n_templates_retrieved": n_tpl,
+                "best_tpl_sim": round(best_sim, 4) if best_sim is not None else None,
                 "P@L": round(pL_all, 4),
+                "P@L/2_long": round(pL2_long, 4),
+                "P@L/5_long": round(pL5_long, 4),
                 "P@L_long": round(pl_long, 4),
+                "AUC-PR_long": round(auc_pr_long, 4),
                 "precision": round(prec_s, 4),
                 "recall": round(rec_s, 4),
                 "f1": round(f1_s, 4),

@@ -200,6 +200,10 @@ class PriorBuilder:
                 out["agreement"] = np.zeros((1, Lc, Lc), np.float32)
             if self.compute_dist_stats:
                 out["dist_stats"] = np.zeros((2, Lc, Lc), np.float32)
+            # Per-chain template stats — always present in rich mode for paper-grade
+            # per-protein analyses (template-quality stratification, paired tests).
+            out["n_templates_retrieved"] = 0
+            out["best_tpl_sim"] = 0.0
             return out
 
         if self.topk <= 0:
@@ -343,6 +347,11 @@ class PriorBuilder:
                 dist_mean = np.zeros((Lc, Lc), dtype=np.float32)
                 dist_std = np.zeros((Lc, Lc), dtype=np.float32)
             out["dist_stats"] = np.stack([dist_mean, dist_std], axis=0).astype(np.float32)
+
+        # Per-chain template stats (rich mode only) — used downstream for paper-grade
+        # per-protein analyses (paired Wilcoxon, template-quality stratification).
+        out["n_templates_retrieved"] = int(len(hits))
+        out["best_tpl_sim"] = float(sims.max()) if len(hits) > 0 else 0.0
 
         return out
 
@@ -734,6 +743,11 @@ def collate_padded(
         if getattr(prior_builder, "compute_dist_stats", False):
             dist_stats = torch.zeros((B, 2, Lmax, Lmax), dtype=torch.float32)
 
+        # Per-chain template stats — populated whenever build_one returns rich dict.
+        # Used by test_step for per-protein dump (paired Wilcoxon, stratification).
+        n_templates_retrieved = torch.zeros(B, dtype=torch.long)
+        best_tpl_sim = torch.zeros(B, dtype=torch.float32)
+
         for b, item in enumerate(cropped):
             Lc = item["L"]
             cb = item["crop_bounds"]
@@ -769,8 +783,13 @@ def collate_padded(
                     arr[:, :L_use, :L_use]
                 )
 
+            n_templates_retrieved[b] = int(extra.get("n_templates_retrieved", 0))
+            best_tpl_sim[b] = float(extra.get("best_tpl_sim", 0.0))
+
         batch_out["prior"] = prior
         batch_out["count"] = count
+        batch_out["n_templates_retrieved"] = n_templates_retrieved
+        batch_out["best_tpl_sim"] = best_tpl_sim
         if dist_bins is not None:
             batch_out["tpl_dist_bins"] = dist_bins
         if agreement is not None:
