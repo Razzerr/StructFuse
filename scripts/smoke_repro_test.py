@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -41,13 +42,16 @@ TRAIN_OVERRIDES = (
     "trainer.max_epochs=1",
     "trainer.deterministic=true",
     "data.num_workers=0",
-    "logger=null",
     "test=false",
 )
 
 
 def _run_training(out_dir: Path) -> int:
-    """Launch one training run with `paths.output_dir=<out_dir>`. Returns exit code."""
+    """Launch one training run with `paths.output_dir=<out_dir>`. Returns exit code.
+
+    W&B is disabled via WANDB_MODE=disabled env var (Hydra `logger=null` is rejected
+    by config group override validation, and the project ships only `logger=wandb`).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -56,8 +60,10 @@ def _run_training(out_dir: Path) -> int:
         f"task_name=smoke_repro_{out_dir.name}",
         *TRAIN_OVERRIDES,
     ]
-    print(f"\n>>> Launching: {' '.join(cmd)}")
-    return subprocess.run(cmd, check=False).returncode
+    env = os.environ.copy()
+    env["WANDB_MODE"] = "disabled"
+    print(f"\n>>> Launching: WANDB_MODE=disabled {' '.join(cmd)}")
+    return subprocess.run(cmd, env=env, check=False).returncode
 
 
 def _load_metrics(run_dir: Path) -> dict:
