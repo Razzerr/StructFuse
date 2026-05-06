@@ -38,9 +38,12 @@ DEFAULT_TOLERANCE = 1e-6
 TRAIN_OVERRIDES = (
     "experiment=frontier_8M",
     "seed=42",
-    "trainer.limit_train_batches=0.005",
-    "trainer.max_epochs=1",
-    "trainer.deterministic=true",
+    # `++` prefix forces override regardless of struct mode. Some upstream component
+    # (extras/hydra config or a callback) appears to seal `trainer` as struct
+    # without `limit_train_batches`, even though trainer/default.yaml defines it.
+    "++trainer.limit_train_batches=0.005",
+    "++trainer.max_epochs=1",
+    "++trainer.deterministic=true",
     "data.num_workers=0",
     "test=false",
 )
