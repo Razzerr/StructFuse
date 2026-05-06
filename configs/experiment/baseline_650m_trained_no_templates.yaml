@@ -33,5 +33,6 @@ data:
   compute_dist_bins: false  # no templates → no point computing dist features
   topk: 0                   # ← real switch: PriorBuilder skips FAISS entirely
 
-trainer:
-  deterministic: true
+# NOTE: deterministic mode is NOT set here — Hydra `@package _global_` interprets a
+# single-field `trainer:` block as a full replacement, stripping defaults from
+# trainer/gpu. Pass `+trainer.deterministic=true` from CLI if needed.

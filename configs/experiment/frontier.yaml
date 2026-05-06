@@ -34,5 +34,7 @@ data:
   esm_embeddings_dir: data/precomputed/esm_t33_650M
   compute_dist_bins: true
 
-trainer:
-  deterministic: true
+# NOTE: deterministic mode is NOT set here — Hydra `@package _global_` interprets a
+# single-field `trainer:` block as a full replacement, stripping defaults from
+# trainer/gpu (limit_train_batches etc.). Pass `+trainer.deterministic=true` from
+# CLI when bit-reproducibility is required.
