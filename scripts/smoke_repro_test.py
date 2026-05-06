@@ -42,6 +42,9 @@ TRAIN_OVERRIDES = (
     # (extras/hydra config or a callback) appears to seal `trainer` as struct
     # without `limit_train_batches`, even though trainer/default.yaml defines it.
     "++trainer.limit_train_batches=0.005",
+    # Cap val to a handful of batches — repro test only needs to verify that the
+    # val pass produces bit-identical numbers, not full coverage.
+    "++trainer.limit_val_batches=10",
     "++trainer.max_epochs=1",
     "++trainer.deterministic=true",
     "data.num_workers=0",
