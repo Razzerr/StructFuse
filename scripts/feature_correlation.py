@@ -36,9 +36,6 @@ SCALAR_VIEWS: Dict[str, str] = {
     "count":            "count",
     "esm":              "esm_contacts",
     "dist_argmax":      "tpl_dist_bins",       # argmax over 9 bins → ordinal
-    "dist_mean":        "tpl_dist_stats[0]",
-    "dist_std":         "tpl_dist_stats[1]",
-    "agreement":        "tpl_agreement",
 }
 
 
@@ -61,12 +58,6 @@ def _extract_pair_scalars(batch: Dict) -> Dict[str, np.ndarray]:
         # (B, 9, L, L) → argmax ordinal bin id.
         bins = batch["tpl_dist_bins"].argmax(dim=1)   # (B, L, L)
         out["dist_argmax"] = bins[mask].cpu().numpy().astype(np.float32)
-    if "tpl_dist_stats" in batch:
-        stats = batch["tpl_dist_stats"]  # (B, 2, L, L)
-        out["dist_mean"] = stats[:, 0][mask].cpu().numpy().astype(np.float32)
-        out["dist_std"]  = stats[:, 1][mask].cpu().numpy().astype(np.float32)
-    if "tpl_agreement" in batch:
-        out["agreement"] = _squeeze_mask(batch["tpl_agreement"])
 
     return out
 
@@ -157,8 +148,7 @@ def collect_pairs(
             batch_keys_seen = sorted(batch.keys())
             print(f"  first batch keys: {batch_keys_seen}", flush=True)
             # Quick per-feature stats from the raw batch tensors.
-            for key in ("prior", "count", "tpl_dist_bins", "tpl_agreement",
-                        "tpl_dist_stats", "esm_contacts"):
+            for key in ("prior", "count", "tpl_dist_bins", "esm_contacts"):
                 if key in batch:
                     t = batch[key]
                     print(

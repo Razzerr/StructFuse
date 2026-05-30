@@ -1,10 +1,18 @@
 _target_: src.models.contact_lit_module.ContactLitModule
 
-# retrieval (go straight into module __init__)
+# Defaults reflect the Stage 3 frontier architecture so experiment configs
+# only need to override what changes (e.g. ablations). Frontier itself
+# becomes a thin wrapper (task_name + seed + paths).
+
+# retrieval params — passed-through to internal _prior_builder fallback
+# (used by TemplateOnlyLitModule.forward; main path uses DataModule).
+# Override via data.topk / data.random_retrieval for paper runs.
 index_dir: data/index_t33
 topk: 4
 only_positive_transfer: false
 min_seq_sep: ${data.min_seq_sep}
+min_template_similarity: 0.0
+random_retrieval: false
 
 # esm model hyperparams
 esm_model: esm2_t33_650M_UR50D
@@ -14,42 +22,51 @@ d_esm: 1280
 # align scoring
 use_blosum: true
 
-# contact prediction head
+# contact prediction head — frontier shape
 d_pair: 128
 width: 128
 depth: 8
 rank: 32
 
-# head architecture
-head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
-head_num_heads: 4       # number of query attention heads if head_type="axial"
-head_num_kv_heads: 1    # GQA: 1 KV heads shared across 4 query heads
-alternating_axial: true # even blocks=row, odd blocks=col (halves SDPA calls)
-use_checkpoint: false    # gradient checkpointing on axial attention blocks (saves ~12-18 GB VRAM)
+# head architecture — axial + triangle multiplicative updates
+head_type: "axial_tri"         # pattern [ax, ax, tri_out, tri_in] × 2
+head_num_heads: 4
+head_num_kv_heads: 1           # GQA
+alternating_axial: true
+use_checkpoint: true           # 650M needs gradient checkpointing on triangle path
+triangle_c: 32                 # inner dim for triangle mult update
 
-# fusion strategy
-fusion_strategy: "trufor"
-fusion_num_heads: 4
+# fusion strategy — grouped per-feature encoders + zero-init residual
+fusion_strategy: "grouped"
+fusion_num_heads: 4            # unused for grouped, kept for non-grouped overrides
 fusion_reduction: 1
+fusion_feature_groups:
+  tpl_contact: 2               # prior + count
+  tpl_dist: 9                  # discretised Cα-Cα distance bins
+
+# Stage 2 feature flags (dataset-side trigger for tpl_dist_bins consumption)
+use_tpl_dist_bins: true
 
 # optim (handled by module.configure_optimizers)
 lr: 3.0e-4
 wd: 1.0e-2
+warmup_steps: 1000
+warmup_fraction: 0.05          # used only when warmup_steps == 0
+min_lr_ratio: 0.1
 
 # loss hyperparameters
-pos_weight_scale: 1.0 
+pos_weight_scale: 1.0
 label_smoothing: 0.1
 
-# Tversky loss (optional regularizer for F1 optimization)
-use_tversky: true          # Enable Tversky loss as regularizer
-tversky_weight: 0.5        # Weight for Tversky regularizer (loss = BCE + 0.3*Tversky)
-tversky_alpha: 0.3         # False positive penalty weight
-tversky_beta: 0.7          # False negative penalty weight (beta < alpha = recall-biased)
-tversky_gamma: 1.0         # Focal modulation strength
+# Tversky loss (regularizer for F1)
+use_tversky: true
+tversky_weight: 0.5
+tversky_alpha: 0.3             # FP penalty
+tversky_beta: 0.7              # FN penalty (recall-biased)
+tversky_gamma: 1.0
 
 max_tpl_cache: 1000
 
-warmup_steps: 0          # 0 → use warmup_fraction
-warmup_fraction: 0.05    # 5% of total scheduled steps
-min_lr_ratio: 0.1
-compile_model: true
+# torch.compile inductor backend fails on triangle einsum + checkpointing + bf16
+# (AOT partitioner "invalid output node" assertion). Cost: ~20-30% throughput.
+compile_model: false

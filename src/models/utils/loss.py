@@ -108,33 +108,5 @@ def masked_focal_tversky(
     
     # Focal modulation: penalize easy examples less
     focal_tversky = (1 - tversky_index).pow(gamma)
-    
+
     return focal_tversky
-
-
-def masked_ce_distogram(
-    logits: torch.Tensor,         # (B, C, L, L)
-    target: torch.Tensor,         # (B, C, L, L) one-hot
-    mask: torch.Tensor,           # (B, L, L) in {0,1}
-    *,
-    class_balance_beta: float = 0.999,
-) -> torch.Tensor:
-    """Class-balanced masked cross-entropy for discretized distance bins.
-
-    Returns standard masked CE (raw natural-log scale). Caller weights it
-    with lambda_disto; AF2-like λ ≈ 0.3 is a sensible starting point.
-    """
-    B, C, L, _ = logits.shape
-    log_probs = F.log_softmax(logits, dim=1)
-
-    # Effective-number class balance (Cui et al. 2019).
-    n_c = (target * mask.unsqueeze(1)).sum(dim=(0, 2, 3)) + 1.0  # (C,)
-    eff_num = (1.0 - class_balance_beta ** n_c) / (1.0 - class_balance_beta)
-    class_weights = 1.0 / eff_num
-    class_weights = class_weights / class_weights.sum() * C  # sums to C
-
-    ce = -(target * log_probs).sum(dim=1)  # (B, L, L)
-    per_pix_w = (target * class_weights.view(1, C, 1, 1)).sum(dim=1)  # (B, L, L)
-    ce = ce * per_pix_w * mask
-    loss = ce.sum() / mask.sum().clamp(min=1)
-    return loss

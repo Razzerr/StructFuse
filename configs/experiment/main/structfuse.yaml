@@ -1,8 +1,0 @@
-# @package _global_
-# MAIN EXPERIMENT: Full StructFuse model
-# Best configuration: ESM2 + TruFor fusion + Axial attention head
-# For Bioinformatics submission
-
-task_name: "structfuse"
-tags: ["main"]
-seed: 42

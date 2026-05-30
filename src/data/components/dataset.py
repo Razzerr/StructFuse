@@ -65,12 +65,10 @@ class PriorBuilder:
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
         # Stage 2 — optional per-pair features derived from template Cα coords.
-        # When any of these is True, build_one returns a richer dict with the
-        # corresponding arrays; otherwise the legacy (prior, count) tuple
-        # shape is preserved for backward compatibility.
+        # When True, build_one returns a richer dict with the corresponding
+        # arrays; otherwise the legacy (prior, count) tuple shape is preserved
+        # for backward compatibility.
         compute_dist_bins: bool = False,
-        compute_agreement: bool = False,
-        compute_dist_stats: bool = False,
         # Holdout filtering. Each file is a text file of chain/PDB IDs (one per
         # line). The union is passed to FaissIndex, which normalises to
         # protein-level IDs and drops them from retrieval when build_one is
@@ -104,11 +102,7 @@ class PriorBuilder:
         self.random_retrieval = bool(random_retrieval)
 
         self.compute_dist_bins = bool(compute_dist_bins)
-        self.compute_agreement = bool(compute_agreement)
-        self.compute_dist_stats = bool(compute_dist_stats)
-        self._needs_coords = (
-            self.compute_dist_bins or self.compute_agreement or self.compute_dist_stats
-        )
+        self._needs_coords = self.compute_dist_bins
 
         self._id_to_npz = {m["id"]: m["npz"] for m in self.faiss_index.meta}
         self._tpl_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -167,18 +161,15 @@ class PriorBuilder:
             Legacy mode (no Stage 2 flags set): ``(prior, count)`` tuple of
             two ``(Lc, Lc)`` float32 arrays. All-zeros if no templates found.
 
-            Rich mode (any of compute_dist_bins/agreement/dist_stats set):
+            Rich mode (compute_dist_bins=True):
             dict with keys:
               - "prior"      : (Lc, Lc) float32
               - "count"      : (Lc, Lc) float32
-              - "dist_bins"  : (9, Lc, Lc) float32 soft histogram (when enabled)
-              - "agreement"  : (1, Lc, Lc) float32 1 − std across templates
-              - "dist_stats" : (2, Lc, Lc) float32 [mean/30Å, std/15Å]
+              - "dist_bins"  : (9, Lc, Lc) float32 soft histogram
         """
         from src.data.utils.align import (
             project_prior,
             project_distance,
-            project_raw_distance,
             needleman_wunsch,
             N_DIST_BINS,
         )
@@ -196,10 +187,6 @@ class PriorBuilder:
             out = {"prior": prior, "count": count}
             if self.compute_dist_bins:
                 out["dist_bins"] = np.zeros((N_DIST_BINS, Lc, Lc), np.float32)
-            if self.compute_agreement:
-                out["agreement"] = np.zeros((1, Lc, Lc), np.float32)
-            if self.compute_dist_stats:
-                out["dist_stats"] = np.zeros((2, Lc, Lc), np.float32)
             # Per-chain template stats — always present in rich mode for paper-grade
             # per-protein analyses (template-quality stratification, paired tests).
             out["n_templates_retrieved"] = 0
@@ -228,9 +215,6 @@ class PriorBuilder:
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)
 
         # Stage 2 accumulators
-        per_tpl_contacts: List[np.ndarray] = []
-        per_tpl_aligned: List[np.ndarray] = []
-        per_tpl_distances: List[np.ndarray] = []
         dist_bins_acc = None
         if rich and self.compute_dist_bins:
             dist_bins_acc = np.zeros((Lc, Lc, N_DIST_BINS), dtype=np.float32)
@@ -274,36 +258,17 @@ class PriorBuilder:
             prior_acc += wk * Pk_pos
             count_acc += cnt
 
-            if rich:
-                # Per-template binary projected contacts (used for agreement).
-                # Also keep the aligned mask so agreement is only counted on
-                # pairs where the template actually mapped both endpoints —
-                # otherwise unaligned pairs look "agreeing" (all zeros, std=0).
-                if self.compute_agreement:
-                    per_tpl_contacts.append(Pk_pos.copy())
-                    per_tpl_aligned.append(known.astype(bool).copy())
-
-                if self.compute_dist_bins:
-                    dbin = project_distance(
-                        crop_seq,
-                        tpl["seq"],
-                        tpl["coords"],
-                        q2t,
-                        min_seq_sep=self.min_seq_sep,
-                        symmetrize=True,
-                    )  # (Lc, Lc) int8 ∈ [0..8]
-                    oh = np.eye(N_DIST_BINS, dtype=np.float32)[dbin]  # (Lc, Lc, 9)
-                    dist_bins_acc += wk * oh
-
-                if self.compute_dist_stats:
-                    draw = project_raw_distance(
-                        crop_seq,
-                        tpl["coords"],
-                        q2t,
-                        min_seq_sep=self.min_seq_sep,
-                        symmetrize=True,
-                    )  # (Lc, Lc) float32 with NaN
-                    per_tpl_distances.append(draw)
+            if rich and self.compute_dist_bins:
+                dbin = project_distance(
+                    crop_seq,
+                    tpl["seq"],
+                    tpl["coords"],
+                    q2t,
+                    min_seq_sep=self.min_seq_sep,
+                    symmetrize=True,
+                )  # (Lc, Lc) int8 ∈ [0..8]
+                oh = np.eye(N_DIST_BINS, dtype=np.float32)[dbin]  # (Lc, Lc, 9)
+                dist_bins_acc += wk * oh
 
         if not rich:
             return prior_acc, count_acc
@@ -313,40 +278,6 @@ class PriorBuilder:
         if self.compute_dist_bins:
             # Transpose to channel-first to match pair feature convention.
             out["dist_bins"] = dist_bins_acc.transpose(2, 0, 1).astype(np.float32)
-
-        if self.compute_agreement:
-            agreement = np.zeros((Lc, Lc), dtype=np.float32)
-            if len(per_tpl_contacts) >= 2:
-                stacked = np.stack(per_tpl_contacts)                 # (K, Lc, Lc)
-                aligned = np.stack(per_tpl_aligned)                  # (K, Lc, Lc) bool
-                # Std only over templates that actually aligned the pair.
-                stacked_masked = np.where(aligned, stacked, np.nan)
-                with np.errstate(invalid="ignore", all="ignore"):
-                    std = np.nanstd(stacked_masked, axis=0)          # (Lc, Lc), NaN where <2 aligned
-                sufficient = aligned.sum(axis=0) >= 2                # (Lc, Lc)
-                agreement = np.where(sufficient, 1.0 - std, 0.0).astype(np.float32)
-                np.nan_to_num(agreement, copy=False, nan=0.0)
-                np.clip(agreement, 0.0, 1.0, out=agreement)
-                if self.min_seq_sep > 0:
-                    ii, jj = np.indices((Lc, Lc))
-                    agreement[np.abs(ii - jj) < self.min_seq_sep] = 0.0
-            out["agreement"] = agreement[None].astype(np.float32)
-
-        if self.compute_dist_stats:
-            if per_tpl_distances:
-                stacked = np.stack(per_tpl_distances)  # (K, Lc, Lc)
-                with np.errstate(invalid="ignore", all="ignore"):
-                    dist_mean = np.nanmean(stacked, axis=0)
-                    dist_std = np.nanstd(stacked, axis=0)
-                dist_mean = np.nan_to_num(dist_mean, nan=0.0)
-                dist_std = np.nan_to_num(dist_std, nan=0.0)
-                # Normalise to roughly [0, 1] using physically reasonable clips.
-                dist_mean = np.clip(dist_mean, 0.0, 30.0) / 30.0
-                dist_std = np.clip(dist_std, 0.0, 15.0) / 15.0
-            else:
-                dist_mean = np.zeros((Lc, Lc), dtype=np.float32)
-                dist_std = np.zeros((Lc, Lc), dtype=np.float32)
-            out["dist_stats"] = np.stack([dist_mean, dist_std], axis=0).astype(np.float32)
 
         # Per-chain template stats (rich mode only) — used downstream for paper-grade
         # per-protein analyses (paired Wilcoxon, template-quality stratification).
@@ -606,7 +537,6 @@ def collate_padded(
     include_diagonal: bool = False,  # usually set diagonal to 0 in pair masks
     prior_builder: Optional[PriorBuilder] = None,
     esm_embeddings_dir: Optional[Path] = None,
-    compute_gt_dist_bins: bool = False,
     filter_holdout: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -730,18 +660,12 @@ def collate_padded(
         # Stage 2 rich features — pre-allocate only if PriorBuilder is
         # configured to produce them; otherwise save the memory.
         dist_bins = None
-        agreement = None
-        dist_stats = None
         if getattr(prior_builder, "compute_dist_bins", False):
             # N_DIST_BINS = 9 channels (unknown + 8 finite bins).
             from src.data.utils.align import N_DIST_BINS
             dist_bins = torch.zeros(
                 (B, N_DIST_BINS, Lmax, Lmax), dtype=torch.float32
             )
-        if getattr(prior_builder, "compute_agreement", False):
-            agreement = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
-        if getattr(prior_builder, "compute_dist_stats", False):
-            dist_stats = torch.zeros((B, 2, Lmax, Lmax), dtype=torch.float32)
 
         # Per-chain template stats — populated whenever build_one returns rich dict.
         # Used by test_step for per-protein dump (paired Wilcoxon, stratification).
@@ -772,16 +696,6 @@ def collate_padded(
                 dist_bins[b, :, :L_use, :L_use] = torch.from_numpy(
                     arr[:, :L_use, :L_use]
                 )
-            if agreement is not None and "agreement" in extra:
-                arr = extra["agreement"]  # (1, Lc, Lc)
-                agreement[b, :, :L_use, :L_use] = torch.from_numpy(
-                    arr[:, :L_use, :L_use]
-                )
-            if dist_stats is not None and "dist_stats" in extra:
-                arr = extra["dist_stats"]  # (2, Lc, Lc)
-                dist_stats[b, :, :L_use, :L_use] = torch.from_numpy(
-                    arr[:, :L_use, :L_use]
-                )
 
             n_templates_retrieved[b] = int(extra.get("n_templates_retrieved", 0))
             best_tpl_sim[b] = float(extra.get("best_tpl_sim", 0.0))
@@ -792,35 +706,6 @@ def collate_padded(
         batch_out["best_tpl_sim"] = best_tpl_sim
         if dist_bins is not None:
             batch_out["tpl_dist_bins"] = dist_bins
-        if agreement is not None:
-            batch_out["tpl_agreement"] = agreement
-        if dist_stats is not None:
-            batch_out["tpl_dist_stats"] = dist_stats
-
-    # ── Stage 4: ground-truth distogram bins (one-hot, 8 finite bins) ──
-    if compute_gt_dist_bins:
-        # Bin edges (Å): [0,4), [4,6), [6,8), [8,10), [10,12), [12,16), [16,20), [20,∞)
-        bin_edges = torch.tensor(
-            [4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0], dtype=torch.float32
-        )
-        n_bins = int(bin_edges.numel()) + 1  # 8
-        gt_dist_bins = torch.zeros((B, n_bins, Lmax, Lmax), dtype=torch.float32)
-        gt_dist_valid = torch.zeros((B, Lmax, Lmax), dtype=torch.float32)
-        for b, item in enumerate(cropped):
-            coords = item.get("coords")
-            if coords is None:
-                continue
-            Lc = item["L"]
-            c = torch.from_numpy(np.asarray(coords[:Lc])).float()  # (Lc, 3)
-            res_m = residue_mask[b, :Lc]  # (Lc,)
-            valid_pair = (res_m.unsqueeze(0) * res_m.unsqueeze(1))  # (Lc, Lc)
-            dist = torch.cdist(c.unsqueeze(0), c.unsqueeze(0))[0]  # (Lc, Lc)
-            bin_idx = torch.bucketize(dist, bin_edges).clamp(0, n_bins - 1)
-            oh = F.one_hot(bin_idx, num_classes=n_bins).float()  # (Lc, Lc, C)
-            gt_dist_bins[b, :, :Lc, :Lc] = oh.permute(2, 0, 1) * valid_pair.unsqueeze(0)
-            gt_dist_valid[b, :Lc, :Lc] = valid_pair
-        batch_out["gt_dist_bins"] = gt_dist_bins
-        batch_out["gt_dist_valid"] = gt_dist_valid
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

@@ -39,17 +39,15 @@ from src.models.utils.metrics import precision_at_k_by_range  # noqa: E402
 
 
 FEATURE_SPECS: Dict[str, List[str]] = {
-    "lr_minimal":    ["prior", "count"],
-    "lr_plus_esm":   ["prior", "count", "esm"],
-    "lr_plus_dist":  ["prior", "count", "esm", "dist_bins"],
-    "lr_plus_stats": ["prior", "count", "esm", "dist_bins", "dist_stats"],
-    "lr_plus_agree": ["prior", "count", "esm", "dist_bins", "dist_stats", "agreement"],
-    "lr_all":        ["prior", "count", "esm", "dist_bins", "dist_stats", "agreement"],
+    "lr_minimal":   ["prior", "count"],
+    "lr_plus_esm":  ["prior", "count", "esm"],
+    "lr_plus_dist": ["prior", "count", "esm", "dist_bins"],
+    "lr_all":       ["prior", "count", "esm", "dist_bins"],
 }
 
 FEATURE_CHANNELS = {
     "prior": 1, "count": 1, "esm": 1,
-    "dist_bins": 9, "dist_stats": 2, "agreement": 1,
+    "dist_bins": 9,
 }
 
 
@@ -57,8 +55,7 @@ def _get_channel_tensor(batch: Dict, key: str, fallback_shape) -> torch.Tensor:
     """Return (B, C, L, L) tensor for a feature key, zero-filled if missing."""
     mapping = {
         "prior": "prior", "count": "count", "esm": "esm_contacts",
-        "dist_bins": "tpl_dist_bins", "dist_stats": "tpl_dist_stats",
-        "agreement": "tpl_agreement",
+        "dist_bins": "tpl_dist_bins",
     }
     batch_key = mapping[key]
     if batch_key in batch:
@@ -152,8 +149,7 @@ def fit_logistic_regressions(
         if i == 0:
             # Diagnostic: per-feature stats from the very first batch, so we
             # can tell at a glance whether prior/tpl_* are being populated.
-            for key in ("prior", "count", "tpl_dist_bins", "tpl_agreement",
-                        "tpl_dist_stats", "esm_contacts"):
+            for key in ("prior", "count", "tpl_dist_bins", "esm_contacts"):
                 if key in batch:
                     t = batch[key]
                     print(

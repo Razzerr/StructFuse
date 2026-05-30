@@ -1,0 +1,18 @@
+# @package _global_
+# ABLATION (A5): frontier_8M MINUS triangle MINUS tpl_dist.
+# Grouped fusion with ONLY tpl_contact group (prior + count); axial head
+# without triangle. Strips both the distance-bin channels and the triangle
+# update from frontier — tests the full template feature stack contribution.
+
+task_name: "ablation_tpl_contact_only"
+tags: ["ablation", "A5", "tpl-contact-only", "no-triangle", "no-dist"]
+seed: 42
+
+model:
+  head_type: "axial"          # drop triangle
+  fusion_feature_groups:
+    tpl_contact: 2             # drop tpl_dist group
+  use_tpl_dist_bins: false
+
+data:
+  compute_dist_bins: false     # don't waste CPU on unused features

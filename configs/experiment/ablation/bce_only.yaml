@@ -1,13 +1,10 @@
 # @package _global_
-# ABLATION: BCE-only loss (no Tversky regularizer).
-# Defends the BCE+Tversky design choice in paper.
-#
-# Stack on top of frontier (S3 dist_tri):
-#   python src/train.py experiment=stage3_triangle/dist_tri \
-#                       +experiment=ablation/bce_only
+# ABLATION (L1): frontier_8M MINUS Tversky regularizer (BCE-only loss).
+# Defends the BCE+Tversky design choice. Architecture inherited from
+# frontier_8M defaults; loss is the only delta.
 
 task_name: "ablation_bce_only"
-tags: ["ablation", "bce-only", "no-tversky"]
+tags: ["ablation", "L1", "bce-only", "no-tversky"]
 seed: 42
 
 model:

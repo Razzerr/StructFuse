@@ -299,8 +299,6 @@ class Pair2DHead(nn.Module):
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
         triangle_c: int = 32,
-        use_distogram_head: bool = False,
-        n_distogram_bins: int = 8,
     ):
         super().__init__()
 
@@ -389,14 +387,6 @@ class Pair2DHead(nn.Module):
         import math
         nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
-        # Stage 4: optional distogram auxiliary head.
-        # Zero-init so it does not perturb the contact trunk at step 0.
-        self.use_distogram_head = bool(use_distogram_head)
-        if self.use_distogram_head:
-            self.out_disto = nn.Conv2d(width, int(n_distogram_bins), 1)
-            nn.init.zeros_(self.out_disto.weight)
-            nn.init.zeros_(self.out_disto.bias)
-
     def forward(
         self,
         pair_feat,
@@ -406,8 +396,6 @@ class Pair2DHead(nn.Module):
         esm_contacts,
         pair_mask=None,
         tpl_dist_bins=None,
-        tpl_agreement=None,
-        tpl_dist_stats=None,
     ):
         """
         Args:
@@ -417,8 +405,8 @@ class Pair2DHead(nn.Module):
             rel: (B, rel_ch, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
-            tpl_dist_bins, tpl_agreement, tpl_dist_stats: optional Stage 2
-                per-group features (only consumed by GroupedFeatureFusion).
+            tpl_dist_bins: optional Stage 2 per-group feature
+                (only consumed by GroupedFeatureFusion).
 
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -429,10 +417,6 @@ class Pair2DHead(nn.Module):
             feats: dict = {"tpl_contact": torch.cat([prior, count], dim=1)}
             if tpl_dist_bins is not None:
                 feats["tpl_dist"] = tpl_dist_bins
-            if tpl_agreement is not None:
-                feats["tpl_agree"] = tpl_agreement
-            if tpl_dist_stats is not None:
-                feats["tpl_dist_stats"] = tpl_dist_stats
             x = self.fusion(pair_feat, esm_contacts, rel, **feats)
         else:
             x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
@@ -467,8 +451,4 @@ class Pair2DHead(nn.Module):
         logits = self.out(x)  # (B, 1, L, L)
         logits = 0.5 * (logits + logits.transpose(-1, -2))
 
-        if self.use_distogram_head:
-            logits_disto = self.out_disto(x)  # (B, n_bins, L, L)
-            logits_disto = 0.5 * (logits_disto + logits_disto.transpose(-1, -2))
-            return logits, logits_disto
         return logits

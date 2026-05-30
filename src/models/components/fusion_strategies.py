@@ -425,7 +425,7 @@ class GroupedFeatureFusion(nn.Module):
         d_rel: rel embedding dimension (projected through 1×1 conv)
         feature_groups: ordered dict {group_name: num_channels}. The
             names must match the kwargs passed to forward (e.g.
-            "tpl_contact", "tpl_dist", "tpl_agree").
+            "tpl_contact", "tpl_dist").
 
     Forward:
         esm stream      = Conv3x3(cat[pair_feat, esm_contacts]) + BN + ReLU

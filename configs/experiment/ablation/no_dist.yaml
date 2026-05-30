@@ -1,0 +1,16 @@
+# @package _global_
+# ABLATION: frontier_8M MINUS tpl_dist (keeps triangle, drops 9-channel
+# distance bins). Symmetric to no_triangle.yaml — isolates contribution of
+# the tpl_dist feature stack with triangle still on.
+
+task_name: "ablation_no_dist"
+tags: ["ablation", "no-dist", "triangle-on"]
+seed: 42
+
+model:
+  fusion_feature_groups:
+    tpl_contact: 2             # drop tpl_dist group
+  use_tpl_dist_bins: false
+
+data:
+  compute_dist_bins: false     # don't waste CPU on unused features

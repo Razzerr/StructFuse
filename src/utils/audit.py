@@ -109,7 +109,6 @@ def dump_audit_manifest(
             "warmup_fraction": _safe_select(cfg, "model.warmup_fraction"),
             "use_tversky": _safe_select(cfg, "model.use_tversky"),
             "tversky_weight": _safe_select(cfg, "model.tversky_weight"),
-            "lambda_disto": _safe_select(cfg, "model.lambda_disto"),
             "compile_model": _safe_select(cfg, "model.compile_model"),
         },
         "trainer": {

@@ -1,40 +1,29 @@
 # @package _global_
-# Canonical frontier config — the headline 650M Stage 3 model.
-# Snapshot of stage3_triangle/dist_tri with pinned reproducibility flags.
-# Pattern: 8 blocks [ax, ax, tri_out, tri_in, ax, ax, tri_out, tri_in].
+# Canonical frontier config — headline 650M Stage 3 model.
+# Architecture comes entirely from configs/model/esm2_t33_650M.yaml
+# (grouped fusion + tpl_contact + tpl_dist + axial_tri + triangle).
+# This file just pins task_name, seed and data paths.
 #
-# Headline runs (3 seeds): launch this with seed=0, seed=42, seed=1337 separately.
+# Headline runs (3 seeds): launch with seed=0, seed=42, seed=1337 separately.
 # Default seed=42 here so single-launch matches Stage 3 prior runs.
 
 defaults:
   - override /model: esm2_t33_650M
 
 task_name: "frontier"
-tags: ["frontier", "stage3", "triangle", "dist_only", "headline"]
+tags: ["frontier", "stage3", "headline", "650M"]
 seed: 42
 
 model:
-  fusion_strategy: "grouped"
-  fusion_feature_groups:
-    tpl_contact: 2
-    tpl_dist: 9
-  use_tpl_dist_bins: true
-  head_type: "axial_tri"
-  triangle_c: 32
-  lr: 3.0e-4
-  warmup_steps: 1000
+  # 650M needs gradient checkpointing — model default is already true,
+  # kept here explicit so the headline pin is self-documenting.
   use_checkpoint: true
-  # torch.compile inductor backend fails on triangle einsum + gradient
-  # checkpointing + bf16 (AOT partitioner "invalid output node" assertion).
-  compile_model: false
 
 data:
   batch_size: 8
   index_dir: data/index_t33
   esm_embeddings_dir: data/precomputed/esm_t33_650M
-  compute_dist_bins: true
 
-# NOTE: deterministic mode is NOT set here — Hydra `@package _global_` interprets a
-# single-field `trainer:` block as a full replacement, stripping defaults from
-# trainer/gpu (limit_train_batches etc.). Pass `+trainer.deterministic=true` from
-# CLI when bit-reproducibility is required.
+# Bit-reproducibility for headline seeds: pass `+trainer.deterministic=true`
+# from CLI. Avoid bare `trainer:` block here — Hydra `@package _global_`
+# replaces the whole group instead of merging (strips trainer/gpu defaults).

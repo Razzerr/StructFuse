@@ -1,10 +1,18 @@
 # @package _global_
-# ABLATION: Standard fusion instead of TruFor
-# Tests if cross-attention (TruFor) is better than gated residual (Standard)
+# ABLATION (A1): frontier_8M with standard concat+projection fusion instead of grouped.
+#
+# CAVEAT — like trufor_fusion, this is NOT a pure fusion change. Standard
+# fusion's branch in pair2d_head.py:425 only receives (pair_feat, prior,
+# count, rel, esm_contacts) — it does NOT consume tpl_dist_bins (only
+# GroupedFeatureFusion does). So this ablation simultaneously (a) swaps
+# fusion grouped→standard and (b) drops explicit tpl_dist consumption.
+# Interpret as "full standard-fusion stack vs frontier".
 
 task_name: "ablation_standard_fusion"
-tags: ["ablation", "standard-fusion"]
+tags: ["ablation", "A1", "standard-fusion", "confounded"]
 seed: 42
 
 model:
   fusion_strategy: "standard"
+  fusion_feature_groups: null  # not used by standard fusion
+  use_tpl_dist_bins: false     # standard branch doesn't consume tpl_dist_bins

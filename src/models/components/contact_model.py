@@ -40,8 +40,6 @@ class ContactModel(torch.nn.Module):
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
         triangle_c: int = 32,
-        use_distogram_head: bool = False,
-        n_distogram_bins: int = 8,
     ):
         super().__init__()
         self.pair = PairFeatures(d_model=d_esm, d_pair=d_pair, rank=rank)
@@ -62,8 +60,6 @@ class ContactModel(torch.nn.Module):
             use_depthwise=use_depthwise,
             use_checkpoint=use_checkpoint,
             triangle_c=triangle_c,
-            use_distogram_head=use_distogram_head,
-            n_distogram_bins=n_distogram_bins,
         )
 
     def forward(
@@ -75,8 +71,6 @@ class ContactModel(torch.nn.Module):
         esm_contacts=None,
         pair_mask=None,
         tpl_dist_bins=None,
-        tpl_agreement=None,
-        tpl_dist_stats=None,
     ):
         """
         Args:
@@ -88,10 +82,6 @@ class ContactModel(torch.nn.Module):
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             tpl_dist_bins: (B, 9, L, L) per-pair soft distance bin histograms
                 from aggregated templates (Stage 2 feature). Optional.
-            tpl_agreement: (B, 1, L, L) 1 - std across top-K template
-                projected contacts (Stage 2 feature). Optional.
-            tpl_dist_stats: (B, 2, L, L) mean/std of projected Cα-Cα
-                distances across templates (Stage 2 feature). Optional.
 
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -106,7 +96,5 @@ class ContactModel(torch.nn.Module):
             esm_contacts=esm_contacts,
             pair_mask=pair_mask,
             tpl_dist_bins=tpl_dist_bins,
-            tpl_agreement=tpl_agreement,
-            tpl_dist_stats=tpl_dist_stats,
         )
         return logits

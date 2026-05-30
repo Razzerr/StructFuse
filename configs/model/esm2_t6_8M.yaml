@@ -1,10 +1,18 @@
 _target_: src.models.contact_lit_module.ContactLitModule
 
-# retrieval (go straight into module __init__)
+# Defaults reflect the Stage 3 frontier_8M architecture so experiment configs
+# only need to override what changes (e.g. ablations). frontier_8M.yaml
+# becomes a thin wrapper (task_name + seed + paths).
+
+# retrieval params — passed-through to internal _prior_builder fallback
+# (used by TemplateOnlyLitModule.forward; main path uses DataModule).
+# Override via data.topk / data.random_retrieval for paper runs.
 index_dir: data/index_t6
 topk: 4
 only_positive_transfer: false
 min_seq_sep: ${data.min_seq_sep}
+min_template_similarity: 0.0
+random_retrieval: false
 
 # esm model hyperparams
 esm_model: esm2_t6_8M_UR50D
@@ -14,42 +22,50 @@ d_esm: 320
 # align scoring
 use_blosum: true
 
-# contact prediction head
+# contact prediction head — frontier shape
 d_pair: 128
 width: 128
 depth: 8
 rank: 32
 
-# head architecture
-head_type: "axial"    # "cnn", "dilated", or "axial" - dilated for larger receptive field
-head_num_heads: 4       # number of query attention heads if head_type="axial"
-head_num_kv_heads: 1    # GQA: 1 KV head shared across 4 query heads
-alternating_axial: true # even blocks=row, odd blocks=col (halves SDPA calls)
-use_checkpoint: false   # not needed for 8M model, saves ~2x compute vs checkpointing
+# head architecture — axial + triangle multiplicative updates
+head_type: "axial_tri"
+head_num_heads: 4
+head_num_kv_heads: 1            # GQA
+alternating_axial: true
+use_checkpoint: false           # 8M has memory headroom, skip checkpointing
+triangle_c: 32
 
-# fusion strategy
-fusion_strategy: "trufor"
-fusion_num_heads: 4
+# fusion strategy — grouped per-feature encoders + zero-init residual
+fusion_strategy: "grouped"
+fusion_num_heads: 4             # unused for grouped, kept for non-grouped overrides
 fusion_reduction: 1
+fusion_feature_groups:
+  tpl_contact: 2
+  tpl_dist: 9
 
-# optim (handled by module.configure_optimizers)
-lr: 5.0e-4
+# Stage 2 feature flags
+use_tpl_dist_bins: true
+
+# optim
+lr: 3.0e-4
 wd: 1.0e-2
+warmup_steps: 0                 # 0 → fall back to warmup_fraction
+warmup_fraction: 0.05
+min_lr_ratio: 0.1
 
 # loss hyperparameters
-pos_weight_scale: 1.0 
-label_smoothing: 0.1      # Prevents overconfidence (keep for calibration)
+pos_weight_scale: 1.0
+label_smoothing: 0.1
 
-# Tversky loss (handles class imbalance via soft-F1, stable unlike dynamic pos_weight)
+# Tversky loss
 use_tversky: true
-tversky_weight: 0.5        # Weight for Tversky regularizer (loss = BCE + 0.5*Tversky)
-tversky_alpha: 0.3         # False positive penalty weight (lower = tolerate more FP)
-tversky_beta: 0.7          # False negative penalty weight (higher = boost recall)
-tversky_gamma: 1.0         # Focal modulation strength
+tversky_weight: 0.5
+tversky_alpha: 0.3
+tversky_beta: 0.7
+tversky_gamma: 1.0
 
 max_tpl_cache: 1000
 
-warmup_steps: 0          # 0 → use warmup_fraction
-warmup_fraction: 0.02    # 2% of total scheduled steps
-min_lr_ratio: 0.1
-compile_model: true
+# torch.compile fails on triangle path (see esm2_t33_650M.yaml comment)
+compile_model: false

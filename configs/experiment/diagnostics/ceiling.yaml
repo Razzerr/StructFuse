@@ -6,8 +6,8 @@
 #   python scripts/ceiling.py experiment=diagnostics/ceiling
 #
 # Uses the same data pipeline as training so the numbers are directly
-# comparable to val/P@L_long during training. Enables all Stage 2 features in
-# the data pipeline so logistic-regression ceilings can include them.
+# comparable to val/P@L_long during training. Enables tpl_dist_bins so the
+# logistic-regression ceiling can include the kept Stage 2 feature.
 
 defaults:
   - override /model: esm2_t33_650M
@@ -20,10 +20,7 @@ data:
   batch_size: 8
   index_dir: data/index_t33
   esm_embeddings_dir: data/precomputed/esm_t33_650M
-  # Enable Stage 2 features so the ceiling script can see them.
   compute_dist_bins: true
-  compute_agreement: true
-  compute_dist_stats: true
 
 # We don't train here; just push val batches through the pipeline.
 train: false

@@ -1,0 +1,25 @@
+# @package _global_
+# Baseline B2 — ESM2-650M + trained frontier head, NO templates.
+# Fills the missing rung between (B1) ESM2-650M attention-only and the
+# 650M frontier (which has templates). Critical for paper paired test:
+# isolates "templates contribute" from "any trained head over 650M".
+#
+# Same as frontier.yaml EXCEPT: data.topk=0 (no retrieval).
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "baseline_esm2_650m_trained"
+tags: ["baseline", "B2", "no-templates", "650M", "trained-head"]
+seed: 42
+
+model:
+  use_checkpoint: true       # mirror frontier.yaml
+  topk: 0                    # passive, kept consistent with data.topk for audit log
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  topk: 0                    # real switch — PriorBuilder skips FAISS entirely
+  compute_dist_bins: false   # no templates → don't compute dist features

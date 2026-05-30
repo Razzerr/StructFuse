@@ -87,10 +87,6 @@ class ContactDataModule(LightningDataModule):
         # PriorBuilder. Off by default so existing configs keep the legacy
         # (prior, count) output shape.
         compute_dist_bins: bool = False,
-        compute_agreement: bool = False,
-        compute_dist_stats: bool = False,
-        # Stage 4 — ground-truth Cα-Cα distogram bins for auxiliary loss.
-        compute_gt_dist_bins: bool = False,
         # Precomputed ESM2 embeddings (see scripts/precompute_esm2_embeddings.py)
         esm_embeddings_dir: Optional[str] = None,
         # Holdout protein IDs (val + test): each file is one chain/PDB ID per
@@ -140,9 +136,6 @@ class ContactDataModule(LightningDataModule):
         self.random_retrieval = bool(random_retrieval)
         self.max_tpl_cache = int(max_tpl_cache)
         self.compute_dist_bins = bool(compute_dist_bins)
-        self.compute_agreement = bool(compute_agreement)
-        self.compute_dist_stats = bool(compute_dist_stats)
-        self.compute_gt_dist_bins = bool(compute_gt_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
         self.holdout_id_files: List[str] = [str(p) for p in (holdout_id_files or [])]
         self.skip_ids_file: Optional[str] = str(skip_ids_file) if skip_ids_file else None
@@ -311,8 +304,6 @@ class ContactDataModule(LightningDataModule):
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
-                    compute_agreement=self.compute_agreement,
-                    compute_dist_stats=self.compute_dist_stats,
                     holdout_id_files=self.holdout_id_files,
                 )
 
@@ -345,8 +336,6 @@ class ContactDataModule(LightningDataModule):
                     random_retrieval=self.random_retrieval,
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
-                    compute_agreement=self.compute_agreement,
-                    compute_dist_stats=self.compute_dist_stats,
                     holdout_id_files=self.holdout_id_files,
                 )
 
@@ -367,7 +356,6 @@ class ContactDataModule(LightningDataModule):
             seed=rng_seed,
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
-            compute_gt_dist_bins=self.compute_gt_dist_bins,
             filter_holdout=True,
         )
 
@@ -388,7 +376,6 @@ class ContactDataModule(LightningDataModule):
             seed=42,  # fixed seed for reproducibility
             prior_builder=self._prior_builder,
             esm_embeddings_dir=self.esm_embeddings_dir,
-            compute_gt_dist_bins=self.compute_gt_dist_bins,
             filter_holdout=False,
         )
         

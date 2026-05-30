@@ -1,0 +1,12 @@
+# @package _global_
+# ABLATION (A4): frontier_8M MINUS triangle multiplicative update.
+# Same grouped fusion + tpl_contact + tpl_dist as frontier_8M; axial head
+# only (no triangle blocks). Tests the contribution of the triangle path
+# in isolation from feature stack and fusion choice.
+
+task_name: "ablation_no_triangle"
+tags: ["ablation", "A4", "no-triangle", "axial-only"]
+seed: 42
+
+model:
+  head_type: "axial"   # drop triangle (frontier_8M default = "axial_tri")

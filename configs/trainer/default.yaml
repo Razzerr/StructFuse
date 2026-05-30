@@ -29,6 +29,6 @@ reload_dataloaders_every_n_epochs: 1
 # makes training slower but gives more reproducibility than just setting seeds
 deterministic: False
 
-# use 10% of training batches per epoch (stochastic subsampling)
-# acts as implicit regularisation; each epoch samples a different 10%
-limit_train_batches: 0.1
+# Use full training set by default. Override via CLI for smoke tests
+# (e.g. `++trainer.limit_train_batches=0.005`).
+limit_train_batches: 1.0

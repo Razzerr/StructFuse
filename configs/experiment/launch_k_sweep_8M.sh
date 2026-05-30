@@ -1,12 +1,16 @@
 #!/bin/bash
 # ============================================================================
-# Stage 1 — GroupedFeatureFusion A/B vs TruFor baseline.
-# Grouped fusion z samym {prior, count} — informacyjnie identyczny z TruFor.
-# Green light: P@L_long ep20 ∈ [baseline ± 0.005].
+# Faza 0.6 — 8M k-sweep early: k=4 (frontier_8M) vs k=8.
+# Two comparative training runs on the 8M backbone — feeds the decision on
+# whether to bump frontier.yaml data.topk above 4 before launching the
+# 3-seed 650M headline (H1).
+#
+# Decision rule (plan Faza 0.6): if test/P@L_long(k=8) - test/P@L_long(k=4)
+# > 0.5pp on 8M → update frontier.yaml data.topk=8 before H1.
 #
 # Usage:
-#   ./configs/experiment/stage1_fusion/launch.sh              # submit all jobs
-#   ./configs/experiment/stage1_fusion/launch.sh --dry-run    # print sbatch commands
+#   ./configs/experiment/launch_k_sweep_8M.sh              # submit both
+#   ./configs/experiment/launch_k_sweep_8M.sh --dry-run    # print only
 # ============================================================================
 
 set -euo pipefail
@@ -16,28 +20,25 @@ DRY_RUN=false
 
 PROJECT_DIR="/mnt/storage_3/home/nszostak/pl0735-01/project_data/old_pl0468-02/StructFuse"
 LOGS_DIR="${PROJECT_DIR}/logs"
-mkdir -p "${LOGS_DIR}"
-
-# Seeds for multi-seed experiments
-SEEDS=(42 0 1337)
+TEMP_DIR="${PROJECT_DIR}/.temp"
+$DRY_RUN || mkdir -p "${LOGS_DIR}" "${TEMP_DIR}"
 
 # --------------------------------------------------------------------------
-# submit <experiment_config> <job_name> <seed> [time_limit]
-#   experiment_config : Hydra experiment path (e.g. main/structfuse)
-#   job_name          : SLURM job name (also used in log filenames)
-#   seed              : random seed (passed as Hydra override)
-#   time_limit        : optional, default 12:00:00
+# submit <experiment_args> <job_name> [time_limit]
+#   experiment_args : everything passed to src/train.py (composed Hydra overrides)
+#   job_name        : SLURM job name + W&B task_name + tee log filename
+#   time_limit      : optional, default 24:00:00
 # --------------------------------------------------------------------------
 submit() {
-    local experiment="$1"
+    local experiment_args="$1"
     local job_name="$2"
-    local seed="$3"
-    local time_limit="${4:-12:00:00}"
+    local time_limit="${3:-24:00:00}"
 
-    local cmd="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py experiment=${experiment} seed=${seed}"
+    local temp_log="${TEMP_DIR}/${job_name}.log"
+    local cmd="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py ${experiment_args} test=true task_name=${job_name} 2>&1 | tee ${temp_log}"
 
     if $DRY_RUN; then
-        echo "[DRY-RUN] sbatch  job=${job_name}  time=${time_limit}  experiment=${experiment}  seed=${seed}"
+        echo "[DRY-RUN] sbatch  job=${job_name}  time=${time_limit}  args=${experiment_args}"
         return
     fi
 
@@ -49,8 +50,8 @@ submit() {
         --time="${time_limit}" \
         --ntasks=1 \
         --gpus-per-node=1 \
-        --cpus-per-task=32 \
-        --mem=512G \
+        --cpus-per-task=16 \
+        --mem=256G \
         --nodes=1 \
         --wrap="$(cat <<EOF
 #!/bin/bash
@@ -76,16 +77,23 @@ ${cmd}
 EOF
 )"
 
-    echo "Submitted: ${job_name}  (experiment=${experiment}, time=${time_limit})"
+    echo "Submitted: ${job_name}  (args=${experiment_args}, time=${time_limit})"
 }
 
 echo "================================================"
-echo " Stage 1 — Grouped fusion (A/B vs TruFor)"
+echo " Faza 0.6 — 8M k-sweep early: k=4 vs k=8"
 echo " dry-run: ${DRY_RUN}"
 echo "================================================"
 
-submit "stage1_fusion/grouped_baseline" "s1_grouped_s42" 42 "12:00:00"
+# k=4: frontier_8M (data.topk=4 inherited from data/contact.yaml)
+submit "experiment=frontier_8M"                          "k_sweep_8M_k4"  "24:00:00"
+
+# k=8: same frontier_8M, override both data.topk (the real switch) and
+# model.topk (audit-log consistency for fallback _prior_builder). experiment=
+# is a single-item Hydra group, can't stack via +experiment=.
+submit "experiment=frontier_8M data.topk=8 model.topk=8" "k_sweep_8M_k8"  "24:00:00"
 
 echo "================================================"
-echo " Total: 1 job"
+echo " Total: 2 jobs"
+echo " Results: W&B + .temp/audit/<run_id>/manifest.json + .temp/<job_name>.log"
 echo "================================================"

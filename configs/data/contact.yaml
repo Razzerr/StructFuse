@@ -46,6 +46,12 @@ min_template_similarity: 0.0
 random_retrieval: false       # ablation: random templates instead of FAISS
 max_tpl_cache: 5000
 
+# Stage 2 — compute discretised Cα-Cα distance histograms (9 channels) in
+# PriorBuilder. Default true because frontier and all current ablations
+# either consume them (frontier, no_triangle) or simply ignore them
+# (no_dist, no_templates) — cheap to compute, never wrong to have.
+compute_dist_bins: true
+
 # Holdout protein IDs (val + test). The FAISS index now INCLUDES these
 # chains so val/test queries can retrieve meaningful templates at eval
 # time; PriorBuilder filters them out at query-time during training so no
