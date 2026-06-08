@@ -10,6 +10,8 @@ seed: 42
 
 train: false
 test: true
+# Eval-only run: there is no training objective to return to Hydra/HPO.
+optimized_metric: null
 
 trainer:
   max_epochs: 1
