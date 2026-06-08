@@ -153,3 +153,11 @@ configs/local/default.yaml
 
 # Aim logging
 .aim
+
+# Project-local artifacts (internal — never publish)
+.temp/
+.claude/
+paper/
+tmp.*/
+_startup.txt
+.codex

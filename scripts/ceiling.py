@@ -14,7 +14,7 @@ second pass computes per-sample P@L by range). Feature sources:
     lr_plus_agree     — LR(..., agreement 1ch)
     lr_all            — LR(everything)
 
-Writes .temp/ceiling_results.tsv with P@L_{short,medium,long} and AUC-PR_long.
+Writes .temp/ceiling_results.tsv with P@L_{short,medium,long}.
 
 Usage:
     python scripts/ceiling.py experiment=diagnostics/ceiling
@@ -35,7 +35,7 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from src.models.utils.metrics import precision_at_k_by_range  # noqa: E402
+from src.models.utils.metrics import precision_at_k_by_range, unique_pair_mask  # noqa: E402
 
 
 FEATURE_SPECS: Dict[str, List[str]] = {
@@ -78,7 +78,7 @@ def _flatten_valid_pairs(
     mask: torch.Tensor,      # (B, L, L)  — long_mask (pair_mask * sep)
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Collect pair-level (N, C) features and (N,) targets from valid pairs."""
-    m = mask.bool()
+    m = unique_pair_mask(mask).bool()
     # Broadcast mask over channel dim.
     feat_flat = feat.permute(0, 2, 3, 1)[m]           # (N, C)
     y_flat = target[m]                                # (N,)
@@ -104,18 +104,23 @@ def _predict_prob_maps(
 
 
 def _per_range_metrics(
-    probs: torch.Tensor, contact: torch.Tensor, long_mask: torch.Tensor,
-    with_auc: bool = False,
+    probs: torch.Tensor,
+    contact: torch.Tensor,
+    long_mask: torch.Tensor,
+    seq_len: torch.Tensor,
 ) -> Dict[str, float]:
-    """P@L by range; AUC-PR is expensive, only compute when explicitly asked."""
+    """P@L by range using the same nominal-L protocol as final evaluation."""
     if probs.dim() == 3:
         probs_4d = probs.unsqueeze(1)
     else:
         probs_4d = probs
-    ranges = precision_at_k_by_range(probs_4d, contact, long_mask, k_mode="L")
-    if with_auc:
-        ranges["AUC_PR_long"] = auc_pr_masked(probs_4d, contact, long_mask, range_type="long")
-    return ranges
+    return precision_at_k_by_range(
+        probs_4d,
+        contact,
+        long_mask,
+        k_mode="L",
+        seq_len=seq_len,
+    )
 
 
 def _run_val_loader(datamodule, max_batches: int):
@@ -225,6 +230,7 @@ def weighted_sum_grid_search(
             ).clone(),
             "contact": batch["contact"].clone(),
             "long_mask": batch["long_mask"].clone(),
+            "seq_len": batch["seq_len"].clone(),
         })
 
     best = (0.0, 0.0)
@@ -238,7 +244,11 @@ def weighted_sum_grid_search(
             for c in cached:
                 probs = a * c["prior"].squeeze(1) + b * c["esm"].squeeze(1)
                 r = precision_at_k_by_range(
-                    probs.unsqueeze(1), c["contact"], c["long_mask"], k_mode="L"
+                    probs.unsqueeze(1),
+                    c["contact"],
+                    c["long_mask"],
+                    k_mode="L",
+                    seq_len=c["seq_len"],
                 )
                 total += r["long"] * c["contact"].shape[0]
                 n += c["contact"].shape[0]
@@ -275,25 +285,26 @@ def evaluate_feature_sets(
     for batch in _run_val_loader(datamodule, max_batches):
         contact = batch["contact"]
         long_mask = batch["long_mask"]
+        seq_len = batch["seq_len"]
         B = contact.shape[0]
 
         # prior_alone
         prior = batch["prior"].squeeze(1)
-        _add("prior_alone", _per_range_metrics(prior, contact, long_mask), B)
+        _add("prior_alone", _per_range_metrics(prior, contact, long_mask, seq_len), B)
 
         # esm_alone
         esm = batch.get("esm_contacts", torch.zeros_like(batch["prior"])).squeeze(1)
-        _add("esm_alone", _per_range_metrics(esm, contact, long_mask), B)
+        _add("esm_alone", _per_range_metrics(esm, contact, long_mask, seq_len), B)
 
         # weighted_sum_best
         ws = best_a * prior + best_b * esm
-        _add("weighted_sum_best", _per_range_metrics(ws, contact, long_mask), B)
+        _add("weighted_sum_best", _per_range_metrics(ws, contact, long_mask, seq_len), B)
 
         # LR feature sets
         for fs, keys in FEATURE_SPECS.items():
             feat = _stack_feature_set(batch, keys)
             probs = _predict_prob_maps(lrs[fs], feat)
-            _add(fs, _per_range_metrics(probs, contact, long_mask), B)
+            _add(fs, _per_range_metrics(probs, contact, long_mask, seq_len), B)
 
     results = {}
     for name, sums in per_method_sum.items():
@@ -345,7 +356,7 @@ def main(cfg: DictConfig) -> None:
 
     print(f"Instantiating datamodule <{cfg.data._target_}>", flush=True)
     datamodule = hydra.utils.instantiate(cfg.data)
-    datamodule.setup(stage="fit")
+    datamodule.setup(stage="validate")
 
     lrs = fit_logistic_regressions(
         datamodule,

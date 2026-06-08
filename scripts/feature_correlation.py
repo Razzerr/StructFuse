@@ -29,6 +29,8 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
+from src.models.utils.metrics import unique_pair_mask  # noqa: E402
+
 
 # Scalar views of each feature (everything reduced to 1D per pair so MI is tractable).
 SCALAR_VIEWS: Dict[str, str] = {
@@ -41,7 +43,7 @@ SCALAR_VIEWS: Dict[str, str] = {
 
 def _extract_pair_scalars(batch: Dict) -> Dict[str, np.ndarray]:
     """Return dict of (N_valid,) arrays, where N_valid = number of pairs in long_mask."""
-    mask = batch["long_mask"].bool()
+    mask = unique_pair_mask(batch["long_mask"]).bool()
     target = batch["contact"][mask].cpu().numpy().astype(np.int64)
     out: Dict[str, np.ndarray] = {"_y": target}
 
@@ -274,7 +276,7 @@ def main(cfg: DictConfig) -> None:
 
     print(f"Instantiating datamodule <{cfg.data._target_}>", flush=True)
     datamodule = hydra.utils.instantiate(cfg.data)
-    datamodule.setup(stage="fit")
+    datamodule.setup(stage="validate")
 
     pairs = collect_pairs(datamodule, max_batches, max_pairs, rng)
     rows = compute_stats(pairs)

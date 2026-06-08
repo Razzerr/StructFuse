@@ -35,9 +35,10 @@ METRICS = (
     "P@L/2_long",
     "P@L/5_long",
     "AUC-PR_long",
-    "f1",
-    "precision",
-    "recall",
+    # Long-range classification metrics (paper table is F1_long, not all-range f1).
+    "f1_long",
+    "precision_long",
+    "recall_long",
 )
 N_BOOTSTRAP = 10_000
 
@@ -78,6 +79,47 @@ def _per_subset_groups(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return out
 
 
+def _validate_per_sample_frame(df: pd.DataFrame, source: Path | str) -> None:
+    if "sample_id" not in df.columns:
+        raise ValueError(f"{source} is missing column 'sample_id'")
+    duplicated = df["sample_id"].duplicated(keep=False)
+    if duplicated.any():
+        examples = df.loc[duplicated, "sample_id"].astype(str).head(5).tolist()
+        raise ValueError(f"{source} contains duplicate sample_id values: {examples}")
+
+
+def _paired_frame(
+    treatment: pd.DataFrame,
+    control: pd.DataFrame,
+    treatment_source: Path | str = "treatment",
+    control_source: Path | str = "control",
+) -> pd.DataFrame:
+    """Strict one-to-one sample pairing with subset-consistency validation."""
+    _validate_per_sample_frame(treatment, treatment_source)
+    _validate_per_sample_frame(control, control_source)
+    merged = treatment.merge(
+        control,
+        on="sample_id",
+        suffixes=("_t", "_c"),
+        validate="one_to_one",
+    )
+    if merged.empty:
+        raise ValueError(
+            f"No overlapping sample_ids between {treatment_source} and {control_source}"
+        )
+    if "subset_t" in merged.columns and "subset_c" in merged.columns:
+        left = merged["subset_t"].fillna("").astype(str)
+        right = merged["subset_c"].fillna("").astype(str)
+        mismatch = left != right
+        if mismatch.any():
+            examples = merged.loc[
+                mismatch, ["sample_id", "subset_t", "subset_c"]
+            ].head(5).to_dict("records")
+            raise ValueError(f"Subset assignment mismatch between paired runs: {examples}")
+        merged["subset"] = merged["subset_t"]
+    return merged
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--treatment", required=True, type=Path, help="per_sample_metrics.tsv for the treatment run (e.g. frontier)")
@@ -89,16 +131,10 @@ def main() -> None:
     a = pd.read_csv(args.treatment, sep="\t")
     b = pd.read_csv(args.control, sep="\t")
 
-    if "sample_id" not in a.columns or "sample_id" not in b.columns:
-        raise SystemExit("Both TSVs must have a 'sample_id' column")
-
-    merged = a.merge(b, on="sample_id", suffixes=("_t", "_c"))
-    if merged.empty:
-        raise SystemExit(f"No overlapping sample_ids between {args.treatment} and {args.control}")
-
-    # Carry subset from treatment side (assumes both files use the same subset assignment).
-    if "subset_t" in merged.columns:
-        merged["subset"] = merged["subset_t"]
+    try:
+        merged = _paired_frame(a, b, args.treatment, args.control)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     rows = []
     for subset_name, sub in _per_subset_groups(merged).items():

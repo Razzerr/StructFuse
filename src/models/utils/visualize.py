@@ -137,9 +137,10 @@ def plot_contact_map_comparison(
     except (ValueError, RuntimeError):
         sample_mcc = 0.0
 
-    # Compute precision, recall, F1 at the given threshold
-    valid_pred = pred_binary[mask_np > 0]
-    valid_target = target_np[mask_np > 0]
+    # Compute precision, recall, F1 at the given threshold (unique pairs i<j only)
+    mask_eval = np.triu(mask_np, k=1)
+    valid_pred = pred_binary[mask_eval > 0]
+    valid_target = target_np[mask_eval > 0]
 
     tp = np.sum((valid_pred == 1) & (valid_target == 1))
     fp = np.sum((valid_pred == 1) & (valid_target == 0))
@@ -149,9 +150,11 @@ def plot_contact_map_comparison(
     recall = tp / (tp + fn + 1e-8)
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-    # Also show simple counts
-    num_true = np.nansum(target_masked)
-    num_pred = np.nansum(pred_binary_masked)
+    # Also show simple counts — unique pairs (i<j) only, matching the metrics
+    # above (target_masked/pred_binary_masked are the symmetric full-matrix maps
+    # used for the heatmaps, which would double-count each contact here).
+    num_true = int(valid_target.sum())
+    num_pred = int(valid_pred.sum())
 
     # Combined title with automatic spacing
     title_line1 = (
@@ -280,7 +283,8 @@ def plot_precision_recall_curve(
     """
     pred_prob = pred_prob.detach().to(torch.float32).cpu().numpy().flatten()
     target = target.detach().to(torch.float32).cpu().numpy().flatten()
-    mask = mask.detach().to(torch.float32).cpu().numpy().flatten()
+    # Unique pairs only (i<j) — drop the symmetric lower triangle before flatten.
+    mask = np.triu(mask.detach().to(torch.float32).cpu().numpy(), k=1).flatten()
 
     # Filter to valid pairs
     valid = mask > 0

@@ -25,9 +25,13 @@ check_val_every_n_epoch: 1
 # draws fresh train/val splits from each cluster
 reload_dataloaders_every_n_epochs: 1
 
-# set True to to ensure deterministic results
-# makes training slower but gives more reproducibility than just setting seeds
-deterministic: False
+# Deterministic by default — bit-reproducibility for paper runs (3-seed H1
+# mean±std, paired Wilcoxon need stable per-sample numbers). Costs some speed.
+# NOTE: if a CUDA op lacks a deterministic kernel, Lightning raises at step 0
+# with True; fall back per-run with `trainer.deterministic=warn` (warns instead
+# of crashing — loses strict bit-identity but keeps the run alive). Disable with
+# `trainer.deterministic=false`.
+deterministic: True
 
 # Use full training set by default. Override via CLI for smoke tests
 # (e.g. `++trainer.limit_train_batches=0.005`).

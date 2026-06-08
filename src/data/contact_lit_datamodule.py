@@ -82,6 +82,10 @@ class ContactDataModule(LightningDataModule):
         only_positive_transfer: bool = False,
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
+        # Stable seed for the random_retrieval ablation (forwarded to PriorBuilder
+        # → FaissIndex). Set `random_seed: ${seed}` in the data config so the
+        # control set is reproducible and tied to the run seed.
+        random_seed: int = 0,
         max_tpl_cache: int = 1000,
         # Stage 2 — cheap features derived from template Cα coords inside
         # PriorBuilder. Off by default so existing configs keep the legacy
@@ -134,6 +138,7 @@ class ContactDataModule(LightningDataModule):
         self.only_positive_transfer = bool(only_positive_transfer)
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
+        self.random_seed = int(random_seed)
         self.max_tpl_cache = int(max_tpl_cache)
         self.compute_dist_bins = bool(compute_dist_bins)
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
@@ -205,6 +210,9 @@ class ContactDataModule(LightningDataModule):
         if stage == "fit" and self.dset_train is not None and self.dset_val is not None:
             log.info("Train/val datasets already loaded, skipping setup")
             return
+        if stage == "validate" and self.dset_val is not None:
+            log.info("Validation dataset already loaded, skipping setup")
+            return
         if stage == "test" and self.dset_test is not None:
             log.info("Test dataset already loaded, skipping setup")
             return
@@ -212,8 +220,24 @@ class ContactDataModule(LightningDataModule):
         # Resolve test split path
         test_split_path = Path(self.test_ids_path) if self.test_ids_path else self.split_dir / "all_test_ids.txt"
 
-        if stage == "fit" or stage is None:
-            if self.cluster_sampling and self.index_dir is not None:
+        if stage in ("fit", "validate") or stage is None:
+            # Eval-only baselines call Trainer.validate() without a preceding fit.
+            # When a static validation split is configured, load only that split
+            # instead of constructing the full training dataset unnecessarily.
+            if stage == "validate" and self.val_ids_path:
+                val_split_path = Path(self.val_ids_path)
+                assert val_split_path.exists(), f"val_ids file not found: {val_split_path}"
+                log.info(f"Creating validation-only dataset from {val_split_path}")
+                self.dset_val = ContactDataset(
+                    val_split_path,
+                    root=self.data_root,
+                    min_len=self.min_len,
+                    splits_json_path=self.splits_json_path,
+                    skip_ids_file=self.skip_ids_file,
+                    exclude_subsets=self.test_exclude_subsets,
+                )
+                log.info(f"  Val (validation-only): {len(self.dset_val)} samples")
+            elif self.cluster_sampling and self.index_dir is not None:
                 # ── Cluster-aware dynamic train/val ──
                 all_train_path = self.split_dir / "all_train_ids.txt"
                 assert all_train_path.exists(), f"all_train_ids.txt not found: {all_train_path}"
@@ -302,6 +326,7 @@ class ContactDataModule(LightningDataModule):
                     min_seq_sep=self.min_seq_sep,
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
+                    random_seed=self.random_seed,
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
                     holdout_id_files=self.holdout_id_files,
@@ -334,6 +359,7 @@ class ContactDataModule(LightningDataModule):
                     min_seq_sep=self.min_seq_sep,
                     min_template_similarity=self.min_template_similarity,
                     random_retrieval=self.random_retrieval,
+                    random_seed=self.random_seed,
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
                     holdout_id_files=self.holdout_id_files,

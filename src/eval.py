@@ -76,13 +76,35 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
 
-    log.info("Starting testing!")
-    trainer.test(
-        model=model,
-        datamodule=datamodule,
-        ckpt_path=cfg.ckpt_path,
-        weights_only=False,
-    )
+    if cfg.get("validate_before_test", True):
+        log.info("Validating checkpoint for threshold calibration before testing!")
+        trainer.validate(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=cfg.ckpt_path,
+            weights_only=False,
+        )
+        log.info("Testing the in-memory validated checkpoint!")
+        trainer.test(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=None,
+            weights_only=False,
+        )
+    else:
+        log.info("Starting testing without validation calibration!")
+        trainer.test(
+            model=model,
+            datamodule=datamodule,
+            ckpt_path=cfg.ckpt_path,
+            weights_only=False,
+        )
+
+    try:
+        from src.utils.audit import dump_audit_manifest
+        dump_audit_manifest(cfg, trainer, ckpt_path=cfg.ckpt_path)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Audit manifest dump failed (non-fatal): {e}")
 
     # for predictions use trainer.predict(...)
     # predictions = trainer.predict(model=model, dataloaders=dataloaders, ckpt_path=cfg.ckpt_path)

@@ -44,6 +44,12 @@ train: True
 # lightning chooses best weights based on the metric specified in checkpoint callback
 test: True
 
+# Run validation (to calibrate the decision threshold on val under the
+# best-checkpoint weights) immediately before testing. Keeps the test threshold
+# off the test set and gives eval-only baselines a non-0.5 threshold. Set False
+# to test the best checkpoint directly without a preceding validation pass.
+validate_before_test: True
+
 # simply provide checkpoint path to resume training
 ckpt_path: null
 

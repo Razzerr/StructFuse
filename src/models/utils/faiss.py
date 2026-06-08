@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 import random
 
@@ -41,8 +42,13 @@ class FaissIndex:
         self,
         index_dir: str,
         holdout_ids: Optional[Iterable[str]] = None,
+        random_seed: int = 0,
     ):
         self.index_dir = index_dir
+        # Stable seed for the random_retrieval ablation. Per-query RNG is seeded
+        # by stable_hash(random_seed, query_id) so each chain always draws the
+        # same admissible templates regardless of worker/batch scheduling.
+        self.random_seed = int(random_seed)
         # Protein-level holdout set: any retrieved template whose protein-ID
         # matches one of these is dropped when `filter_holdout=True` is passed
         # to topk*. Used at training time to prevent train queries from
@@ -99,6 +105,14 @@ class FaissIndex:
             log.warning(f"[FaissIndex] No embeddings.npy found at {emb_path}, will use ESM2 forward")
         self._emb_hit = 0
         self._emb_miss = 0
+
+        # Lazily-built candidate pools for the random_retrieval ablation — built
+        # once per process (O(N)), then O(K) rejection sampling per query instead
+        # of the old O(N)-per-query full scan.
+        self._row2prot = None
+        self._row2cluster_arr = None
+        self._pool_all = None
+        self._pool_nonholdout = None
 
     @staticmethod
     def _mean_pool_esm(model, alphabet, seqs: List[Tuple[str, str]], device: str) -> np.ndarray:
@@ -161,7 +175,7 @@ class FaissIndex:
 
         if random_retrieval:
             return self._random_topk(
-                query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+                query_name, query_prot_id, query_cluster, k, filter_holdout=filter_holdout
             )
 
         # Use precomputed embedding if available (skips ESM2 forward entirely)
@@ -275,7 +289,7 @@ class FaissIndex:
 
         if random_retrieval:
             return self._random_topk(
-                query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+                query_name, query_prot_id, query_cluster, k, filter_holdout=filter_holdout
             )
 
         if self._embeddings is None or query_name not in self._id2row:
@@ -317,33 +331,94 @@ class FaissIndex:
                 break
         return out
 
+    def _ensure_random_pools(self):
+        """Build (once per process) the candidate-row pools + lookup arrays used
+        by `_random_topk`. O(N) one-off, shared by all subsequent queries."""
+        if self._pool_all is not None:
+            return
+        self._row2prot = np.array([_get_protein_id(x) for x in self.row2id])
+        self._row2cluster_arr = np.asarray(self.row2cluster)
+        self._pool_all = np.arange(len(self.row2id), dtype=np.int64)
+        if self.holdout_prot_ids:
+            keep = np.fromiter(
+                (p not in self.holdout_prot_ids for p in self._row2prot),
+                dtype=bool, count=len(self._row2prot),
+            )
+            self._pool_nonholdout = self._pool_all[keep]
+        else:
+            self._pool_nonholdout = self._pool_all
+
+    def _stable_seed(self, query_name: str) -> int:
+        """Deterministic per-query seed from (random_seed, query_id) using a
+        STABLE hash (blake2b) — NOT builtin hash() (randomized per process)."""
+        digest = hashlib.blake2b(
+            f"{self.random_seed}:{query_name}".encode("utf-8"), digest_size=8
+        ).digest()
+        return int.from_bytes(digest, "little")
+
     def _random_topk(
         self,
+        query_name: str,
         query_prot_id: str,
         query_cluster: int,
         k: int,
         filter_holdout: bool = True,
     ) -> List[Tuple[str, float]]:
-        """Return *k* random templates (excluding same protein & cluster).
-
-        Used for ablation to test whether retrieval quality matters.
-        Returns templates with similarity = 0.5 (neutral weight).
+        """Return up to *k* random admissible templates (excluding same protein,
+        same cluster, and — when filter_holdout — holdout proteins). Similarity is
+        a neutral 0.5. Stateless + reproducible: seeded by stable_hash(random_seed,
+        query_name), so a chain always draws the same templates regardless of
+        worker scheduling. O(K) expected via rejection sampling; a deterministic
+        cyclic scan is the worst-case fallback. If fewer than k admissible
+        candidates exist, returns ALL admissible + logs a warning (never raises).
         """
-        valid_indices = []
-        for i, tpl_id in enumerate(self.row2id):
-            tpl_prot_id = _get_protein_id(tpl_id)
-            if tpl_prot_id == query_prot_id:
-                continue
-            if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
-                continue
-            if query_cluster != -1 and self.row2cluster[i] == query_cluster:
-                continue
-            valid_indices.append(i)
-
-        if len(valid_indices) < k:
-            k = len(valid_indices)
-        if k == 0:
+        self._ensure_random_pools()
+        pool = self._pool_nonholdout if filter_holdout else self._pool_all
+        if len(pool) == 0 or k <= 0:
             return []
 
-        selected = random.sample(valid_indices, k)
-        return [(self.row2id[i], 0.5) for i in selected]
+        rng = np.random.default_rng(self._stable_seed(query_name))
+
+        def _admissible(row: int) -> bool:
+            if self._row2prot[row] == query_prot_id:
+                return False
+            if query_cluster != -1 and int(self._row2cluster_arr[row]) == query_cluster:
+                return False
+            return True
+
+        selected: List[int] = []
+        seen: Set[int] = set()
+        n_pool = len(pool)
+        max_attempts = max(64, k * 32)
+        attempts = 0
+        chunk = max(k * 4, 16)
+        while len(selected) < k and attempts < max_attempts:
+            draws = rng.integers(0, n_pool, size=chunk)
+            for d in draws:
+                attempts += 1
+                row = int(pool[int(d)])
+                if row in seen or not _admissible(row):
+                    continue
+                seen.add(row)
+                selected.append(row)
+                if len(selected) >= k:
+                    break
+
+        # Deterministic cyclic fallback — guarantees k IF ≥k admissible exist.
+        if len(selected) < k:
+            start = int(rng.integers(0, n_pool))
+            for off in range(n_pool):
+                row = int(pool[(start + off) % n_pool])
+                if row in seen or not _admissible(row):
+                    continue
+                seen.add(row)
+                selected.append(row)
+                if len(selected) >= k:
+                    break
+
+        if len(selected) < k:
+            log.warning(
+                f"[FaissIndex] random_retrieval: only {len(selected)} admissible "
+                f"templates for '{query_name}' (< k={k}); returning all admissible."
+            )
+        return [(self.row2id[r], 0.5) for r in selected]

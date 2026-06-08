@@ -13,7 +13,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 import hydra
 from omegaconf import DictConfig
@@ -32,8 +32,9 @@ def _scan(
     filter_holdout: bool,
     topk: int,
     tag: str,
-    max_queries: int = 500,
+    max_queries: Optional[int] = None,
 ) -> Tuple[int, int, int, List[Tuple[str, str]]]:
+    # max_queries=None → scan ALL pids (pids[:None] returns the whole list).
     n_queries = 0
     n_hits_total = 0
     n_leaks = 0
@@ -84,17 +85,27 @@ def main(cfg: DictConfig) -> None:
     else:
         raise RuntimeError("Neither dset_trainval nor dset_train available")
 
-    print(f"Scanning {min(500, len(pids))} / {len(pids)} train PIDs", flush=True)
+    # Query budget: default "all" (full paper-grade scan); override with
+    # `+max_queries=500` for a fast pre-flight gate. "all"/None/<=0 → unlimited.
+    mq_raw = cfg.get("max_queries", "all")
+    if mq_raw in (None, "all", "ALL") or (isinstance(mq_raw, int) and mq_raw <= 0):
+        max_queries: Optional[int] = None
+    else:
+        max_queries = int(mq_raw)
+    n_scan = len(pids) if max_queries is None else min(max_queries, len(pids))
+    print(f"Scanning {n_scan} / {len(pids)} train PIDs (max_queries={mq_raw})", flush=True)
 
     # 1. filter_holdout=True — MUST have zero leaks.
     _, _, n_leaks_on, _ = _scan(
-        faiss_index, pids, holdout_prot_ids, filter_holdout=True, topk=topk, tag="train"
+        faiss_index, pids, holdout_prot_ids, filter_holdout=True, topk=topk,
+        tag="train", max_queries=max_queries,
     )
     # 2. filter_holdout=False — sanity: should leak >0 to prove the filter
     #    actually changes behaviour (if baseline also has zero leaks then the
     #    index simply contains no holdout chains and the test is uninformative).
     _, _, n_leaks_off, leaks_off = _scan(
-        faiss_index, pids, holdout_prot_ids, filter_holdout=False, topk=topk, tag="train"
+        faiss_index, pids, holdout_prot_ids, filter_holdout=False, topk=topk,
+        tag="train", max_queries=max_queries,
     )
 
     print("", flush=True)

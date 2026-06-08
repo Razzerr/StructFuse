@@ -1,4 +1,7 @@
 #!/bin/bash
+# LEGACY diagnostic launcher. The final paper preflight, including the leakage
+# audit omitted here, is:
+#   ./configs/experiment/launch_preflight.sh --all
 # ============================================================================
 # Stage 2 diagnosis — non-training ceiling + feature correlation analysis.
 #   ceiling            : scripts/ceiling.py  → .temp/ceiling_results.tsv
@@ -89,7 +92,7 @@ echo "================================================"
 
 submit "scripts/ceiling.py"              "ceiling_stage2"         "01:00:00"
 submit "scripts/feature_correlation.py"  "feat_corr_stage2"       "00:30:00"
-submit "scripts/template_coverage.py"    "tpl_coverage"           "00:20:00"
+submit "scripts/template_coverage.py"    "tpl_coverage"           "06:00:00"
 
 echo "================================================"
 echo " Total: 2 jobs"

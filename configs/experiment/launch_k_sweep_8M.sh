@@ -1,4 +1,7 @@
 #!/bin/bash
+# LEGACY: retained for historical k=4/k=8 reproduction only.
+# Final paper runs use:
+#   ./configs/experiment/launch_paper_8M.sh --supplementary
 # ============================================================================
 # Faza 0.6 — 8M k-sweep early: k=4 (frontier_8M) vs k=8.
 # Two comparative training runs on the 8M backbone — feeds the decision on

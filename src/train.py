@@ -150,13 +150,34 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             else:
                 ckpt_path = None
                 log.warning("No checkpoint found! Using current model weights for testing...")
-        
-        trainer.test(
-            model=model,
-            datamodule=datamodule,
-            ckpt_path=ckpt_path,
-            weights_only=False,
-        )
+
+        # Calibrate the decision threshold on VALIDATION before testing, under the
+        # exact (best-checkpoint) weights that will be tested. Otherwise eval-only
+        # baselines never run validation and test at the 0.5 default, and the
+        # per-range test metrics would have to tune the threshold on the test set.
+        # validate(best) then test(in-memory, ckpt_path=None) so the test reload
+        # cannot overwrite the freshly-calibrated threshold.
+        if cfg.get("validate_before_test", True):
+            log.info("Validating (threshold calibration) before testing!")
+            trainer.validate(
+                model=model,
+                datamodule=datamodule,
+                ckpt_path=ckpt_path,
+                weights_only=False,
+            )
+            trainer.test(
+                model=model,
+                datamodule=datamodule,
+                ckpt_path=None,
+                weights_only=False,
+            )
+        else:
+            trainer.test(
+                model=model,
+                datamodule=datamodule,
+                ckpt_path=ckpt_path,
+                weights_only=False,
+            )
 
         # Paper-grade audit: snapshot retrieval+model config to .temp/audit/<run_id>/
         # so supplementary Methods can cite "what was actually loaded for inference"

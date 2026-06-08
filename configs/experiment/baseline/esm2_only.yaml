@@ -21,3 +21,9 @@ model:
 data:
   batch_size: 32
   bucketed: false  # No bucketing for cleaner evaluation
+  # B3 is attention-only (ESM2OnlyLitModule computes contacts online and ignores
+  # retrieval + cached ESM) — make it self-contained so no PriorBuilder runs.
+  topk: 0
+  index_dir: null
+  esm_embeddings_dir: null
+  compute_dist_bins: false

@@ -24,6 +24,9 @@ data:
   index_dir: data/index_t33
   esm_embeddings_dir: data/precomputed/esm_t33_650M
 
-# Bit-reproducibility for headline seeds: pass `+trainer.deterministic=true`
-# from CLI. Avoid bare `trainer:` block here — Hydra `@package _global_`
-# replaces the whole group instead of merging (strips trainer/gpu defaults).
+# Bit-reproducibility: `trainer.deterministic` is now True by default
+# (configs/trainer/default.yaml) — headline seeds need no CLI flag.
+# If a CUDA op lacks a deterministic kernel and the run crashes at step 0,
+# fall back with `trainer.deterministic=warn`. Do NOT add a bare `trainer:`
+# block here — Hydra `@package _global_` would replace the whole group
+# instead of merging (strips trainer/gpu defaults).

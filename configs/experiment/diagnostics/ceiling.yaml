@@ -39,3 +39,9 @@ correlation:
   max_batches: 200
   max_pairs: 1000000
   out_path: .temp/feature_correlation.tsv
+
+# scripts/template_coverage.py — reads this block.
+coverage:
+  max_batches: all        # default: FULL scan → paper coverage table. Set an int (e.g. 5) for a quick sanity pass.
+  verbose: false          # true → also print per-chain prior/count lines
+  include_train: false    # opt-in train output is one cluster-sampled epoch, not the full train set

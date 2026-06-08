@@ -76,6 +76,9 @@ class PriorBuilder:
         # pass True; val/test loaders pass False so inference can retrieve
         # from the full index.
         holdout_id_files: Optional[List[str]] = None,
+        # Stable seed for the random_retrieval ablation — forwarded to FaissIndex,
+        # which seeds each query's RNG by stable_hash(random_seed, query_id).
+        random_seed: int = 0,
     ):
         from src.models.utils.faiss import FaissIndex
 
@@ -93,7 +96,12 @@ class PriorBuilder:
                 # Silently skip missing files — lets ablation configs omit them.
                 pass
 
-        self.faiss_index = FaissIndex(index_dir, holdout_ids=holdout_ids)
+        self.faiss_index = FaissIndex(index_dir, holdout_ids=holdout_ids, random_seed=random_seed)
+        # Build the random-retrieval candidate pools NOW (main process, before the
+        # DataLoader forks workers) so the O(N) pool scan + arrays happen ONCE and
+        # are shared copy-on-write — not rebuilt per worker. Only for the R2 ablation.
+        if random_retrieval:
+            self.faiss_index._ensure_random_pools()
         self.topk = int(topk)
         self.use_blosum = bool(use_blosum)
         self.only_positive_transfer = bool(only_positive_transfer)
@@ -564,8 +572,8 @@ def collate_padded(
             - contact: (B, Lmax, Lmax) float32 - Binary contact maps
             - pair_mask: (B, Lmax, Lmax) float32 - Valid residue pairs
             - long_mask: (B, Lmax, Lmax) float32 - Long-range pairs (|i-j| >= min_seq_sep)
-            - prior: (B, 1, Lmax, Lmax) float32 - Template priors (if prior_builder)
-            - count: (B, 1, Lmax, Lmax) float32 - Template counts (if prior_builder)
+            - prior: (B, 1, Lmax, Lmax) float32 - Template priors (always present; zeros when no templates/retrieval)
+            - count: (B, 1, Lmax, Lmax) float32 - Template counts (always present; zeros when no templates/retrieval)
     """
     rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
 
@@ -647,30 +655,36 @@ def collate_padded(
         "seq": seqs,
         "subset": subsets,
         "crop_bounds": crop_bounds,  # (B, 2)
+        # Nominal per-chain length (crop_end-crop_start). Used as K for P@K so
+        # missing-coordinate residues do NOT shrink L below the standard nominal.
+        "seq_len": torch.tensor(Ls, dtype=torch.long),  # (B,)
         "contact": contact,  # (B, Lmax, Lmax)
         "pair_mask": pair_mask,  # (B, Lmax, Lmax)
         "long_mask": long_mask,  # (B, Lmax, Lmax)
     }
 
     # ── Template priors (built in DataLoader worker) ──
-    if prior_builder is not None:
-        prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
-        count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+    # Contract: batch ALWAYS carries prior/count (+ per-chain template stats).
+    # Absence of retrieval (prior_builder is None, e.g. data.topk=0) is
+    # represented by zeros, NOT by missing keys — model_step indexes
+    # batch["prior"]/["count"] directly. tpl_dist_bins stays OPTIONAL: emitted
+    # only when PriorBuilder actually produces it, so GroupedFeatureFusion skips
+    # the distance branch entirely for no-template / no-dist runs.
+    prior = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+    count = torch.zeros((B, 1, Lmax, Lmax), dtype=torch.float32)
+    n_templates_retrieved = torch.zeros(B, dtype=torch.long)
+    best_tpl_sim = torch.zeros(B, dtype=torch.float32)
+    dist_bins = None
 
+    if prior_builder is not None:
         # Stage 2 rich features — pre-allocate only if PriorBuilder is
         # configured to produce them; otherwise save the memory.
-        dist_bins = None
         if getattr(prior_builder, "compute_dist_bins", False):
             # N_DIST_BINS = 9 channels (unknown + 8 finite bins).
             from src.data.utils.align import N_DIST_BINS
             dist_bins = torch.zeros(
                 (B, N_DIST_BINS, Lmax, Lmax), dtype=torch.float32
             )
-
-        # Per-chain template stats — populated whenever build_one returns rich dict.
-        # Used by test_step for per-protein dump (paired Wilcoxon, stratification).
-        n_templates_retrieved = torch.zeros(B, dtype=torch.long)
-        best_tpl_sim = torch.zeros(B, dtype=torch.float32)
 
         for b, item in enumerate(cropped):
             Lc = item["L"]
@@ -700,12 +714,12 @@ def collate_padded(
             n_templates_retrieved[b] = int(extra.get("n_templates_retrieved", 0))
             best_tpl_sim[b] = float(extra.get("best_tpl_sim", 0.0))
 
-        batch_out["prior"] = prior
-        batch_out["count"] = count
-        batch_out["n_templates_retrieved"] = n_templates_retrieved
-        batch_out["best_tpl_sim"] = best_tpl_sim
-        if dist_bins is not None:
-            batch_out["tpl_dist_bins"] = dist_bins
+    batch_out["prior"] = prior
+    batch_out["count"] = count
+    batch_out["n_templates_retrieved"] = n_templates_retrieved
+    batch_out["best_tpl_sim"] = best_tpl_sim
+    if dist_bins is not None:
+        batch_out["tpl_dist_bins"] = dist_bins
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

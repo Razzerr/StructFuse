@@ -10,7 +10,7 @@ defaults:
   - paths: default
   - extras: default
   - hydra: default
-  - experiment: baseline
+  - experiment: null
 
 task_name: "eval"
 
@@ -18,3 +18,8 @@ tags: ["dev"]
 
 # passing checkpoint path is necessary for evaluation
 ckpt_path: ???
+
+# Calibrate the binary decision threshold on validation under the exact
+# checkpoint weights, then test the same in-memory model without reloading.
+validate_before_test: true
+seed: 42

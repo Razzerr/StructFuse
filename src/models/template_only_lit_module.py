@@ -20,6 +20,11 @@ from src.models.utils.loss import masked_bce_balanced
 from src.models.utils.metrics import (
     precision_at_k_masked,
     precision_at_k_by_range,
+    per_sample_metric_rows,
+    export_per_sample_tsv,
+    log_macro_test_metrics,
+    range_metrics_at_threshold,
+    unique_pair_mask,
     _create_range_mask,
 )
 from src.utils import pylogger
@@ -171,6 +176,8 @@ class TemplateOnlyLitModule(LightningModule):
         self._test_tp = 0.0
         self._test_fp = 0.0
         self._test_fn = 0.0
+        # Per-chain rows for per_sample_metrics.tsv (paired significance vs frontier).
+        self._test_per_sample: List[Dict] = []
 
     # ── PriorBuilder (lazy init) ──────────────────────────────────────
 
@@ -248,8 +255,11 @@ class TemplateOnlyLitModule(LightningModule):
 
         prog_bar = stage == "val"
         on_step = stage == "train"
+        # Test P@L here is a batch-average → log under *_batchavg so the canonical
+        # test/P@L is the per-protein macro from the helper.
+        pl_sfx = "_batchavg" if stage == "test" else ""
         self.log(f"{stage}/loss", loss, prog_bar=True, on_step=on_step, on_epoch=True, sync_dist=True)
-        self.log(f"{stage}/P@L", pL, prog_bar=prog_bar, on_step=on_step, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}/P@L{pl_sfx}", pL, prog_bar=prog_bar, on_step=on_step, on_epoch=True, sync_dist=True)
 
         return loss, prob, contact, valid_mask
 
@@ -307,10 +317,11 @@ class TemplateOnlyLitModule(LightningModule):
         if prob.dim() == 4:
             prob = prob.squeeze(1)
 
-        # Global TP/FP/FN at pred_threshold
+        # Global TP/FP/FN at pred_threshold — unique pairs only (sanity micro).
+        umask = unique_pair_mask(mask)
         preds_bin = (prob >= self.pred_threshold).float()
-        valid_preds = preds_bin[mask > 0]
-        valid_targets = contact[mask > 0]
+        valid_preds = preds_bin[umask > 0]
+        valid_targets = contact[umask > 0]
         self._test_tp += ((valid_preds == 1) & (valid_targets == 1)).sum().item()
         self._test_fp += ((valid_preds == 1) & (valid_targets == 0)).sum().item()
         self._test_fn += ((valid_preds == 0) & (valid_targets == 1)).sum().item()
@@ -324,6 +335,18 @@ class TemplateOnlyLitModule(LightningModule):
             tn_dict=self._test_range_tn,
             pL_dict=self._test_pL_range,
         )
+        self._test_per_sample.extend(
+            per_sample_metric_rows(
+                prob if prob.dim() == 3 else prob.squeeze(1),
+                contact, mask,
+                batch["pid"],
+                batch.get("subset", ["all"] * prob.shape[0]),
+                self.pred_threshold,
+                seq_lens=batch.get("seq_len"),
+                n_templates=batch.get("n_templates_retrieved"),
+                best_sims=batch.get("best_tpl_sim"),
+            )
+        )
         return loss
 
     def on_test_epoch_start(self):
@@ -335,24 +358,46 @@ class TemplateOnlyLitModule(LightningModule):
         self._test_tp = 0.0
         self._test_fp = 0.0
         self._test_fn = 0.0
+        self._test_per_sample = []
 
     def on_test_epoch_end(self):
-        if not self._test_range_tp:
+        rows = self._test_per_sample
+        if not rows:
             return
 
-        # Global precision / recall / F1
-        tp, fp, fn = self._test_tp, self._test_fp, self._test_fn
-        precision = tp / max(1, tp + fp)
-        recall = tp / max(1, tp + fn)
-        f1 = 2 * precision * recall / max(1e-8, precision + recall)
-        self.log("test/precision", precision, prog_bar=True, sync_dist=False)
-        self.log("test/recall", recall, prog_bar=True, sync_dist=False)
-        self.log("test/f1", f1, prog_bar=True, sync_dist=False)
+        export_per_sample_tsv(rows, self.trainer)
         self.log("test/threshold_used", self.pred_threshold, prog_bar=False, sync_dist=False)
 
-        self._log_range_metrics("test", self._test_range_tp, self._test_range_fp,
-                                self._test_range_fn, self._test_range_tn,
-                                self._test_pL_range)
+        # HEADLINE = per-protein MACRO (+ per-subset), shared helper. Same
+        # canonical keys + definition as the frontier ContactLitModule.
+        from src.data.components.dataset import (
+            SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED,
+        )
+        log_macro_test_metrics(
+            self.log, rows, [SUBSET_GOLD, SUBSET_CASP16, SUBSET_CLUSTER_PROMOTED]
+        )
+
+        # Pooled-at-val-threshold per-range (sanity, *_micro) — NOT argmax-on-test.
+        for rname in ("short", "medium", "long"):
+            if rname not in self._test_range_tp:
+                continue
+            rm = range_metrics_at_threshold(
+                self._test_range_tp[rname].cpu(), self._test_range_fp[rname].cpu(),
+                self._test_range_fn[rname].cpu(), self._test_range_tn[rname].cpu(),
+                self._val_thresholds, self.pred_threshold,
+            )
+            self.log(f"test/f1_{rname}_micro", rm["f1"], prog_bar=False, sync_dist=False)
+            self.log(f"test/precision_{rname}_micro", rm["precision"], prog_bar=False, sync_dist=False)
+            self.log(f"test/recall_{rname}_micro", rm["recall"], prog_bar=False, sync_dist=False)
+
+        # Global pooled at val threshold (sanity, *_micro)
+        tp, fp, fn = self._test_tp, self._test_fp, self._test_fn
+        g_prec = tp / max(1, tp + fp)
+        g_rec = tp / max(1, tp + fn)
+        self.log("test/f1_micro", 2 * g_prec * g_rec / max(1e-8, g_prec + g_rec),
+                 prog_bar=False, sync_dist=False)
+        self.log("test/precision_micro", g_prec, prog_bar=False, sync_dist=False)
+        self.log("test/recall_micro", g_rec, prog_bar=False, sync_dist=False)
 
         # Clear
         self._test_range_tp = {}

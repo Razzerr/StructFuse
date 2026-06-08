@@ -18,6 +18,13 @@ trainer:
 model:
   esm_model: esm2_t33_650M_UR50D
 
+# Self-contained: ESM2OnlyLitModule runs its own 650M forward from
+# model.esm_model and ignores cached ESM fields, so precomputed embeddings are
+# unused → null. No templates → topk=0 (no PriorBuilder) and index_dir=null.
 data:
   batch_size: 16
   bucketed: false  # No bucketing for cleaner evaluation
+  topk: 0
+  index_dir: null
+  esm_embeddings_dir: null
+  compute_dist_bins: false

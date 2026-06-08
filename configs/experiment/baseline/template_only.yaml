@@ -8,3 +8,19 @@ defaults:
 task_name: "template_only"
 tags: ["baseline", "template-only"]
 seed: 42
+
+# Self-contained: retrieval base pinned to the 650M FAISS index so B4 is
+# comparable to the H1 headline. TemplateOnlyLitModule consumes prior/count
+# only (no ESM embeddings), so esm_embeddings_dir is unused → null.
+# Query embeddings for FAISS come from the index's own embeddings.npy, not
+# from esm_embeddings_dir, so index_t33 alone fully determines retrieval space.
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  topk: 4
+  esm_embeddings_dir: null
+  compute_dist_bins: false
+
+model:
+  index_dir: data/index_t33
+  topk: 4
