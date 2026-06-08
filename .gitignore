@@ -161,3 +161,7 @@ paper/
 tmp.*/
 _startup.txt
 .codex
+models/
+.wandb/
+.vscode-server/
+notebooks/
