@@ -77,7 +77,7 @@ if [[ "${MODE}" == "only" ]]; then
 fi
 
 echo "650M preflight, commit=$(git_commit), dry_run=${DRY_RUN}"
-run_selected "verify" "scripts/verify_no_leak.py" "paper_verify_no_leak_t33" "12:00:00"
+run_selected "verify" "scripts/verify_no_leak.py" "paper_verify_no_leak_t33" "24:00:00"
 run_selected "coverage" "scripts/template_coverage.py" "paper_template_coverage_t33" "08:00:00"
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

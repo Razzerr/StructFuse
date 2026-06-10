@@ -6,11 +6,13 @@
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
 #   ./configs/experiment/launch_paper_8M.sh --all
+# Add --skip-frontier when the canonical frontier_8M run already exists.
 # Add --dry-run to print the launch matrix without submitting jobs.
 
 set -euo pipefail
 
 DRY_RUN=false
+SKIP_FRONTIER=false
 MODE=""
 
 while [[ $# -gt 0 ]]; do
@@ -27,8 +29,12 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --skip-frontier)
+            SKIP_FRONTIER=true
+            shift
+            ;;
         -h|--help)
-            sed -n '2,10p' "$0"
+            sed -n '2,11p' "$0"
             exit 0
             ;;
         *)
@@ -72,7 +78,11 @@ submit_smoke() {
 }
 
 submit_core() {
-    submit_training "frontier_8M" "paper_8m_frontier_k4"
+    if [[ "${SKIP_FRONTIER}" == "true" ]]; then
+        echo "Skipping paper_8m_frontier_k4 (--skip-frontier); using completed run iej9a561." >&2
+    else
+        submit_training "frontier_8M" "paper_8m_frontier_k4"
+    fi
     submit_training "ablation/tpl_contact_only" "paper_8m_stage1_tpl_contact"
     submit_training "ablation/no_triangle" "paper_8m_stage2_no_triangle"
     submit_training "ablation/no_dist" "paper_8m_no_dist"
@@ -91,7 +101,7 @@ submit_supplementary() {
     submit_training "ablation/k16_templates" "paper_8m_k16"
 }
 
-echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}"
+echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}, skip_frontier=${SKIP_FRONTIER}"
 case "${MODE}" in
     smoke)
         submit_smoke
