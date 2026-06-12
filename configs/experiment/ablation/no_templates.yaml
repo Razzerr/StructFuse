@@ -10,6 +10,9 @@ seed: 42
 
 data:
   topk: 0
+  compute_dist_bins: false
 
 model:
   topk: 0
+  use_template_features: false
+  use_tpl_dist_bins: false

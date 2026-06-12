@@ -48,6 +48,7 @@ class ContactLitModule(LightningModule):
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
         fusion_feature_groups: Optional[Dict[str, int]] = None,
+        use_template_features: bool = True,
         # Stage 2 optional per-group features (channel counts, dataset-side)
         use_tpl_dist_bins: bool = False,   # 9-channel soft distance histogram
         head_type: str = "cnn",  # cnn, dilated or axial
@@ -108,6 +109,7 @@ class ContactLitModule(LightningModule):
             fusion_feature_groups=(
                 dict(fusion_feature_groups) if fusion_feature_groups else None
             ),
+            use_template_features=use_template_features,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,

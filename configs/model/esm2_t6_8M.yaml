@@ -43,6 +43,7 @@ fusion_reduction: 1
 fusion_feature_groups:
   tpl_contact: 2
   tpl_dist: 9
+use_template_features: true
 
 # Stage 2 feature flags
 use_tpl_dist_bins: true

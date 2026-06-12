@@ -292,6 +292,7 @@ class Pair2DHead(nn.Module):
         fusion_num_heads: int = 8,
         fusion_reduction: int = 1,
         fusion_feature_groups: dict | None = None,
+        use_template_features: bool = True,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
@@ -304,6 +305,7 @@ class Pair2DHead(nn.Module):
 
         self.head_type = head_type
         self.use_checkpoint = use_checkpoint
+        self.use_template_features = bool(use_template_features)
 
         # Fusion strategy selection
         self.fusion_strategy = fusion_strategy
@@ -315,6 +317,15 @@ class Pair2DHead(nn.Module):
             reduction=fusion_reduction,
             feature_groups=fusion_feature_groups,
         )
+        if not self.use_template_features:
+            if not isinstance(self.fusion, GroupedFeatureFusion):
+                raise ValueError(
+                    "use_template_features=False is supported only with "
+                    "fusion_strategy='grouped'"
+                )
+            # Keep the checkpoint architecture compatible with the frontier,
+            # but exclude absent-modality encoders from optimization and EMA.
+            self.fusion.encoders.requires_grad_(False)
         
         # Input channels depend on fusion strategy output
         in_ch = self.fusion.out_channels
@@ -414,9 +425,11 @@ class Pair2DHead(nn.Module):
         # Apply fusion strategy — dispatch per-group features when using
         # GroupedFeatureFusion, else fall back to the legacy signature.
         if isinstance(self.fusion, GroupedFeatureFusion):
-            feats: dict = {"tpl_contact": torch.cat([prior, count], dim=1)}
-            if tpl_dist_bins is not None:
-                feats["tpl_dist"] = tpl_dist_bins
+            feats: dict = {}
+            if self.use_template_features:
+                feats["tpl_contact"] = torch.cat([prior, count], dim=1)
+                if tpl_dist_bins is not None:
+                    feats["tpl_dist"] = tpl_dist_bins
             x = self.fusion(pair_feat, esm_contacts, rel, **feats)
         else:
             x = self.fusion(pair_feat, prior, count, rel, esm_contacts)

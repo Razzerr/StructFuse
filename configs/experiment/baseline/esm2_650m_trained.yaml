@@ -16,6 +16,8 @@ seed: 42
 model:
   use_checkpoint: true       # mirror frontier.yaml
   topk: 0                    # passive, kept consistent with data.topk for audit log
+  use_template_features: false
+  use_tpl_dist_bins: false
 
 data:
   batch_size: 8

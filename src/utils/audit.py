@@ -264,6 +264,9 @@ def dump_audit_manifest(
             "head_type": _safe_select(cfg, "model.head_type"),
             "fusion_strategy": _safe_select(cfg, "model.fusion_strategy"),
             "fusion_feature_groups": feature_groups,
+            "use_template_features": _safe_select(
+                cfg, "model.use_template_features"
+            ),
             "use_tpl_dist_bins": _safe_select(cfg, "model.use_tpl_dist_bins"),
             "triangle_c": _safe_select(cfg, "model.triangle_c"),
             "lr": _safe_select(cfg, "model.lr"),
