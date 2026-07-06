@@ -1,11 +1,10 @@
 # @package _global_
-# ABLATION (A2): TruFor cross-attention fusion instead of grouped.
+# ABLATION (A2): historical TruFor-style fusion stack without distance bins.
 #
-# CAVEAT — this is NOT a pure fusion change. TruFor's branch in
-# pair2d_head.py:425 doesn't accept tpl_dist_bins (only GroupedFeatureFusion
-# does), so this ablation simultaneously (a) swaps fusion grouped→trufor
-# and (b) drops explicit consumption of the 9-channel distance histogram.
-# Interpret as "full TruFor stack vs frontier", not "isolated fusion delta".
+# Retained unchanged for the completed paper run and for measuring the
+# within-strategy value of distance bins. It is not an equal-input comparison
+# with the grouped frontier because it intentionally disables tpl_dist_bins.
+# Use ablation/trufor_fusion_with_dist for the clean full-input comparison.
 
 task_name: "ablation_trufor_fusion"
 tags: ["ablation", "A2", "trufor", "no-grouped", "confounded"]
@@ -13,8 +12,7 @@ seed: 42
 
 model:
   fusion_strategy: "trufor"
-  fusion_feature_groups: null  # TruFor does not use grouped feature_groups
-  use_tpl_dist_bins: false     # TruFor branch doesn't consume tpl_dist_bins
+  fusion_feature_groups: null
+  use_tpl_dist_bins: false
 
-# data.compute_dist_bins stays true (default) — cheap, and lets paired
-# Wilcoxon use exact same val/test batches as frontier_8M.
+# data.compute_dist_bins stays true (default) so data loading remains matched.

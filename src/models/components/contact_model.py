@@ -17,6 +17,7 @@ class ContactModel(torch.nn.Module):
         fusion_num_heads: Number of attention heads for TruFor
         fusion_reduction: Channel reduction for TruFor
         fusion_feature_groups: dict[str, int] for "grouped" fusion
+        use_tpl_dist_bins: Whether to consume template distance-bin channels
         head_type: "cnn", "dilated" or "axial" - architecture type for head
         head_num_heads: Number of attention heads if head_type="axial"
         use_depthwise: Whether to use depthwise separable convs if head_type="cnn"
@@ -34,6 +35,7 @@ class ContactModel(torch.nn.Module):
         fusion_reduction: int = 1,
         fusion_feature_groups: dict | None = None,
         use_template_features: bool = True,
+        use_tpl_dist_bins: bool = False,
         head_type: str = "cnn",
         head_num_heads: int = 8,
         head_num_kv_heads: int = None,
@@ -55,6 +57,7 @@ class ContactModel(torch.nn.Module):
             fusion_reduction=fusion_reduction,
             fusion_feature_groups=fusion_feature_groups,
             use_template_features=use_template_features,
+            use_tpl_dist_bins=use_tpl_dist_bins,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,

@@ -1,0 +1,21 @@
+# @package _global_
+# Seed-42 650M candidate using TruFor-style fusion with the complete template
+# feature set. Launch only after reviewing the corresponding 8M parity run.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "trufor_fusion_with_dist_650M"
+tags: ["candidate", "fusion-parity", "trufor", "tpl-dist", "650M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  use_checkpoint: true
+
+data:
+  batch_size: 8
+  index_dir: data/index_t33
+  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  compute_dist_bins: true

@@ -278,6 +278,7 @@ class Pair2DHead(nn.Module):
         fusion_strategy: "standard" (gated + aux) or "trufor" (cross-attention)
         fusion_num_heads: Number of attention heads for TruFor fusion
         fusion_reduction: Channel reduction factor for TruFor fusion
+        use_tpl_dist_bins: Whether to consume template distance-bin channels
         head_type: "cnn", "dilated", or "axial" - architecture type for processing
         head_num_heads: Number of attention heads if head_type="axial"
         use_depthwise: Whether to use depthwise separable convs if head_type="cnn"
@@ -293,6 +294,7 @@ class Pair2DHead(nn.Module):
         fusion_reduction: int = 1,
         fusion_feature_groups: dict | None = None,
         use_template_features: bool = True,
+        use_tpl_dist_bins: bool = False,
         head_type: str = "cnn",
         head_num_heads: int = 4,  # Reduced default for efficiency
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
@@ -306,6 +308,21 @@ class Pair2DHead(nn.Module):
         self.head_type = head_type
         self.use_checkpoint = use_checkpoint
         self.use_template_features = bool(use_template_features)
+        self.use_tpl_dist_bins = bool(use_tpl_dist_bins)
+
+        tpl_dist_channels = 0
+        if self.use_tpl_dist_bins:
+            if not fusion_feature_groups:
+                raise ValueError(
+                    "use_tpl_dist_bins=True requires fusion_feature_groups "
+                    "with a positive 'tpl_dist' channel count"
+                )
+            tpl_dist_channels = int(fusion_feature_groups.get("tpl_dist", 0))
+            if tpl_dist_channels <= 0:
+                raise ValueError(
+                    "use_tpl_dist_bins=True requires a positive "
+                    "fusion_feature_groups['tpl_dist'] channel count"
+                )
 
         # Fusion strategy selection
         self.fusion_strategy = fusion_strategy
@@ -316,6 +333,7 @@ class Pair2DHead(nn.Module):
             num_heads=fusion_num_heads,
             reduction=fusion_reduction,
             feature_groups=fusion_feature_groups,
+            tpl_dist_channels=tpl_dist_channels,
         )
         if not self.use_template_features:
             if not isinstance(self.fusion, GroupedFeatureFusion):
@@ -417,7 +435,7 @@ class Pair2DHead(nn.Module):
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             tpl_dist_bins: optional Stage 2 per-group feature
-                (only consumed by GroupedFeatureFusion).
+                consumed when template distance channels are enabled.
 
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -432,7 +450,14 @@ class Pair2DHead(nn.Module):
                     feats["tpl_dist"] = tpl_dist_bins
             x = self.fusion(pair_feat, esm_contacts, rel, **feats)
         else:
-            x = self.fusion(pair_feat, prior, count, rel, esm_contacts)
+            x = self.fusion(
+                pair_feat,
+                prior,
+                count,
+                rel,
+                esm_contacts,
+                tpl_dist_bins=tpl_dist_bins,
+            )
 
         # Processing
         x = self.inp(x)

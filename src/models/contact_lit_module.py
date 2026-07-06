@@ -110,6 +110,7 @@ class ContactLitModule(LightningModule):
                 dict(fusion_feature_groups) if fusion_feature_groups else None
             ),
             use_template_features=use_template_features,
+            use_tpl_dist_bins=use_tpl_dist_bins,
             head_type=head_type,
             head_num_heads=head_num_heads,
             head_num_kv_heads=head_num_kv_heads,

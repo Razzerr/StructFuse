@@ -232,6 +232,36 @@ class FeatureFusionModule(nn.Module):
         return out
 
 
+def _validate_tpl_dist_bins(
+    tpl_dist_bins: torch.Tensor | None,
+    *,
+    expected_channels: int,
+    reference: torch.Tensor,
+) -> None:
+    if tpl_dist_bins is None:
+        raise ValueError(
+            "tpl_dist_bins is required when template distance channels are enabled"
+        )
+    if tpl_dist_bins.ndim != 4:
+        raise ValueError(
+            "tpl_dist_bins must have shape (B, C, L, L), "
+            f"got {tuple(tpl_dist_bins.shape)}"
+        )
+    if tpl_dist_bins.shape[1] != expected_channels:
+        raise ValueError(
+            f"Expected {expected_channels} tpl_dist_bins channels, "
+            f"got {tpl_dist_bins.shape[1]}"
+        )
+    if (
+        tpl_dist_bins.shape[0] != reference.shape[0]
+        or tpl_dist_bins.shape[2:] != reference.shape[2:]
+    ):
+        raise ValueError(
+            "tpl_dist_bins batch and spatial dimensions must match prior: "
+            f"got {tuple(tpl_dist_bins.shape)} vs {tuple(reference.shape)}"
+        )
+
+
 class StandardFusion(nn.Module):
     """
     Standard fusion strategy (current baseline).
@@ -244,9 +274,19 @@ class StandardFusion(nn.Module):
     Args:
         d_pair: Dimension of pairwise features
         d_rel: Dimension of relative position embeddings
+        tpl_dist_channels: Number of template distance-bin channels to append.
+            Zero preserves the original contact/count-only architecture.
     """
-    def __init__(self, d_pair: int, d_rel: int):
+    def __init__(
+        self,
+        d_pair: int,
+        d_rel: int,
+        tpl_dist_channels: int = 0,
+    ):
         super().__init__()
+        if tpl_dist_channels < 0:
+            raise ValueError("tpl_dist_channels must be non-negative")
+        self.tpl_dist_channels = int(tpl_dist_channels)
         
         # ESM semantic encoder: combines pair_feat + optional esm_contacts
         esm_in_channels = d_pair + 1
@@ -261,8 +301,9 @@ class StandardFusion(nn.Module):
         # Relative position projection
         self.rel_proj = nn.Conv2d(d_rel, d_rel, 1)
         
-        # Total input channels: pair_feat + prior + count + rel = d_pair + 1 + 1 + d_rel
-        self.out_channels = d_pair + 1 + 1 + d_rel
+        # Total input channels: semantic + prior + count + optional distance
+        # bins + relative position.
+        self.out_channels = d_pair + 1 + 1 + self.tpl_dist_channels + d_rel
         
     def forward(
         self, 
@@ -270,7 +311,8 @@ class StandardFusion(nn.Module):
         prior: torch.Tensor,
         count: torch.Tensor,
         rel: torch.Tensor,
-        esm_contacts: torch.Tensor
+        esm_contacts: torch.Tensor,
+        tpl_dist_bins: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -279,6 +321,8 @@ class StandardFusion(nn.Module):
             count: (B, 1, L, L) template count confidence
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            tpl_dist_bins: optional (B, tpl_dist_channels, L, L) template
+                distance histogram
             
         Returns:
             (B, out_channels, L, L) fused features
@@ -297,10 +341,18 @@ class StandardFusion(nn.Module):
         
         # Auxiliary features: concatenate raw information
         rel_emb = self.rel_proj(rel)  # (B, d_rel, L, L)
-        aux = [prior, count, rel_emb]  # Raw template info + relative position
+        aux = [prior, count]
+        if self.tpl_dist_channels:
+            _validate_tpl_dist_bins(
+                tpl_dist_bins,
+                expected_channels=self.tpl_dist_channels,
+                reference=prior,
+            )
+            aux.append(tpl_dist_bins)
+        aux.append(rel_emb)
         
         # Final concatenation
-        x_fused = torch.cat([x] + aux, dim=1)  # (B, d_pair+1+1+d_rel, L, L)
+        x_fused = torch.cat([x] + aux, dim=1)
         
         return x_fused
 
@@ -326,15 +378,21 @@ class TruForFusion(nn.Module):
         d_rel: Dimension of relative position embeddings
         num_heads: Number of attention heads for cross-attention
         reduction: Channel reduction factor in fusion
+        tpl_dist_channels: Number of template distance-bin channels included
+            in the structural stream. Zero preserves the original encoder.
     """
     def __init__(
         self, 
         d_pair: int, 
         d_rel: int, 
         num_heads: int = 8, 
-        reduction: int = 1
+        reduction: int = 1,
+        tpl_dist_channels: int = 0,
     ):
         super().__init__()
+        if tpl_dist_channels < 0:
+            raise ValueError("tpl_dist_channels must be non-negative")
+        self.tpl_dist_channels = int(tpl_dist_channels)
         # ESM semantic stream encoder: [pair_feat, optional esm_contacts] -> d_pair
         esm_in_channels = d_pair + 1
         self.esm_encoder = nn.Sequential(
@@ -343,9 +401,11 @@ class TruForFusion(nn.Module):
             nn.ReLU()
         )
         
-        # Template fingerprint encoder: [prior, count] -> d_pair dimensions
+        # Template fingerprint encoder: [prior, count, optional distance bins]
+        # -> d_pair dimensions.
+        template_in_channels = 2 + self.tpl_dist_channels
         self.template_encoder = nn.Sequential(
-            nn.Conv2d(2, d_pair // 2, 3, padding=1),
+            nn.Conv2d(template_in_channels, d_pair // 2, 3, padding=1),
             nn.BatchNorm2d(d_pair // 2),
             nn.ReLU(),
             nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
@@ -372,7 +432,8 @@ class TruForFusion(nn.Module):
         prior: torch.Tensor,
         count: torch.Tensor,
         rel: torch.Tensor,
-        esm_contacts: torch.Tensor
+        esm_contacts: torch.Tensor,
+        tpl_dist_bins: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -381,6 +442,8 @@ class TruForFusion(nn.Module):
             count: (B, 1, L, L) template count (confidence)
             rel: (B, d_rel, L, L) relative position embeddings
             esm_contacts: (B, 1, L, L) ESM2 contact predictions
+            tpl_dist_bins: optional (B, tpl_dist_channels, L, L) template
+                distance histogram
             
         Returns:
             (B, out_channels, L, L) cross-fused features
@@ -390,7 +453,15 @@ class TruForFusion(nn.Module):
         esm_feat = self.esm_encoder(esm_input)  # (B, d_pair, L, L)
         
         # Build Stream 2: Template fingerprint (measured from structures)
-        template_input = torch.cat([prior, count], dim=1)  # (B, 2, L, L)
+        template_parts = [prior, count]
+        if self.tpl_dist_channels:
+            _validate_tpl_dist_bins(
+                tpl_dist_bins,
+                expected_channels=self.tpl_dist_channels,
+                reference=prior,
+            )
+            template_parts.append(tpl_dist_bins)
+        template_input = torch.cat(template_parts, dim=1)
         template_feat = self.template_encoder(template_input)  # (B, d_pair, L, L)
         
         # Cross-modal fusion: ESM semantic <-> Template fingerprint
@@ -498,6 +569,7 @@ def get_fusion_strategy(
     num_heads: int = 8,
     reduction: int = 1,
     feature_groups: dict | None = None,
+    tpl_dist_channels: int = 0,
 ) -> nn.Module:
     """
     Factory function to create fusion strategy.
@@ -511,18 +583,26 @@ def get_fusion_strategy(
         feature_groups: ordered dict {group_name: num_channels} for
             "grouped" strategy. Defaults to {"tpl_contact": 2} (prior+count)
             which is informationally equivalent to TruFor's baseline.
+        tpl_dist_channels: Number of distance-bin channels consumed by
+            standard or TruFor fusion. Ignored by grouped fusion, where
+            channel counts are declared in feature_groups.
 
     Returns:
         Fusion module instance
     """
     if strategy == "standard":
-        return StandardFusion(d_pair=d_pair, d_rel=d_rel)
+        return StandardFusion(
+            d_pair=d_pair,
+            d_rel=d_rel,
+            tpl_dist_channels=tpl_dist_channels,
+        )
     elif strategy == "trufor":
         return TruForFusion(
             d_pair=d_pair,
             d_rel=d_rel,
             num_heads=num_heads,
             reduction=reduction,
+            tpl_dist_channels=tpl_dist_channels,
         )
     elif strategy == "grouped":
         groups = feature_groups if feature_groups else {"tpl_contact": 2}

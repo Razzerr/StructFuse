@@ -1,0 +1,14 @@
+# @package _global_
+# Equal-input fusion comparison: standard gated concatenation receives the
+# same contact/count and 9-channel distance priors as frontier_8M.
+
+task_name: "ablation_standard_fusion_with_dist"
+tags: ["ablation", "fusion-parity", "standard-fusion", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "standard"
+  use_tpl_dist_bins: true
+
+data:
+  compute_dist_bins: true

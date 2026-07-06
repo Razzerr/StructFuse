@@ -28,11 +28,22 @@ import numpy as np
 import pandas as pd
 
 
-SIM_BINS = [-1e-9, 0.3, 0.5, 0.7, 1.0 + 1e-9]
-SIM_LABELS = ["sim<0.3", "0.3-0.5", "0.5-0.7", "sim>0.7"]
+SIM_BIN_PRESETS = {
+    "broad": (
+        [-1e-9, 0.3, 0.5, 0.7, 1.0 + 1e-6],
+        ["sim<0.3", "0.3-0.5", "0.5-0.7", "sim>0.7"],
+    ),
+    # The paper runs retrieve very close neighbours, so broad bins collapse
+    # almost every test protein into sim>0.7. These bins resolve the high-sim
+    # regime without using data-dependent quantiles.
+    "high": (
+        [-1e-9, 0.95, 0.98, 0.99, 0.995, 0.999, 1.0 + 1e-6],
+        ["sim<0.95", "0.95-0.98", "0.98-0.99", "0.99-0.995", "0.995-0.999", "sim>=0.999"],
+    ),
+}
 N_TPL_BINS = [-1, 0, 1, 4, 8, 16, 1_000_000]
 N_TPL_LABELS = ["k=0", "k=1", "k=2-4", "k=5-8", "k=9-16", "k>16"]
-METRICS = (
+DEFAULT_METRICS = (
     "P@L",
     "P@L_long",
     "P@L/2_long",
@@ -58,7 +69,28 @@ def _parse_inputs(specs: Iterable[str]) -> list[tuple[str, Path]]:
     return parsed
 
 
-def _load(path: Path, *, require_retrieval: bool) -> pd.DataFrame:
+def _bootstrap_ci(delta: np.ndarray, n_resamples: int) -> tuple[float, float]:
+    if n_resamples <= 0 or len(delta) < 2:
+        return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed=0)
+    means = np.empty(n_resamples, dtype=np.float64)
+    n = len(delta)
+    for i in range(n_resamples):
+        idx = rng.integers(0, n, size=n)
+        means[i] = float(delta[idx].mean())
+    return (
+        float(np.percentile(means, 2.5)),
+        float(np.percentile(means, 97.5)),
+    )
+
+
+def _load(
+    path: Path,
+    *,
+    require_retrieval: bool,
+    sim_bins: list[float],
+    sim_labels: list[str],
+) -> pd.DataFrame:
     df = pd.read_csv(path, sep="\t")
     if "sample_id" not in df.columns:
         raise SystemExit(f"{path} is missing column 'sample_id'")
@@ -78,8 +110,8 @@ def _load(path: Path, *, require_retrieval: bool) -> pd.DataFrame:
         df = df.copy()
         df["sim_bin"] = pd.cut(
             pd.to_numeric(df["best_tpl_sim"], errors="coerce"),
-            bins=SIM_BINS,
-            labels=SIM_LABELS,
+            bins=sim_bins,
+            labels=sim_labels,
             include_lowest=True,
         )
         df["k_bin"] = pd.cut(
@@ -90,7 +122,12 @@ def _load(path: Path, *, require_retrieval: bool) -> pd.DataFrame:
     return df
 
 
-def _aggregate_single(df: pd.DataFrame, by: str, label: str) -> pd.DataFrame:
+def _aggregate_single(
+    df: pd.DataFrame,
+    by: str,
+    label: str,
+    metrics: tuple[str, ...],
+) -> pd.DataFrame:
     rows = []
     for bin_val, group in df.groupby(by, observed=True, sort=False):
         row = {
@@ -99,7 +136,7 @@ def _aggregate_single(df: pd.DataFrame, by: str, label: str) -> pd.DataFrame:
             "model": label,
             "n_chains": int(len(group)),
         }
-        for metric in METRICS:
+        for metric in metrics:
             if metric not in group.columns:
                 continue
             vals = pd.to_numeric(group[metric], errors="coerce").to_numpy(dtype=float)
@@ -116,6 +153,8 @@ def _aggregate_paired(
     by: str,
     reference_label: str,
     control_label: str,
+    metrics: tuple[str, ...],
+    n_bootstrap: int,
 ) -> pd.DataFrame:
     rows = []
     for bin_val, group in merged.groupby(by, observed=True, sort=False):
@@ -126,7 +165,7 @@ def _aggregate_paired(
             "control": control_label,
             "n_pairs": int(len(group)),
         }
-        for metric in METRICS:
+        for metric in metrics:
             ref_col = f"{metric}__reference"
             ctrl_col = f"{metric}__control"
             if ref_col not in group.columns or ctrl_col not in group.columns:
@@ -137,6 +176,7 @@ def _aggregate_paired(
             ref = ref[finite]
             ctrl = ctrl[finite]
             delta = ref - ctrl
+            ci_lo, ci_hi = _bootstrap_ci(delta, n_bootstrap)
             row[f"n_{metric}"] = int(len(delta))
             row[f"mean_{metric}__reference"] = (
                 float(ref.mean()) if len(ref) else float("nan")
@@ -147,6 +187,8 @@ def _aggregate_paired(
             row[f"mean_delta_{metric}"] = (
                 float(delta.mean()) if len(delta) else float("nan")
             )
+            row[f"ci95_lo_delta_{metric}"] = ci_lo
+            row[f"ci95_hi_delta_{metric}"] = ci_hi
             row[f"std_delta_{metric}"] = (
                 float(delta.std(ddof=0)) if len(delta) else float("nan")
             )
@@ -154,16 +196,20 @@ def _aggregate_paired(
     return pd.DataFrame(rows)
 
 
-def _paired_frame(reference: pd.DataFrame, control: pd.DataFrame) -> pd.DataFrame:
+def _paired_frame(
+    reference: pd.DataFrame,
+    control: pd.DataFrame,
+    metrics: tuple[str, ...],
+) -> pd.DataFrame:
     reference_columns = [
         "sample_id",
         "sim_bin",
         "k_bin",
-        *[metric for metric in METRICS if metric in reference.columns],
+        *[metric for metric in metrics if metric in reference.columns],
     ]
     control_columns = [
         "sample_id",
-        *[metric for metric in METRICS if metric in control.columns],
+        *[metric for metric in metrics if metric in control.columns],
     ]
     return reference[reference_columns].merge(
         control[control_columns],
@@ -188,8 +234,29 @@ def main() -> None:
         "--reference",
         help="Reference input label. Defaults to the first --inputs entry.",
     )
+    parser.add_argument(
+        "--sim-bin-preset",
+        choices=sorted(SIM_BIN_PRESETS),
+        default="broad",
+        help="Similarity-bin preset. Use 'high' for paper runs with near-1.0 templates.",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        default=list(DEFAULT_METRICS),
+        help="Metric columns to aggregate.",
+    )
+    parser.add_argument(
+        "--n-bootstrap",
+        type=int,
+        default=0,
+        help="Bootstrap resamples for per-bin mean-delta CIs. Default 0 disables CIs.",
+    )
     parser.add_argument("--out", required=True, type=Path, help="Output TSV path")
     args = parser.parse_args()
+
+    sim_bins, sim_labels = SIM_BIN_PRESETS[args.sim_bin_preset]
+    metrics = tuple(args.metrics)
 
     parsed = _parse_inputs(args.inputs)
     reference_label = args.reference or parsed[0][0]
@@ -199,22 +266,32 @@ def main() -> None:
             f"--reference {reference_label!r} is not one of: {', '.join(paths)}"
         )
 
-    reference = _load(paths[reference_label], require_retrieval=True)
+    reference = _load(
+        paths[reference_label],
+        require_retrieval=True,
+        sim_bins=sim_bins,
+        sim_labels=sim_labels,
+    )
     controls = [(label, path) for label, path in parsed if label != reference_label]
 
     if not controls:
         out_df = pd.concat(
             [
-                _aggregate_single(reference, "sim_bin", reference_label),
-                _aggregate_single(reference, "k_bin", reference_label),
+                _aggregate_single(reference, "sim_bin", reference_label, metrics),
+                _aggregate_single(reference, "k_bin", reference_label, metrics),
             ],
             ignore_index=True,
         )
     else:
         blocks = []
         for control_label, control_path in controls:
-            control = _load(control_path, require_retrieval=False)
-            merged = _paired_frame(reference, control)
+            control = _load(
+                control_path,
+                require_retrieval=False,
+                sim_bins=sim_bins,
+                sim_labels=sim_labels,
+            )
+            merged = _paired_frame(reference, control, metrics)
             if merged.empty:
                 raise SystemExit(
                     f"No overlapping sample_ids between {reference_label} and "
@@ -223,10 +300,20 @@ def main() -> None:
             blocks.extend(
                 [
                     _aggregate_paired(
-                        merged, "sim_bin", reference_label, control_label
+                        merged,
+                        "sim_bin",
+                        reference_label,
+                        control_label,
+                        metrics,
+                        args.n_bootstrap,
                     ),
                     _aggregate_paired(
-                        merged, "k_bin", reference_label, control_label
+                        merged,
+                        "k_bin",
+                        reference_label,
+                        control_label,
+                        metrics,
+                        args.n_bootstrap,
                     ),
                 ]
             )
