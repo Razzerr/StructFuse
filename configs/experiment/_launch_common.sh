@@ -8,6 +8,9 @@ PROJECT_DIR="${PROJECT_DIR:-/mnt/storage_3/home/nszostak/pl0735-01/project_data/
 MAMBA_BIN="${MAMBA_BIN:-/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/micromamba/micromamba}"
 MAMBA_ENV="${MAMBA_ENV:-/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/conda/envs/structfuse}"
 SLURM_PARTITION="${SLURM_PARTITION:-proxima}"
+# Pass excluded nodes explicitly to sbatch. SBATCH_EXCLUDE is accepted as a
+# fallback for compatibility with the standard Slurm environment variable.
+SLURM_EXCLUDE_NODES="${SLURM_EXCLUDE_NODES:-${SBATCH_EXCLUDE:-}}"
 
 LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_REPO_ROOT="$(cd "${LAUNCHER_DIR}/../.." && pwd)"
@@ -78,7 +81,7 @@ submit_job() {
     commit="$(git_commit)"
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        echo "[DRY-RUN] job=${job_name} time=${time_limit} cpus=${cpus} mem=${memory} dependency=${dependency:-none}" >&2
+        echo "[DRY-RUN] job=${job_name} time=${time_limit} cpus=${cpus} mem=${memory} dependency=${dependency:-none} exclude=${SLURM_EXCLUDE_NODES:-none}" >&2
         echo "[DRY-RUN] commit=${commit}" >&2
         echo "[DRY-RUN] command=${command}" >&2
         printf "dryrun-%s\n" "${job_name}"
@@ -88,6 +91,11 @@ submit_job() {
     local dependency_args=()
     if [[ -n "${dependency}" ]]; then
         dependency_args=(--dependency="${dependency}")
+    fi
+
+    local exclude_args=()
+    if [[ -n "${SLURM_EXCLUDE_NODES}" ]]; then
+        exclude_args=(--exclude="${SLURM_EXCLUDE_NODES}")
     fi
 
     local job_id
@@ -103,6 +111,7 @@ submit_job() {
             --cpus-per-task="${cpus}" \
             --mem="${memory}" \
             --nodes=1 \
+            "${exclude_args[@]}" \
             "${dependency_args[@]}" \
             --wrap="$(cat <<EOF
 #!/bin/bash

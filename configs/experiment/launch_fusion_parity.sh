@@ -8,7 +8,8 @@
 #   4. Launch exactly one seed-42 650M candidate.
 #   5. Only after promotion, launch that candidate's remaining seeds.
 #
-# Add --dry-run to inspect commands without submitting.
+# Add --dry-run to inspect commands without submitting. The single-strategy
+# smoke/8M modes are intended for retrying an infrastructure failure.
 
 set -euo pipefail
 
@@ -17,7 +18,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --smoke|--8m|--650m-standard|--650m-trufor|--remaining-seeds-standard|--remaining-seeds-trufor)
+        --smoke|--smoke-standard|--smoke-trufor|--8m|--8m-standard|--8m-trufor|--650m-standard|--650m-trufor|--remaining-seeds-standard|--remaining-seeds-trufor)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -41,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --smoke, --8m, --650m-standard, --650m-trufor, --remaining-seeds-standard, or --remaining-seeds-trufor." >&2
+    echo "Choose a smoke, 8M, 650M, or remaining-seeds launch mode. See --help." >&2
     exit 2
 fi
 
@@ -60,29 +61,32 @@ submit_training() {
     submit_job "${command}" "${job_name}" "${time_limit}" "${cpus}" "${memory}" >/dev/null
 }
 
-submit_smoke() {
+submit_smoke_variant() {
+    local strategy="$1"
     local smoke_args="++trainer.max_epochs=1 ++trainer.limit_train_batches=0.01 ++trainer.limit_val_batches=10 ++trainer.limit_test_batches=10 data.num_workers=0 callbacks.early_stopping.patience=1"
     submit_training \
-        "ablation/standard_fusion_with_dist" \
-        "fusion_parity_smoke_standard" \
-        "04:00:00" 16 "256G" \
-        "${smoke_args}"
-    submit_training \
-        "ablation/trufor_fusion_with_dist" \
-        "fusion_parity_smoke_trufor" \
+        "ablation/${strategy}_fusion_with_dist" \
+        "fusion_parity_smoke_${strategy}" \
         "04:00:00" 16 "256G" \
         "${smoke_args}"
 }
 
+submit_smoke() {
+    submit_smoke_variant "standard"
+    submit_smoke_variant "trufor"
+}
+
+submit_8m_variant() {
+    local strategy="$1"
+    submit_training \
+        "ablation/${strategy}_fusion_with_dist" \
+        "paper_8m_${strategy}_fusion_dist" \
+        "24:00:00" 16 "256G"
+}
+
 submit_8m() {
-    submit_training \
-        "ablation/standard_fusion_with_dist" \
-        "paper_8m_standard_fusion_dist" \
-        "24:00:00" 16 "256G"
-    submit_training \
-        "ablation/trufor_fusion_with_dist" \
-        "paper_8m_trufor_fusion_dist" \
-        "24:00:00" 16 "256G"
+    submit_8m_variant "standard"
+    submit_8m_variant "trufor"
 }
 
 submit_650m_candidate() {
@@ -108,13 +112,25 @@ submit_remaining_seeds() {
         "seed=1337"
 }
 
-echo "Fusion parity launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}"
+echo "Fusion parity launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}, exclude=${SLURM_EXCLUDE_NODES:-none}"
 case "${MODE}" in
     smoke)
         submit_smoke
         ;;
+    smoke-standard)
+        submit_smoke_variant "standard"
+        ;;
+    smoke-trufor)
+        submit_smoke_variant "trufor"
+        ;;
     8m)
         submit_8m
+        ;;
+    8m-standard)
+        submit_8m_variant "standard"
+        ;;
+    8m-trufor)
+        submit_8m_variant "trufor"
         ;;
     650m-standard)
         submit_650m_candidate "standard"
