@@ -1,0 +1,15 @@
+# @package _global_
+# TruFor+dist trained with BCE only, without the Tversky regularizer.
+
+task_name: "ablation_trufor_bce_only_with_dist"
+tags: ["ablation", "trufor", "tpl-dist", "bce-only", "no-tversky", "8M"]
+seed: 42
+
+data:
+  compute_dist_bins: true
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  use_tversky: false
+  tversky_weight: 0.0

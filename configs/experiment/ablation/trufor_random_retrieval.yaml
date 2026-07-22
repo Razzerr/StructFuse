@@ -1,0 +1,16 @@
+# @package _global_
+# TruFor+dist retrieval specificity control: replace nearest-neighbor template
+# retrieval with deterministic random admissible templates.
+
+task_name: "ablation_trufor_random_retrieval"
+tags: ["ablation", "trufor", "tpl-dist", "random-retrieval", "8M"]
+seed: 42
+
+data:
+  random_retrieval: true
+  compute_dist_bins: true
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  random_retrieval: true

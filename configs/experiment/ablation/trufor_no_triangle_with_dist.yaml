@@ -1,0 +1,15 @@
+# @package _global_
+# TruFor+dist minus triangle multiplicative updates. Isolates the triangle
+# refinement path while keeping the final TruFor fusion input set unchanged.
+
+task_name: "ablation_trufor_no_triangle_with_dist"
+tags: ["ablation", "trufor", "tpl-dist", "no-triangle", "8M"]
+seed: 42
+
+data:
+  compute_dist_bins: true
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  head_type: "axial"

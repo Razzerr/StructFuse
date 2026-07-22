@@ -1,0 +1,15 @@
+# @package _global_
+# TruFor+dist with a dilated convolutional head instead of axial-triangle
+# refinement. Tests the final fusion stack with an alternative pair head.
+
+task_name: "ablation_trufor_dilated_head_with_dist"
+tags: ["ablation", "trufor", "tpl-dist", "dilated-head", "8M"]
+seed: 42
+
+data:
+  compute_dist_bins: true
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  head_type: "dilated"

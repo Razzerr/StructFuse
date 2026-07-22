@@ -1,0 +1,16 @@
+# @package _global_
+# TruFor contact/count-only stream with axial head: no distance bins and no
+# triangle multiplicative updates. Completes the 2x2 dist x triangle panel.
+
+task_name: "ablation_trufor_no_dist_no_triangle"
+tags: ["ablation", "trufor", "no-dist", "no-triangle", "8M"]
+seed: 42
+
+data:
+  compute_dist_bins: false
+
+model:
+  fusion_strategy: "trufor"
+  fusion_feature_groups: null
+  use_tpl_dist_bins: false
+  head_type: "axial"

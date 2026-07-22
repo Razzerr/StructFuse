@@ -1,0 +1,16 @@
+# @package _global_
+# TruFor+dist K-sweep: one retrieved template.
+# PriorBuilder lives in ContactDataModule, so override data.topk and model.topk.
+
+task_name: "ablation_trufor_k1"
+tags: ["ablation", "trufor", "tpl-dist", "k1", "8M"]
+seed: 42
+
+data:
+  topk: 1
+  compute_dist_bins: true
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  topk: 1
