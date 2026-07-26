@@ -51,6 +51,93 @@ METRIC_COLUMNS = (
 )
 
 
+def _get_protein_id(chain_id: str) -> str:
+    """Extract protein-level ID consistently with src.models.utils.faiss."""
+    return chain_id.rsplit("_", 1)[0].lower()
+
+
+class LightweightFaissIndex:
+    """FAISS retrieval helper that avoids loading embeddings.npy.
+
+    The runtime FaissIndex loads both `faiss.index` and `embeddings.npy` because
+    training needs O(1) access to precomputed query vectors. For this audit the
+    vectors are already stored inside IndexFlatIP, so reconstructing the query
+    vector from the FAISS index avoids a second 4.4 GB array for index_t33.
+    """
+
+    def __init__(self, index_dir: Path):
+        import faiss
+
+        self.index_dir = index_dir
+        self.index = faiss.read_index(str(index_dir / "faiss.index"))
+        with (index_dir / "ids.json").open() as handle:
+            self.meta = json.load(handle)
+        self.row2id = [m["id"] for m in self.meta]
+        self.id2npz = {m["id"]: path_from_root(m["npz"]) for m in self.meta}
+        self.id2cluster = {m["id"]: m.get("cluster_id", -1) for m in self.meta}
+        self.row2cluster = [m.get("cluster_id", -1) for m in self.meta]
+        self._id2row = {chain_id: i for i, chain_id in enumerate(self.row2id)}
+        self.d = int(self.index.d)
+
+        self.prot2cluster: dict[str, int] = {}
+        for m in self.meta:
+            prot_id = _get_protein_id(m["id"])
+            cid = int(m.get("cluster_id", -1))
+            if cid != -1:
+                self.prot2cluster[prot_id] = cid
+
+        self.cluster2size: dict[int, int] = {}
+        for cid in self.row2cluster:
+            cid = int(cid)
+            if cid != -1:
+                self.cluster2size[cid] = self.cluster2size.get(cid, 0) + 1
+
+    def _reconstruct_query(self, query_name: str) -> np.ndarray | None:
+        row = self._id2row.get(query_name)
+        if row is None:
+            return None
+        try:
+            x = self.index.reconstruct(int(row))
+        except TypeError:
+            x = np.empty(self.d, dtype=np.float32)
+            self.index.reconstruct(int(row), x)
+        return np.asarray(x, dtype=np.float32).reshape(1, -1)
+
+    def topk_precomputed(
+        self,
+        query_name: str,
+        k: int,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[str, float]]:
+        query_prot_id = _get_protein_id(query_name)
+        query_cluster = self.prot2cluster.get(query_prot_id, -1)
+        x = self._reconstruct_query(query_name)
+        if x is None:
+            return []
+
+        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        search_k = max(k * 3, k + 500 + extra_cluster)
+        search_k = min(search_k, self.index.ntotal)
+        sims, idxs = self.index.search(x.astype(np.float32), search_k)
+
+        out: list[tuple[str, float]] = []
+        for sim, row_idx in zip(sims[0].tolist(), idxs[0].tolist()):
+            if row_idx < 0:
+                continue
+            tpl_id = self.row2id[row_idx]
+            tpl_prot_id = _get_protein_id(tpl_id)
+            if tpl_prot_id == query_prot_id:
+                continue
+            if query_cluster != -1 and int(self.row2cluster[row_idx]) == query_cluster:
+                continue
+            if sim < min_similarity:
+                continue
+            out.append((tpl_id, float(sim)))
+            if len(out) >= k:
+                break
+        return out
+
+
 def path_from_root(value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
@@ -327,7 +414,14 @@ def main() -> None:
     per_sample_path = path_from_root(args.per_sample_tsv) if args.per_sample_tsv else None
     control_path = path_from_root(args.control_per_sample_tsv) if args.control_per_sample_tsv else None
 
-    required = [index_dir / "faiss.index", index_dir / "ids.json", index_dir / "embeddings.npy", data_root, id_list]
+    reference_rows = read_per_sample(per_sample_path)
+    control_rows = read_per_sample(control_path) if control_path and control_path.exists() else {}
+    if per_sample_path and not reference_rows:
+        raise ValueError(f"No rows loaded from {per_sample_path}")
+
+    required = [index_dir / "faiss.index", index_dir / "ids.json"]
+    if not reference_rows and not id_list.exists():
+        required.append(id_list)
     missing = [p for p in required if not p.exists()]
     if missing:
         raise FileNotFoundError(
@@ -335,51 +429,33 @@ def main() -> None:
             + "\n".join(f"  - {p}" for p in missing)
         )
 
-    reference_rows = read_per_sample(per_sample_path)
-    control_rows = read_per_sample(control_path) if control_path and control_path.exists() else {}
-    if per_sample_path and not reference_rows:
-        raise ValueError(f"No rows loaded from {per_sample_path}")
-
-    from src.data.components.dataset import ContactDataset
-    from src.models.utils.faiss import FaissIndex, _get_protein_id
-
-    print(f"Loading dataset from {rel(id_list)}", flush=True)
-    dset = ContactDataset(
-        id_list,
-        root=data_root,
-        min_len=args.min_len,
-        splits_json_path=splits_json,
-        skip_ids_file=skip_ids,
-        index_dir=index_dir,
-    )
     print(f"Loading FAISS index from {rel(index_dir)}", flush=True)
-    faiss_index = FaissIndex(str(index_dir))
-    id_to_npz = {
-        m["id"]: path_from_root(m["npz"]) for m in faiss_index.meta
-    }
-    id_to_cluster = {m["id"]: m.get("cluster_id", "") for m in faiss_index.meta}
+    faiss_index = LightweightFaissIndex(index_dir)
+    id_to_npz = faiss_index.id2npz
+    id_to_cluster = faiss_index.id2cluster
 
     rows: list[dict[str, object]] = []
     score_mismatches: list[dict[str, object]] = []
-    query_ids = list(dset.ids)
     if reference_rows:
-        query_ids = [pid for pid in query_ids if pid in reference_rows]
+        query_ids = [pid for pid in reference_rows if pid in id_to_npz]
+    else:
+        raw_ids = {line.strip() for line in id_list.read_text().splitlines() if line.strip()}
+        query_ids = [pid for pid in faiss_index.row2id if pid.split("_")[0] in raw_ids]
     if args.max_samples > 0:
         query_ids = query_ids[: args.max_samples]
 
     print(f"Scanning {len(query_ids)} query chains (topk={args.topk})", flush=True)
-    dataset_index = {pid: i for i, pid in enumerate(dset.ids)}
     for n_done, pid in enumerate(query_ids, start=1):
-        item = dset[dataset_index[pid]]
-        full_seq = item["seq"]
+        query_npz = id_to_npz.get(pid)
+        if query_npz is None:
+            raise KeyError(f"Query {pid} missing from ids.json metadata")
+        full_seq = load_seq(query_npz)
         crop_start, crop_end = center_crop_bounds(len(full_seq), args.crop_size)
         crop_seq = full_seq[crop_start:crop_end]
         hits = faiss_index.topk_precomputed(
             pid,
             args.topk,
             min_similarity=args.min_template_similarity,
-            random_retrieval=False,
-            filter_holdout=False,
         )
 
         ref = reference_rows.get(pid, {})
@@ -393,7 +469,7 @@ def main() -> None:
             "sample_id": pid,
             "pdb_id": str(ref.get("pdb_id", pid.split("_")[0])),
             "chain_id": str(ref.get("chain_id", pid.rsplit("_", 1)[-1] if "_" in pid else "")),
-            "subset": str(ref.get("subset", item.get("subset", ""))),
+            "subset": str(ref.get("subset", "")),
             "query_cluster_id": faiss_index.prot2cluster.get(_get_protein_id(pid), ""),
             "query_len": len(full_seq),
             "crop_start": crop_start,
