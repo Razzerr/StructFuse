@@ -96,18 +96,20 @@ class LightweightFaissIndex:
                 self.cluster2size[cid] = self.cluster2size.get(cid, 0) + 1
 
     def clusters_for_chain(self, chain_id: str, prot_id: str | None = None) -> set[int]:
-        prot_id = prot_id or _get_protein_id(chain_id)
-        clusters = set(self.prot2clusters.get(prot_id, set()))
+        """Mirror of ``FaissIndex._clusters_for_chain`` — keep the two in sync."""
         exact = int(self.chain2cluster.get(chain_id, -1))
         if exact != -1:
-            clusters.add(exact)
-        return clusters
+            return {exact}
+        prot_id = prot_id or _get_protein_id(chain_id)
+        return set(self.prot2clusters.get(prot_id, set()))
 
     def same_cluster(self, query_clusters: set[int], tpl_id: str, tpl_cluster: int) -> bool:
+        """Mirror of ``FaissIndex._same_cluster`` — keep the two in sync."""
         if not query_clusters:
             return False
-        if int(tpl_cluster) in query_clusters:
-            return True
+        tpl_cluster = int(tpl_cluster)
+        if tpl_cluster != -1:
+            return tpl_cluster in query_clusters
         tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
         return bool(query_clusters.intersection(tpl_clusters))
 

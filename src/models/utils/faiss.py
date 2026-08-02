@@ -129,19 +129,20 @@ class FaissIndex:
         self._pool_nonholdout = None
 
     def _clusters_for_chain(self, chain_id: str, prot_id: Optional[str] = None) -> Set[int]:
-        """Return all known sequence-cluster IDs relevant to a query/template.
+        """Return the sequence-cluster ID(s) to filter a query/template against.
 
-        Exact chain-level cluster IDs are preferred, but the protein/PDB-level
-        union is also included as a conservative fallback for multi-entity PDBs
-        and partially unmapped strict metadata. Unknown cluster IDs (-1) are
-        never considered admissible evidence for passing the filter.
+        The chain-level ID from strict `ids.json` metadata is authoritative and
+        is used alone whenever it is known (99.6 % of chains). The PDB-level
+        union of sibling entities is a fallback used ONLY when the chain-level
+        ID is missing (-1) — using it unconditionally would block legitimate
+        remote homologs of unrelated chains that merely share a crystal, and
+        would inflate the `search_k` over-fetch below.
         """
-        pid = prot_id or _get_protein_id(chain_id)
-        clusters = set(self.prot2clusters.get(pid, set()))
         exact = int(self.chain2cluster.get(chain_id, -1))
         if exact != -1:
-            clusters.add(exact)
-        return clusters
+            return {exact}
+        pid = prot_id or _get_protein_id(chain_id)
+        return set(self.prot2clusters.get(pid, set()))
 
     def _same_cluster(
         self,
@@ -149,11 +150,17 @@ class FaissIndex:
         tpl_id: str,
         tpl_cluster: int,
     ) -> bool:
-        """Conservative same-cluster predicate used by all retrieval paths."""
+        """Same-cluster predicate shared by all retrieval paths.
+
+        An unknown (-1) cluster on either side is never treated as evidence that
+        the pair is admissible: the template falls back to its PDB-level union
+        so a chain missing from the cluster map cannot slip through unfiltered.
+        """
         if not query_clusters:
             return False
-        if int(tpl_cluster) in query_clusters:
-            return True
+        tpl_cluster = int(tpl_cluster)
+        if tpl_cluster != -1:
+            return tpl_cluster in query_clusters
         tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
         return bool(query_clusters.intersection(tpl_clusters))
 
