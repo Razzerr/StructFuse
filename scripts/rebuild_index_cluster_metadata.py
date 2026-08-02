@@ -16,7 +16,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, Iterator, List, Set
 
 from tqdm import tqdm
 
@@ -84,68 +84,154 @@ def index_mmcif_paths(mmcif_dir: Path, wanted_pdbs: Set[str]) -> Dict[str, Path]
     return paths
 
 
-def read_cif_block_header(path: Path, max_lines: int = 120000):
-    import gemmi
-
-    def read_full():
-        if str(path).endswith(".gz"):
-            with gzip.open(path, "rt", encoding="latin-1", errors="replace") as handle:
-                return gemmi.cif.read_string(handle.read()).sole_block()
-        return gemmi.cif.read(str(path)).sole_block()
-
-    try:
-        open_func = gzip.open if str(path).endswith(".gz") else open
-        lines = []
-        with open_func(path, "rt", encoding="latin-1", errors="replace") as handle:
-            for i, line in enumerate(handle):
-                lines.append(line)
-                if i + 1 >= max_lines:
-                    break
-        return gemmi.cif.read_string("".join(lines)).sole_block()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not parse mmCIF header %s: %s; trying full file", path, exc)
-        return read_full()
+# Everything we need (`_entity_poly`) appears well before the coordinate table,
+# so tokenising stops there instead of walking millions of `_atom_site` rows.
+_CIF_STOP_TAG = "_atom_site."
+_CIF_KEYWORDS = ("data_", "save_", "stop_", "global_")
 
 
-def entity_chain_map_from_block(pdb_id: str, block) -> Dict[str, str]:
-    out: Dict[str, str] = {}
+def _split_cif_line(line: str) -> List[str]:
+    """Split one CIF line into tokens, honouring quotes and trailing comments.
+
+    A quote only closes when followed by whitespace or end-of-line, which is the
+    CIF rule that lets values such as ``5'-end`` stay a single token.
+    """
+    out: List[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "#":
+            break
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            start = i
+            while i < n and not (line[i] == quote and (i + 1 >= n or line[i + 1] in " \t")):
+                i += 1
+            out.append(line[start:i])
+            i += 1
+            continue
+        start = i
+        while i < n and line[i] not in " \t":
+            i += 1
+        out.append(line[start:i])
+    return out
+
+
+def _cif_tokens(path: Path) -> Iterator[str]:
+    """Yield CIF tokens: tags, values, and the ``loop_`` keyword.
+
+    Multi-line ``;``-delimited text fields (e.g. the one-letter sequence inside
+    the `_entity_poly` loop) are emitted as a SINGLE token, which is what keeps
+    loop columns aligned. Written in plain Python on purpose: this script must
+    run without touching the experiment environment.
+    """
+    open_func = gzip.open if str(path).endswith(".gz") else open
+    with open_func(path, "rt", encoding="latin-1", errors="replace") as handle:
+        in_text = False
+        buf: List[str] = []
+        for line in handle:
+            if in_text:
+                if line.startswith(";"):
+                    in_text = False
+                    yield "\n".join(buf)
+                    buf = []
+                    rest = line[1:].strip()
+                    if rest:
+                        yield from _split_cif_line(rest)
+                else:
+                    buf.append(line.rstrip("\n"))
+                continue
+            if line.startswith(";"):
+                in_text = True
+                buf = [line[1:].rstrip("\n")]
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.lower().startswith(_CIF_STOP_TAG):
+                return
+            yield from _split_cif_line(stripped)
+
+
+def entity_chain_map_from_file(pdb_id: str, path: Path) -> Dict[str, str]:
+    """Map ``<pdb>_<auth_chain>`` → ``<pdb>_<entity>`` for one mmCIF file.
+
+    `_entity_poly.pdbx_strand_id` lists AUTH chain IDs, which is the namespace
+    `ids.json` uses (gemmi's ``make_structure_from_block`` names chains by
+    ``auth_asym_id``). `_pdbx_poly_seq_scheme` is a fallback for the rare files
+    without an `_entity_poly` category; `_struct_asym` is deliberately NOT used
+    because it carries label_asym_id, a different namespace.
+    """
     pdb = norm_id(pdb_id)
+    poly: Dict[str, str] = {}       # entity_id -> raw strand-id value
+    scheme: Dict[str, str] = {}     # auth chain -> entity_id (fallback)
+    single: Dict[str, str] = {}     # non-loop `_entity_poly.*` tag -> value
 
-    loop = block.find(["_entity_poly.entity_id", "_entity_poly.pdbx_strand_id"])
-    if loop:
-        for row in loop:
-            entity = str(row[0]).strip().strip("'\"")
-            if entity in ("", ".", "?"):
+    it = _cif_tokens(path)
+    token = next(it, None)
+    while token is not None:
+        if token == "loop_":
+            tags: List[str] = []
+            token = next(it, None)
+            while token is not None and token.startswith("_"):
+                tags.append(token.lower())
+                token = next(it, None)
+            if not tags:
                 continue
-            entity_stem = norm_id(f"{pdb}_{entity}")
-            for chain in split_strand_ids(row[1]):
-                out[norm_id(f"{pdb}_{chain}")] = entity_stem
+            cols = {tag: i for i, tag in enumerate(tags)}
+            e_i = cols.get("_entity_poly.entity_id")
+            s_i = cols.get("_entity_poly.pdbx_strand_id")
+            p_e = cols.get("_pdbx_poly_seq_scheme.entity_id")
+            p_c = cols.get("_pdbx_poly_seq_scheme.pdb_strand_id")
+            row: List[str] = []
+            while (
+                token is not None
+                and not token.startswith("_")
+                and token != "loop_"
+                and not token.lower().startswith(_CIF_KEYWORDS)
+            ):
+                row.append(token)
+                if len(row) == len(tags):
+                    if e_i is not None and s_i is not None:
+                        poly[row[e_i]] = row[s_i]
+                    elif p_e is not None and p_c is not None:
+                        scheme.setdefault(row[p_c], row[p_e])
+                    row = []
+                token = next(it, None)
+            continue
+        if token.startswith("_"):
+            tag = token.lower()
+            value = next(it, None)
+            if tag.startswith("_entity_poly.") and value is not None:
+                single[tag] = value
+            token = next(it, None)
+            continue
+        token = next(it, None)
 
-    loop = block.find(["_struct_asym.id", "_struct_asym.entity_id"])
-    if loop:
-        for row in loop:
-            chain = str(row[0]).strip().strip("'\"")
-            entity = str(row[1]).strip().strip("'\"")
-            if chain not in ("", ".", "?") and entity not in ("", ".", "?"):
-                out.setdefault(norm_id(f"{pdb}_{chain}"), norm_id(f"{pdb}_{entity}"))
+    entity = single.get("_entity_poly.entity_id")
+    strands = single.get("_entity_poly.pdbx_strand_id")
+    if entity is not None and strands is not None:
+        poly.setdefault(entity, strands)
 
-    loop = block.find(
-        [
-            "_pdbx_poly_seq_scheme.entity_id",
-            "_pdbx_poly_seq_scheme.asym_id",
-            "_pdbx_poly_seq_scheme.pdb_strand_id",
-        ]
-    )
-    if loop:
-        for row in loop:
-            entity = str(row[0]).strip().strip("'\"")
-            if entity in ("", ".", "?"):
+    out: Dict[str, str] = {}
+    for entity_id, strand_value in poly.items():
+        entity_id = entity_id.strip().strip("'\"")
+        if entity_id in ("", ".", "?"):
+            continue
+        entity_stem = norm_id(f"{pdb}_{entity_id}")
+        for chain in split_strand_ids(strand_value):
+            out[norm_id(f"{pdb}_{chain}")] = entity_stem
+    if not out:
+        for chain, entity_id in scheme.items():
+            chain = chain.strip().strip("'\"")
+            entity_id = entity_id.strip().strip("'\"")
+            if chain in ("", ".", "?") or entity_id in ("", ".", "?"):
                 continue
-            entity_stem = norm_id(f"{pdb}_{entity}")
-            for chain in (row[1], row[2]):
-                chain = str(chain).strip().strip("'\"")
-                if chain not in ("", ".", "?"):
-                    out.setdefault(norm_id(f"{pdb}_{chain}"), entity_stem)
+            out[norm_id(f"{pdb}_{chain}")] = norm_id(f"{pdb}_{entity_id}")
     return out
 
 
@@ -156,8 +242,7 @@ def build_chain_to_entity_map(mmcif_dir: Path, stems: Iterable[str]) -> Dict[str
     n_failed = 0
     for pdb, path in tqdm(paths.items(), desc="Parsing mmCIF entity-chain maps"):
         try:
-            block = read_cif_block_header(path)
-            chain2entity.update(entity_chain_map_from_block(pdb, block))
+            chain2entity.update(entity_chain_map_from_file(pdb, path))
         except Exception as exc:  # noqa: BLE001
             n_failed += 1
             if n_failed <= 10:
@@ -165,6 +250,13 @@ def build_chain_to_entity_map(mmcif_dir: Path, stems: Iterable[str]) -> Dict[str
     if n_failed:
         logger.warning("Failed to parse %d mmCIF files", n_failed)
     logger.info("Built chain→entity map for %d chain IDs", len(chain2entity))
+    # Fail loudly instead of silently reporting every chain as `unmapped`: an
+    # empty map means the parser broke, not that the PDB has no entities.
+    if paths and not chain2entity:
+        raise RuntimeError(
+            f"Parsed {len(paths)} mmCIF files but produced an EMPTY chain→entity map. "
+            "Refusing to continue — every chain would be reported as 'unmapped'."
+        )
     return chain2entity
 
 
