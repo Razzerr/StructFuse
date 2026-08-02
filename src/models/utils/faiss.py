@@ -72,14 +72,28 @@ class FaissIndex:
         self.d = self.index.d
 
         # Cluster-based filtering
-        self.row2cluster: List[int] = [m.get("cluster_id", -1) for m in self.meta]
-        # protein_id -> cluster_id  (for looking up query cluster at runtime)
+        self.row2cluster: List[int] = [int(m.get("cluster_id", -1)) for m in self.meta]
+        # chain_id -> cluster_id. This is the authoritative lookup for query
+        # chains. A single PDB entry can contain multiple polymer entities that
+        # belong to different sequence clusters, so a protein-level lookup would
+        # assign the wrong cluster to some chains and leak near-identical
+        # templates through the same-cluster filter.
+        self.chain2cluster: Dict[str, int] = {
+            m["id"]: int(m.get("cluster_id", -1)) for m in self.meta
+        }
+        # protein_id -> set(cluster_id). A single PDB entry can contain
+        # multiple polymer entities from different sequence clusters. The
+        # filtering path uses the union as a conservative fallback whenever an
+        # exact chain/entity cluster is unavailable (-1).
+        self.prot2clusters: Dict[str, Set[int]] = {}
+        # Legacy/debug fallback for callers that still inspect this attribute.
         self.prot2cluster: Dict[str, int] = {}
         for m in self.meta:
             pid = _get_protein_id(m["id"])
-            cid = m.get("cluster_id", -1)
+            cid = int(m.get("cluster_id", -1))
             if cid != -1:
-                self.prot2cluster[pid] = cid
+                self.prot2clusters.setdefault(pid, set()).add(cid)
+                self.prot2cluster.setdefault(pid, cid)
         # cluster_id -> #chains in that cluster. Used to expand search_k when a
         # query sits in a mega-cluster (e.g. ribosomal proteins, ~63k chains):
         # the top-500 FAISS neighbours would all be same-cluster and get
@@ -113,6 +127,35 @@ class FaissIndex:
         self._row2cluster_arr = None
         self._pool_all = None
         self._pool_nonholdout = None
+
+    def _clusters_for_chain(self, chain_id: str, prot_id: Optional[str] = None) -> Set[int]:
+        """Return all known sequence-cluster IDs relevant to a query/template.
+
+        Exact chain-level cluster IDs are preferred, but the protein/PDB-level
+        union is also included as a conservative fallback for multi-entity PDBs
+        and partially unmapped strict metadata. Unknown cluster IDs (-1) are
+        never considered admissible evidence for passing the filter.
+        """
+        pid = prot_id or _get_protein_id(chain_id)
+        clusters = set(self.prot2clusters.get(pid, set()))
+        exact = int(self.chain2cluster.get(chain_id, -1))
+        if exact != -1:
+            clusters.add(exact)
+        return clusters
+
+    def _same_cluster(
+        self,
+        query_clusters: Set[int],
+        tpl_id: str,
+        tpl_cluster: int,
+    ) -> bool:
+        """Conservative same-cluster predicate used by all retrieval paths."""
+        if not query_clusters:
+            return False
+        if int(tpl_cluster) in query_clusters:
+            return True
+        tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
+        return bool(query_clusters.intersection(tpl_clusters))
 
     @staticmethod
     def _mean_pool_esm(model, alphabet, seqs: List[Tuple[str, str]], device: str) -> np.ndarray:
@@ -171,11 +214,11 @@ class FaissIndex:
             List of (template_id, similarity) tuples
         """
         query_prot_id = _get_protein_id(query_name)
-        query_cluster = self.prot2cluster.get(query_prot_id, -1)
+        query_clusters = self._clusters_for_chain(query_name, query_prot_id)
 
         if random_retrieval:
             return self._random_topk(
-                query_name, query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+                query_name, query_prot_id, query_clusters, k, filter_holdout=filter_holdout
             )
 
         # Use precomputed embedding if available (skips ESM2 forward entirely)
@@ -198,7 +241,7 @@ class FaissIndex:
         # ≈ 63k ribosomal chains) where the top-500 FAISS neighbours are all
         # same-cluster and would be filtered out.
         extra_holdout = len(self.holdout_prot_ids) if filter_holdout else 0
-        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        extra_cluster = sum(self.cluster2size.get(cid, 0) for cid in query_clusters)
         search_k = max(k * 3, k + 500 + extra_holdout + extra_cluster)
         search_k = min(search_k, self.index.ntotal)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
@@ -228,11 +271,10 @@ class FaissIndex:
                 continue
 
             # 3. Skip same 30 % seq-id cluster (prevents homolog leakage)
-            if query_cluster != -1:
-                tpl_cluster = self.row2cluster[row]
-                if tpl_cluster == query_cluster:
-                    filtered_cluster.append((tpl_id, float(sim)))
-                    continue
+            tpl_cluster = self.row2cluster[row]
+            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
+                filtered_cluster.append((tpl_id, float(sim)))
+                continue
 
             # 4. min_similarity floor
             if sim < min_similarity:
@@ -244,7 +286,10 @@ class FaissIndex:
                 break
 
         if debug:
-            log.info(f"\n[RETRIEVAL] Query: {query_name} (prot={query_prot_id}, cluster={query_cluster})")
+            log.info(
+                f"\n[RETRIEVAL] Query: {query_name} "
+                f"(prot={query_prot_id}, clusters={sorted(query_clusters)})"
+            )
             log.info(f"  Filtered {len(filtered_same_prot)} same-protein templates")
             for tid, s in filtered_same_prot[:3]:
                 log.info(f"    SAME_PROT: {tid} (sim={s:.4f})")
@@ -285,11 +330,11 @@ class FaissIndex:
             List of (template_id, similarity) tuples (may be shorter than *k*).
         """
         query_prot_id = _get_protein_id(query_name)
-        query_cluster = self.prot2cluster.get(query_prot_id, -1)
+        query_clusters = self._clusters_for_chain(query_name, query_prot_id)
 
         if random_retrieval:
             return self._random_topk(
-                query_name, query_prot_id, query_cluster, k, filter_holdout=filter_holdout
+                query_name, query_prot_id, query_clusters, k, filter_holdout=filter_holdout
             )
 
         if self._embeddings is None or query_name not in self._id2row:
@@ -303,7 +348,7 @@ class FaissIndex:
         # same-cluster and would be filtered out. search_k must at least cover
         # the query's cluster so the first out-of-cluster hit is returned.
         extra_holdout = len(self.holdout_prot_ids) if filter_holdout else 0
-        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        extra_cluster = sum(self.cluster2size.get(cid, 0) for cid in query_clusters)
         search_k = max(k * 3, k + 500 + extra_holdout + extra_cluster)
         search_k = min(search_k, self.index.ntotal)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
@@ -320,10 +365,9 @@ class FaissIndex:
                 continue
             if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
                 continue
-            if query_cluster != -1:
-                tpl_cluster = self.row2cluster[row_idx]
-                if tpl_cluster == query_cluster:
-                    continue
+            tpl_cluster = self.row2cluster[row_idx]
+            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
+                continue
             if sim < min_similarity:
                 continue
             out.append((tpl_id, float(sim)))
@@ -360,7 +404,7 @@ class FaissIndex:
         self,
         query_name: str,
         query_prot_id: str,
-        query_cluster: int,
+        query_clusters: Set[int],
         k: int,
         filter_holdout: bool = True,
     ) -> List[Tuple[str, float]]:
@@ -382,7 +426,9 @@ class FaissIndex:
         def _admissible(row: int) -> bool:
             if self._row2prot[row] == query_prot_id:
                 return False
-            if query_cluster != -1 and int(self._row2cluster_arr[row]) == query_cluster:
+            tpl_id = self.row2id[row]
+            tpl_cluster = int(self._row2cluster_arr[row])
+            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
                 return False
             return True
 

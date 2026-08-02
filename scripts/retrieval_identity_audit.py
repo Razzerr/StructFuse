@@ -74,23 +74,42 @@ class LightweightFaissIndex:
             self.meta = json.load(handle)
         self.row2id = [m["id"] for m in self.meta]
         self.id2npz = {m["id"]: path_from_root(m["npz"]) for m in self.meta}
-        self.id2cluster = {m["id"]: m.get("cluster_id", -1) for m in self.meta}
-        self.row2cluster = [m.get("cluster_id", -1) for m in self.meta]
+        self.id2cluster = {m["id"]: int(m.get("cluster_id", -1)) for m in self.meta}
+        self.row2cluster = [int(m.get("cluster_id", -1)) for m in self.meta]
+        self.chain2cluster = {m["id"]: int(m.get("cluster_id", -1)) for m in self.meta}
         self._id2row = {chain_id: i for i, chain_id in enumerate(self.row2id)}
         self.d = int(self.index.d)
 
+        self.prot2clusters: dict[str, set[int]] = {}
         self.prot2cluster: dict[str, int] = {}
         for m in self.meta:
             prot_id = _get_protein_id(m["id"])
             cid = int(m.get("cluster_id", -1))
             if cid != -1:
-                self.prot2cluster[prot_id] = cid
+                self.prot2clusters.setdefault(prot_id, set()).add(cid)
+                self.prot2cluster.setdefault(prot_id, cid)
 
         self.cluster2size: dict[int, int] = {}
         for cid in self.row2cluster:
             cid = int(cid)
             if cid != -1:
                 self.cluster2size[cid] = self.cluster2size.get(cid, 0) + 1
+
+    def clusters_for_chain(self, chain_id: str, prot_id: str | None = None) -> set[int]:
+        prot_id = prot_id or _get_protein_id(chain_id)
+        clusters = set(self.prot2clusters.get(prot_id, set()))
+        exact = int(self.chain2cluster.get(chain_id, -1))
+        if exact != -1:
+            clusters.add(exact)
+        return clusters
+
+    def same_cluster(self, query_clusters: set[int], tpl_id: str, tpl_cluster: int) -> bool:
+        if not query_clusters:
+            return False
+        if int(tpl_cluster) in query_clusters:
+            return True
+        tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
+        return bool(query_clusters.intersection(tpl_clusters))
 
     def _reconstruct_query(self, query_name: str) -> np.ndarray | None:
         row = self._id2row.get(query_name)
@@ -110,12 +129,12 @@ class LightweightFaissIndex:
         min_similarity: float = 0.0,
     ) -> list[tuple[str, float]]:
         query_prot_id = _get_protein_id(query_name)
-        query_cluster = self.prot2cluster.get(query_prot_id, -1)
+        query_clusters = self.clusters_for_chain(query_name, query_prot_id)
         x = self._reconstruct_query(query_name)
         if x is None:
             return []
 
-        extra_cluster = self.cluster2size.get(query_cluster, 0) if query_cluster != -1 else 0
+        extra_cluster = sum(self.cluster2size.get(cid, 0) for cid in query_clusters)
         search_k = max(k * 3, k + 500 + extra_cluster)
         search_k = min(search_k, self.index.ntotal)
         sims, idxs = self.index.search(x.astype(np.float32), search_k)
@@ -128,7 +147,7 @@ class LightweightFaissIndex:
             tpl_prot_id = _get_protein_id(tpl_id)
             if tpl_prot_id == query_prot_id:
                 continue
-            if query_cluster != -1 and int(self.row2cluster[row_idx]) == query_cluster:
+            if self.same_cluster(query_clusters, tpl_id, int(self.row2cluster[row_idx])):
                 continue
             if sim < min_similarity:
                 continue
@@ -470,7 +489,9 @@ def main() -> None:
             "pdb_id": str(ref.get("pdb_id", pid.split("_")[0])),
             "chain_id": str(ref.get("chain_id", pid.rsplit("_", 1)[-1] if "_" in pid else "")),
             "subset": str(ref.get("subset", "")),
-            "query_cluster_id": faiss_index.prot2cluster.get(_get_protein_id(pid), ""),
+            "query_cluster_id": ";".join(
+                str(cid) for cid in sorted(faiss_index.clusters_for_chain(pid))
+            ),
             "query_len": len(full_seq),
             "crop_start": crop_start,
             "crop_end": crop_end,
