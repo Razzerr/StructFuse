@@ -13,6 +13,8 @@ import csv
 import gzip
 import json
 import logging
+import multiprocessing as mp
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -235,18 +237,45 @@ def entity_chain_map_from_file(pdb_id: str, path: Path) -> Dict[str, str]:
     return out
 
 
-def build_chain_to_entity_map(mmcif_dir: Path, stems: Iterable[str]) -> Dict[str, str]:
+def _entity_map_worker(item: tuple) -> tuple:
+    """Pool worker: parse one mmCIF, never raise (errors travel as a string)."""
+    pdb, path = item
+    try:
+        return entity_chain_map_from_file(pdb, Path(path)), None
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"{path}: {exc}"
+
+
+def build_chain_to_entity_map(
+    mmcif_dir: Path, stems: Iterable[str], workers: int = 1
+) -> Dict[str, str]:
     wanted_pdbs = {norm_id(stem).split("_")[0] for stem in stems}
     paths = index_mmcif_paths(mmcif_dir, wanted_pdbs)
     chain2entity: Dict[str, str] = {}
     n_failed = 0
-    for pdb, path in tqdm(paths.items(), desc="Parsing mmCIF entity-chain maps"):
-        try:
-            chain2entity.update(entity_chain_map_from_file(pdb, path))
-        except Exception as exc:  # noqa: BLE001
-            n_failed += 1
-            if n_failed <= 10:
-                logger.warning("Could not parse %s: %s", path, exc)
+    items = [(pdb, str(path)) for pdb, path in paths.items()]
+    desc = f"Parsing mmCIF entity-chain maps (workers={workers})"
+
+    def _consume(results):
+        nonlocal n_failed
+        for mapping, err in tqdm(results, total=len(items), desc=desc):
+            if err is not None:
+                n_failed += 1
+                if n_failed <= 10:
+                    logger.warning("Could not parse %s", err)
+                continue
+            chain2entity.update(mapping)
+
+    if workers > 1 and len(items) > 1:
+        # Each file is independent and the merge is a plain dict update, so this
+        # is embarrassingly parallel. Processes (not threads) because the CIF
+        # tokeniser is pure Python and GIL-bound.
+        chunksize = max(1, min(256, len(items) // (workers * 8) or 1))
+        with mp.get_context("fork").Pool(workers) as pool:
+            _consume(pool.imap_unordered(_entity_map_worker, items, chunksize=chunksize))
+    else:
+        _consume(_entity_map_worker(item) for item in items)
+
     if n_failed:
         logger.warning("Failed to parse %d mmCIF files", n_failed)
     logger.info("Built chain→entity map for %d chain IDs", len(chain2entity))
@@ -313,6 +342,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-ids-json", default="")
     parser.add_argument("--audit-tsv", default="")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(8, os.cpu_count() or 1),
+        help=(
+            "Parallel mmCIF parser processes. Default is deliberately modest so "
+            "this stays polite on a login node; pass a higher value inside an "
+            "srun/sbatch allocation."
+        ),
+    )
     parser.add_argument("--backup", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -343,8 +382,9 @@ def main() -> None:
         meta = json.load(handle)
     stems = [m["id"] for m in meta]
 
+    workers = max(1, int(args.workers))
     member2cluster = load_cluster_map(cluster_file)
-    chain2entity = build_chain_to_entity_map(mmcif_dir, stems)
+    chain2entity = build_chain_to_entity_map(mmcif_dir, stems, workers=workers)
 
     rows: list[dict[str, object]] = []
     stats: Dict[str, int] = {}
