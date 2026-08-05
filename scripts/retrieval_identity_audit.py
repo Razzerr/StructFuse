@@ -80,15 +80,6 @@ class LightweightFaissIndex:
         self._id2row = {chain_id: i for i, chain_id in enumerate(self.row2id)}
         self.d = int(self.index.d)
 
-        self.prot2clusters: dict[str, set[int]] = {}
-        self.prot2cluster: dict[str, int] = {}
-        for m in self.meta:
-            prot_id = _get_protein_id(m["id"])
-            cid = int(m.get("cluster_id", -1))
-            if cid != -1:
-                self.prot2clusters.setdefault(prot_id, set()).add(cid)
-                self.prot2cluster.setdefault(prot_id, cid)
-
         self.cluster2size: dict[int, int] = {}
         for cid in self.row2cluster:
             cid = int(cid)
@@ -98,28 +89,18 @@ class LightweightFaissIndex:
     def clusters_for_chain(self, chain_id: str, prot_id: str | None = None) -> set[int]:
         """Mirror of ``FaissIndex._clusters_for_chain`` — keep the two in sync."""
         exact = int(self.chain2cluster.get(chain_id, -1))
-        if exact != -1:
-            return {exact}
-        prot_id = prot_id or _get_protein_id(chain_id)
-        return set(self.prot2clusters.get(prot_id, set()))
+        return {exact} if exact != -1 else set()
 
-    def same_cluster(self, query_clusters: set[int], tpl_id: str, tpl_cluster: int) -> bool:
+    def same_cluster(self, query_clusters: set[int], tpl_cluster: int) -> bool:
         """Mirror of ``FaissIndex._same_cluster`` — keep the two in sync.
 
-        True ⇒ blocked. An unknown cluster on either side blocks: an empty
-        ``query_clusters`` admits nothing, and a template whose cluster is -1
-        with no clustered sibling in its PDB entry is refused rather than
-        waved through.
+        True ⇒ blocked. An unknown cluster on either side blocks; it is never
+        read as "different cluster, therefore admissible".
         """
         if not query_clusters:
             return True
         tpl_cluster = int(tpl_cluster)
-        if tpl_cluster != -1:
-            return tpl_cluster in query_clusters
-        tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
-        if not tpl_clusters:
-            return True
-        return bool(query_clusters.intersection(tpl_clusters))
+        return tpl_cluster == -1 or tpl_cluster in query_clusters
 
     def _reconstruct_query(self, query_name: str) -> np.ndarray | None:
         row = self._id2row.get(query_name)
@@ -157,7 +138,7 @@ class LightweightFaissIndex:
             tpl_prot_id = _get_protein_id(tpl_id)
             if tpl_prot_id == query_prot_id:
                 continue
-            if self.same_cluster(query_clusters, tpl_id, int(self.row2cluster[row_idx])):
+            if self.same_cluster(query_clusters, int(self.row2cluster[row_idx])):
                 continue
             if sim < min_similarity:
                 continue

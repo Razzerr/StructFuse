@@ -340,6 +340,36 @@ def read_mmcif_files(input_dir: str, limit: int = 0):
     return mmcif_files
 
 
+def drop_unclustered_entries(mmcif_files: dict, exclude_file: str) -> dict:
+    """Remove PDB entries that have no sequence-cluster assignment at all.
+
+    Cluster membership is what the split guarantee and the same-cluster retrieval
+    filter are both built on, so an entry without one cannot be placed safely in
+    either. Excluding it here — before the first split is drawn — keeps that
+    decision in data curation instead of leaving a runtime special case.
+
+    Partially-clustered entries are kept; their individual unclustered chains are
+    filtered later via `data/no_cluster_ids.txt` (see `data.skip_ids_files`).
+    """
+    if not exclude_file:
+        logger.info("No exclude_entries_file given — keeping every mmCIF entry")
+        return mmcif_files
+    path = Path(exclude_file)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Generate it first with:\n"
+            f"  python scripts/resolve_chain_clusters.py --cluster-file <clusters_30*.txt>\n"
+            f"or pass --exclude_entries_file '' to build splits without the filter."
+        )
+    excluded = {ln.strip().lower() for ln in path.read_text().splitlines() if ln.strip()}
+    kept = {pid: info for pid, info in mmcif_files.items() if pid.lower() not in excluded}
+    logger.info(
+        f"Dropped {len(mmcif_files) - len(kept)} entries with no clustered chain "
+        f"({len(excluded)} listed in {path}); {len(kept)} entries remain"
+    )
+    return kept
+
+
 def __main__():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -355,7 +385,16 @@ def __main__():
     parser.add_argument(
         "--clusters_file",
         type=str,
-        default="data/clusters_30.txt",
+        default="data/clusters_30_05_08_2026.txt",
+    )
+    parser.add_argument(
+        "--exclude_entries_file",
+        type=str,
+        default="data/output_splits/no_cluster_entries.txt",
+        help="PDB entries with no clustered chain at all, from "
+             "scripts/resolve_chain_clusters.py. Dropped before any split is drawn: "
+             "without a cluster they can be placed in neither the split nor the "
+             "same-cluster retrieval filter. Pass '' to disable.",
     )
     parser.add_argument(
         "--casp_csv_path",
@@ -379,6 +418,7 @@ def __main__():
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     mmcif_files = read_mmcif_files(args.input_dir, limit=args.limit_files)
+    mmcif_files = drop_unclustered_entries(mmcif_files, args.exclude_entries_file)
 
     # Temporal splitting
     splitter = TemporalSplitter()

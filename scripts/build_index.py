@@ -5,17 +5,23 @@ Build FAISS retrieval index for template-based contact prediction.
 
 Processes NPZ files from build_contacts.py to create:
 - FAISS index over L2-normalized ESM2 embeddings (for cosine similarity search)
-- Metadata mapping: chain IDs to sequence lengths and NPZ paths
+- Metadata mapping: chain IDs to sequence lengths, NPZ paths and cluster_id
 - Optional: saved embeddings matrix
 
+Cluster IDs are NOT derived here. Run scripts/resolve_chain_clusters.py first; this
+script reads its TSV and refuses to index any chain that resolved to -1, so every
+row of ids.json carries a checkable cluster by construction.
+
 Usage:
+  python scripts/resolve_chain_clusters.py --cluster-file data/clusters_30_05_08_2026.txt
   python scripts/build_index.py \
       --processed_dir data/processed \
       --out_dir data/index_t6 \
       --esm_model esm2_t6_8M_UR50D \
       --batch_size 8 \
       --device cuda \
-      --exclude_ids data/output_splits/all_test_ids.txt
+      --exclude_ids "" \
+      --chain_clusters_tsv data/output_splits/chain_clusters.tsv
 """
 
 import argparse
@@ -85,184 +91,54 @@ def _norm_chain_id(chain_id: str) -> str:
     return str(chain_id).strip().lower()
 
 
-def load_cluster_map(cluster_file: str) -> Dict[str, int]:
-    """Parse clusters_30.txt into an entity/chain ID → cluster_id mapping.
+def load_chain_clusters(tsv_path: str) -> Dict[str, int]:
+    """Read the resolved chain → cluster map produced by `resolve_chain_clusters.py`.
 
-    Each line in the file is one cluster whose members are space-separated
-    entity- or chain-level IDs (e.g. ``12E8_2 15C8_2 ...``). We keep these IDs
-    at entity/chain granularity. Collapsing to PDB/protein ID is incorrect for
-    multi-entity structures because different entities from one PDB can belong
-    to different sequence clusters.
+    Cluster assignment is a data-curation precondition, not something this script
+    derives: `clusters_30*.txt` is keyed by polymer entity while retrieval works on
+    chains, and bridging the two needs mmCIF `_entity_poly.pdbx_strand_id`. That
+    resolution lives in one place so the index, the splits and the retrieval filter
+    cannot disagree about which cluster a chain belongs to.
+
+    Chains that resolved to -1 are returned as such; the caller must exclude them
+    (see `--exclude_ids data/no_cluster_ids.txt`) rather than index them, because an
+    unknown cluster cannot be checked by the same-cluster filter.
 
     Returns:
-        Dict mapping normalized member ID → cluster_id (int ≥ 0).
+        Dict mapping normalized chain ID → cluster_id (-1 when unresolved).
     """
-    member2cluster: Dict[str, int] = {}
-    n_clusters = 0
-    n_duplicate_members = 0
-    with open(cluster_file) as f:
-        for line in f:
-            toks = line.strip().split()
-            if not toks:
-                continue
-            cid = n_clusters
-            for tok in toks:
-                member_id = _norm_chain_id(tok)
-                if member_id in member2cluster and member2cluster[member_id] != cid:
-                    n_duplicate_members += 1
-                    continue
-                member2cluster[member_id] = cid
-            n_clusters += 1
-    logger.info(
-        f"Loaded {n_clusters} clusters covering {len(member2cluster)} entity/chain IDs"
-    )
-    if n_duplicate_members:
-        logger.warning(
-            f"Cluster file contains {n_duplicate_members} duplicate member assignments; "
-            "kept first assignment for exact duplicate member IDs"
+    path = Path(tsv_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Build it first with:\n"
+            f"  python scripts/resolve_chain_clusters.py --cluster-file <clusters_30*.txt>"
         )
-    return member2cluster
-
-
-def _split_strand_ids(value: str) -> List[str]:
-    if value is None:
-        return []
-    raw = str(value).strip().strip("'\"")
-    if raw in ("", ".", "?"):
-        return []
-    return [tok.strip().strip("'\"") for tok in raw.replace(";", ",").split(",") if tok.strip()]
-
-
-def _read_cif_block_header(path: Path, max_lines: int = 120000):
-    import gemmi
-
-    def _read_full():
-        if str(path).endswith(".gz"):
-            with gzip.open(path, "rt", encoding="latin-1", errors="replace") as handle:
-                return gemmi.cif.read_string(handle.read()).sole_block()
-        return gemmi.cif.read(str(path)).sole_block()
-
-    try:
-        open_func = gzip.open if str(path).endswith(".gz") else open
-        lines = []
-        with open_func(path, "rt", encoding="latin-1", errors="replace") as handle:
-            for i, line in enumerate(handle):
-                lines.append(line)
-                if i + 1 >= max_lines:
-                    break
-        return gemmi.cif.read_string("".join(lines)).sole_block()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Could not parse mmCIF header {path}: {exc}; trying full file")
+    id2cluster: Dict[str, int] = {}
+    n_unresolved = 0
+    with path.open() as f:
+        header = f.readline().rstrip("\n").split("\t")
         try:
-            return _read_full()
-        except Exception as full_exc:  # noqa: BLE001
-            logger.warning(f"Could not parse mmCIF file {path}: {full_exc}")
-            return None
-
-
-def _entity_chain_map_from_block(pdb_id: str, block) -> Dict[str, str]:
-    """Return normalized chain stem -> normalized entity stem for one mmCIF."""
-    out: Dict[str, str] = {}
-    pdb = _norm_chain_id(pdb_id)
-
-    # Main PDBx source: entity_id with the comma-separated author strand IDs.
-    loop = block.find(["_entity_poly.entity_id", "_entity_poly.pdbx_strand_id"])
-    if loop:
-        for row in loop:
-            entity = str(row[0]).strip().strip("'\"")
-            entity_stem = _norm_chain_id(f"{pdb}_{entity}")
-            for chain in _split_strand_ids(row[1]):
-                out[_norm_chain_id(f"{pdb}_{chain}")] = entity_stem
-
-    # Fallback/augmentation: label asym IDs.
-    loop = block.find(["_struct_asym.id", "_struct_asym.entity_id"])
-    if loop:
-        for row in loop:
-            chain = str(row[0]).strip().strip("'\"")
-            entity = str(row[1]).strip().strip("'\"")
-            if chain not in ("", ".", "?") and entity not in ("", ".", "?"):
-                out.setdefault(_norm_chain_id(f"{pdb}_{chain}"), _norm_chain_id(f"{pdb}_{entity}"))
-
-    # Fallback/augmentation: auth/PDB strand IDs from sequence scheme.
-    loop = block.find(
-        [
-            "_pdbx_poly_seq_scheme.entity_id",
-            "_pdbx_poly_seq_scheme.asym_id",
-            "_pdbx_poly_seq_scheme.pdb_strand_id",
-        ]
-    )
-    if loop:
-        for row in loop:
-            entity = str(row[0]).strip().strip("'\"")
-            entity_stem = _norm_chain_id(f"{pdb}_{entity}")
-            for chain in (row[1], row[2]):
-                chain = str(chain).strip().strip("'\"")
-                if chain not in ("", ".", "?"):
-                    out.setdefault(_norm_chain_id(f"{pdb}_{chain}"), entity_stem)
-    return out
-
-
-def build_chain_to_entity_map(mmcif_dir: Optional[Path], stems: Set[str]) -> Dict[str, str]:
-    """Build chain stem -> entity stem mapping for the requested index stems."""
-    if mmcif_dir is None:
-        return {}
-    if not mmcif_dir.exists():
-        logger.warning(f"mmCIF directory not found: {mmcif_dir}; exact cluster IDs only")
-        return {}
-
-    wanted_pdbs = {_norm_chain_id(stem).split("_")[0] for stem in stems}
-    paths: Dict[str, Path] = {}
-    for pattern in ("**/*.cif.gz", "**/*.cif"):
-        for path in mmcif_dir.glob(pattern):
-            name = path.name
-            if name.endswith(".cif.gz"):
-                pdb = name[:-7].lower()
-            elif name.endswith(".cif"):
-                pdb = name[:-4].lower()
-            else:
+            i_id, i_cluster = header.index("id"), header.index("cluster_id")
+        except ValueError as exc:  # noqa: BLE001
+            raise ValueError(f"{path} is missing an 'id'/'cluster_id' column: {header}") from exc
+        for line in f:
+            if not line.strip():
                 continue
-            if pdb in wanted_pdbs and pdb not in paths:
-                paths[pdb] = path
-
-    missing_paths = wanted_pdbs.difference(paths)
-    if missing_paths:
+            cols = line.rstrip("\n").split("\t")
+            cid = int(cols[i_cluster])
+            id2cluster[_norm_chain_id(cols[i_id])] = cid
+            if cid == -1:
+                n_unresolved += 1
+    logger.info(
+        f"Loaded cluster assignments for {len(id2cluster)} chains from {path} "
+        f"({len(set(id2cluster.values()) - {-1})} distinct clusters)"
+    )
+    if n_unresolved:
         logger.warning(
-            f"Missing mmCIF files for {len(missing_paths)} PDB IDs; "
-            "their chain-level cluster IDs may remain unknown"
+            f"{n_unresolved} chains have cluster_id=-1 and MUST be excluded from the "
+            "index — pass --exclude_ids data/no_cluster_ids.txt"
         )
-
-    chain2entity: Dict[str, str] = {}
-    for pdb, path in tqdm(paths.items(), desc="Parsing mmCIF entity-chain maps"):
-        block = _read_cif_block_header(path)
-        if block is None:
-            continue
-        chain2entity.update(_entity_chain_map_from_block(pdb, block))
-    logger.info(f"Built chain→entity map for {len(chain2entity)} chain IDs")
-    return chain2entity
-
-
-def _allows_exact_cluster_lookup(norm_stem: str) -> bool:
-    """Avoid treating numeric PDB chain IDs as polymer entity IDs.
-
-    Cluster members such as ``6xmx_1`` usually denote polymer entities, while a
-    processed chain stem with the same suffix can denote author chain ``1``.
-    AlphaFold-style IDs are not PDB chain IDs and keep exact lookup.
-    """
-    if norm_stem.startswith("af_"):
-        return True
-    suffix = norm_stem.rsplit("_", 1)[-1] if "_" in norm_stem else ""
-    return not suffix.isdigit()
-
-
-def resolve_cluster_id(stem: str, member2cluster: Dict[str, int], chain2entity: Dict[str, str]) -> int:
-    """Resolve a processed chain stem to the correct sequence-cluster ID."""
-    norm = _norm_chain_id(stem)
-    entity = chain2entity.get(norm)
-    if entity is not None:
-        return member2cluster.get(entity, -1)
-    if _allows_exact_cluster_lookup(norm) and norm in member2cluster:
-        return member2cluster[norm]
-    return -1
+    return id2cluster
 
 
 def _load_precomputed_rep(
@@ -314,20 +190,29 @@ def build_faiss_index_from_precomputed(
     pc_files = sorted(precomputed_dir.glob("*.npz"))
     logger.info(f"Found {len(pc_files)} precomputed embeddings in {precomputed_dir}")
 
-    # Filter out excluded PDB prefixes and stems without a processed NPZ.
+    # Filter out excluded PDB prefixes, unclustered chains, and stems without a
+    # processed NPZ.
     todo: List[Path] = []
     skipped_excluded = 0
     skipped_no_npz = 0
+    skipped_no_cluster = 0
     for pc_path in pc_files:
         stem = pc_path.stem
         pdb_id = stem.split("_")[0]
         if pdb_id in exclude_ids:
             skipped_excluded += 1
             continue
+        # A chain with no cluster assignment cannot be checked by the
+        # same-cluster retrieval filter, so it must never enter the index.
+        if id2cluster.get(_norm_chain_id(stem), -1) == -1:
+            skipped_no_cluster += 1
+            continue
         if stem not in processed_map:
             skipped_no_npz += 1
             continue
         todo.append(pc_path)
+    if skipped_no_cluster:
+        logger.info(f"  Skipped {skipped_no_cluster} chains with no cluster assignment")
     logger.info(
         f"To embed: {len(todo)} (excluded={skipped_excluded}, no-npz={skipped_no_npz})"
     )
@@ -423,6 +308,7 @@ def build_faiss_index(
     ids_meta = []
     seqs = []
     skipped = 0
+    skipped_no_cluster = 0
 
     for npz_path in tqdm(npz_files, desc="Scanning NPZ files"):
         try:
@@ -431,11 +317,17 @@ def build_faiss_index(
                 skipped += 1
                 continue
 
+            cluster_id = id2cluster.get(_norm_chain_id(npz_path.stem), -1)
+            # See the precomputed path: an unclustered chain is inadmissible as a
+            # template because the same-cluster filter has nothing to compare.
+            if cluster_id == -1:
+                skipped_no_cluster += 1
+                continue
+
             seq, L = load_seq_from_npz(npz_path)
             if L == 0:
                 continue
 
-            cluster_id = id2cluster.get(_norm_chain_id(npz_path.stem), -1)
             ids_meta.append({
                 "id": npz_path.stem,
                 "seq_len": L,
@@ -448,6 +340,8 @@ def build_faiss_index(
 
     if skipped > 0:
         logger.info(f"Excluded {skipped} chains from {len(exclude_ids)} PDB IDs")
+    if skipped_no_cluster > 0:
+        logger.info(f"Skipped {skipped_no_cluster} chains with no cluster assignment")
 
     if len(seqs) == 0:
         raise RuntimeError("No sequences found to embed")
@@ -585,18 +479,12 @@ def main():
         help="Path to text file with PDB IDs to exclude (e.g., test set)",
     )
     ap.add_argument(
-        "--cluster_file",
+        "--chain_clusters_tsv",
         type=str,
-        default="data/clusters_30.txt",
-        help="Path to cluster file (one cluster per line, space-separated chain IDs). "
-             "Used to embed cluster_id in index metadata for homolog filtering.",
-    )
-    ap.add_argument(
-        "--mmcif_dir",
-        type=str,
-        default="data/mmcif",
-        help="Directory with mmCIF files. Used to map processed chain IDs "
-             "(e.g. 6xmx_H) to clustered polymer entity IDs (e.g. 6xmx_2).",
+        default="data/output_splits/chain_clusters.tsv",
+        help="Resolved chain → cluster map from scripts/resolve_chain_clusters.py. "
+             "Chains marked -1 there are dropped from the index: an unknown cluster "
+             "cannot be checked by the same-cluster retrieval filter.",
     )
     ap.add_argument(
         "--precomputed_embeddings_dir",
@@ -630,28 +518,15 @@ def main():
     else:
         logger.info("No exclusion list — building FULL index (val/test included)")
 
-    # Load chain/entity-level cluster mapping.
-    member2cluster: Dict[str, int] = {}
-    chain2entity: Dict[str, str] = {}
-    id2cluster: Dict[str, int] = {}
-    if args.cluster_file:
-        cluster_path = Path(args.cluster_file)
-        if cluster_path.exists():
-            member2cluster = load_cluster_map(str(cluster_path))
-        else:
-            logger.warning(f"Cluster file not found: {cluster_path} — building without cluster IDs")
+    # Chain → cluster map, resolved once by scripts/resolve_chain_clusters.py.
+    # Missing or -1 entries are inadmissible and get dropped by the build paths.
+    id2cluster = load_chain_clusters(args.chain_clusters_tsv)
 
     # Fast path: precomputed embeddings (skip ESM2 entirely)
     if args.precomputed_embeddings_dir:
         precomputed_dir = Path(args.precomputed_embeddings_dir)
         if not precomputed_dir.exists():
             raise RuntimeError(f"Precomputed dir not found: {precomputed_dir}")
-        stems = {p.stem for p in precomputed_dir.glob("*.npz")}
-        chain2entity = build_chain_to_entity_map(Path(args.mmcif_dir), stems)
-        id2cluster = {
-            _norm_chain_id(stem): resolve_cluster_id(stem, member2cluster, chain2entity)
-            for stem in stems
-        }
         build_faiss_index_from_precomputed(
             precomputed_dir=precomputed_dir,
             processed_dir=processed_dir,
@@ -668,12 +543,6 @@ def main():
         raise RuntimeError(f"No NPZ files found in {processed_dir}")
 
     logger.info(f"Found {len(npz_files)} NPZ files in {processed_dir}")
-    stems = {p.stem for p in npz_files}
-    chain2entity = build_chain_to_entity_map(Path(args.mmcif_dir), stems)
-    id2cluster = {
-        _norm_chain_id(stem): resolve_cluster_id(stem, member2cluster, chain2entity)
-        for stem in stems
-    }
 
     # Build FAISS index (legacy path: run ESM2 forward)
     build_faiss_index(

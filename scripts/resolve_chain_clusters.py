@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
-"""Rebuild only the cluster_id fields in an existing FAISS ids.json.
+"""Resolve the authoritative chain -> sequence-cluster map for the whole dataset.
 
-This fixes the multi-entity PDB bug where cluster IDs were assigned after
-collapsing chain/entity IDs to a PDB-level protein ID. The script does not read
-or modify `faiss.index` or `embeddings.npy`; it only rewrites metadata.
+This is a data-curation *precondition*: it runs before the FAISS index exists and
+before the splits are drawn, and everything downstream consumes its output.
+
+RCSB's `clusters_30.txt` (DIAMOND @ 30 % identity, regenerated weekly) is keyed by
+polymer **entity** — `12E8_2` means entry 12E8, entity 2 — while retrieval works on
+**chains**. The bridge is the mmCIF `_entity_poly.pdbx_strand_id` record, which lists
+AUTH chain IDs and therefore matches the chain IDs used everywhere else.
+
+Chains whose entity carries no cluster assignment are reported as `-1` and written to
+a skip list. They are then excluded from the splits, the index and training — an
+inclusion criterion, not a runtime special case. Treating "unknown" as admissible was
+the defect that let identical-sequence templates through the same-cluster filter.
+
+Outputs (see --out-*):
+  chain_clusters.tsv       stem, cluster_id, source, entity_id   (every chain)
+  no_cluster_ids.txt       stems that resolved to -1
+  no_cluster_entries.txt   PDB entries where EVERY chain resolved to -1
+
+Deliberately stdlib + tqdm only: `gemmi` is absent from the experiment env and the
+cluster nodes have no channel access, so the mmCIF reader below is plain Python.
 """
 
 from __future__ import annotations
@@ -15,8 +32,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
-import shutil
-import tempfile
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Set
 
@@ -313,13 +329,37 @@ def resolve_cluster(
     return -1, "unmapped"
 
 
-def write_json_atomic(path: Path, data: object) -> None:
+def load_chain_stems(processed_dir: Path, chain_list: Path | None) -> List[str]:
+    """Every chain the pipeline knows about, in a stable (sorted) order.
+
+    Default source is ``<processed_dir>/npz_lengths.json`` (built by
+    ``scripts/build_npz_lengths.py``), which is the same index ``ContactDataset``
+    uses — so the cluster map covers exactly the chains that can ever be loaded.
+    """
+    if chain_list is not None:
+        stems = [ln.strip() for ln in chain_list.read_text().splitlines() if ln.strip()]
+        logger.info("Loaded %d chain stems from %s", len(stems), chain_list)
+        return sorted(set(stems))
+
+    lengths_path = processed_dir / "npz_lengths.json"
+    if not lengths_path.exists():
+        raise FileNotFoundError(
+            f"{lengths_path} not found. Build it first with:\n"
+            f"  python scripts/build_npz_lengths.py --processed_dir {processed_dir}"
+        )
+    with lengths_path.open() as handle:
+        stems = sorted(json.load(handle).keys())
+    logger.info("Loaded %d chain stems from %s", len(stems), lengths_path)
+    return stems
+
+
+def write_lines(path: Path, lines: Iterable[str]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
-        tmp = Path(handle.name)
-        json.dump(data, handle, indent=2)
-        handle.write("\n")
-    tmp.replace(path)
+    items = list(lines)
+    with path.open("w") as handle:
+        for item in items:
+            handle.write(f"{item}\n")
+    return len(items)
 
 
 def write_audit(path: Path, rows: list[dict[str, object]]) -> None:
@@ -334,14 +374,23 @@ def write_audit(path: Path, rows: list[dict[str, object]]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--index-dir", required=True)
-    parser.add_argument("--cluster-file", default="data/clusters_30.txt")
+    parser.add_argument("--processed-dir", default="data/processed")
+    parser.add_argument(
+        "--chain-list",
+        default="",
+        help="Optional explicit file of chain stems (one per line); "
+        "overrides <processed-dir>/npz_lengths.json.",
+    )
+    parser.add_argument("--cluster-file", default="data/clusters_30_05_08_2026.txt")
     parser.add_argument(
         "--mmcif-dir",
         default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2025/mmCIF",
     )
-    parser.add_argument("--out-ids-json", default="")
-    parser.add_argument("--audit-tsv", default="")
+    parser.add_argument("--out-tsv", default="data/output_splits/chain_clusters.tsv")
+    parser.add_argument("--out-no-cluster-ids", default="data/no_cluster_ids.txt")
+    parser.add_argument(
+        "--out-no-cluster-entries", default="data/output_splits/no_cluster_entries.txt"
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -352,24 +401,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "srun/sbatch allocation."
         ),
     )
-    parser.add_argument("--backup", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the resolution statistics without writing any output file.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    index_dir = Path(args.index_dir)
-    ids_path = index_dir / "ids.json"
-    out_path = Path(args.out_ids_json) if args.out_ids_json else ids_path
-    audit_path = (
-        Path(args.audit_tsv)
-        if args.audit_tsv
-        else index_dir / "ids_cluster_metadata_rebuild_audit.tsv"
-    )
-
-    if not ids_path.exists():
-        raise FileNotFoundError(ids_path)
+    processed_dir = Path(args.processed_dir)
     cluster_file = Path(args.cluster_file)
     mmcif_dir = Path(args.mmcif_dir)
     if not cluster_file.exists():
@@ -377,57 +419,60 @@ def main() -> None:
     if not mmcif_dir.exists():
         raise FileNotFoundError(mmcif_dir)
 
-    logger.info("Loading %s", ids_path)
-    with ids_path.open() as handle:
-        meta = json.load(handle)
-    stems = [m["id"] for m in meta]
-
+    stems = load_chain_stems(processed_dir, Path(args.chain_list) if args.chain_list else None)
     workers = max(1, int(args.workers))
     member2cluster = load_cluster_map(cluster_file)
     chain2entity = build_chain_to_entity_map(mmcif_dir, stems, workers=workers)
 
     rows: list[dict[str, object]] = []
     stats: Dict[str, int] = {}
-    changed = 0
-    for m in meta:
-        old = int(m.get("cluster_id", -1))
-        new, source = resolve_cluster(m["id"], member2cluster, chain2entity)
-        if old != new:
-            changed += 1
+    no_cluster: List[str] = []
+    per_entry_total: Dict[str, int] = defaultdict(int)
+    per_entry_unclustered: Dict[str, int] = defaultdict(int)
+
+    for stem in stems:
+        cluster_id, source = resolve_cluster(stem, member2cluster, chain2entity)
         stats[source] = stats.get(source, 0) + 1
+        entry = norm_id(stem).split("_")[0]
+        per_entry_total[entry] += 1
+        if cluster_id == -1:
+            no_cluster.append(stem)
+            per_entry_unclustered[entry] += 1
         rows.append(
             {
-                "id": m["id"],
-                "old_cluster_id": old,
-                "new_cluster_id": new,
+                "id": stem,
+                "cluster_id": cluster_id,
                 "source": source,
-                "entity_id": chain2entity.get(norm_id(m["id"]), ""),
-                "changed": int(old != new),
+                "entity_id": chain2entity.get(norm_id(stem), ""),
             }
         )
-        m["cluster_id"] = int(new)
 
-    logger.info("Entries: %d", len(meta))
-    logger.info("Changed cluster_id: %d", changed)
+    # An entry is dropped from the splits only when NONE of its chains is
+    # clustered; a partially-clustered entry keeps its usable chains.
+    dead_entries = sorted(
+        entry for entry, n in per_entry_unclustered.items() if n == per_entry_total[entry]
+    )
+
+    logger.info("Chains: %d", len(stems))
     logger.info("Assignment sources: %s", stats)
-
-    write_audit(audit_path, rows)
-    logger.info("Wrote audit TSV: %s", audit_path)
+    logger.info(
+        "Unclustered chains: %d (%.3f%%) across %d entries; %d entries fully unclustered",
+        len(no_cluster),
+        100.0 * len(no_cluster) / max(len(stems), 1),
+        len({norm_id(s).split("_")[0] for s in no_cluster}),
+        len(dead_entries),
+    )
 
     if args.dry_run:
-        logger.info("Dry run: not writing ids.json")
+        logger.info("Dry run: no files written")
         return
 
-    if args.backup and out_path == ids_path:
-        backup_path = ids_path.with_suffix(".json.pre_chain_entity_fix.bak")
-        if not backup_path.exists():
-            shutil.copy2(ids_path, backup_path)
-            logger.info("Wrote backup: %s", backup_path)
-        else:
-            logger.info("Backup already exists: %s", backup_path)
-
-    write_json_atomic(out_path, meta)
-    logger.info("Wrote rebuilt ids.json: %s", out_path)
+    write_audit(Path(args.out_tsv), rows)
+    logger.info("Wrote %s (%d rows)", args.out_tsv, len(rows))
+    n = write_lines(Path(args.out_no_cluster_ids), no_cluster)
+    logger.info("Wrote %s (%d chains)", args.out_no_cluster_ids, n)
+    n = write_lines(Path(args.out_no_cluster_entries), dead_entries)
+    logger.info("Wrote %s (%d entries)", args.out_no_cluster_entries, n)
 
 
 if __name__ == "__main__":

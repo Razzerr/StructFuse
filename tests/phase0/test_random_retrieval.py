@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import types
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -17,7 +18,6 @@ except Exception:  # noqa: BLE001
     sys.modules["faiss"] = types.ModuleType("faiss")
 
 from src.models.utils.faiss import FaissIndex, _get_protein_id  # noqa: E402
-from scripts.rebuild_index_cluster_metadata import resolve_cluster  # noqa: E402
 
 
 # A cluster id no fake index ever assigns, so a query carrying it collides with
@@ -35,15 +35,6 @@ def _make_index(n, random_seed=0, clusters=None, holdout=None):
     idx.chain2cluster = {
         chain_id: int(idx.row2cluster[i]) for i, chain_id in enumerate(idx.row2id)
     }
-    idx.prot2clusters = {}
-    idx.prot2cluster = {}
-    for i, chain_id in enumerate(idx.row2id):
-        cid = int(idx.row2cluster[i])
-        if cid == -1:
-            continue
-        prot_id = _get_protein_id(chain_id)
-        idx.prot2clusters.setdefault(prot_id, set()).add(cid)
-        idx.prot2cluster.setdefault(prot_id, cid)
     idx.holdout_prot_ids = set(holdout or [])
     idx.random_seed = random_seed
     idx._row2prot = None
@@ -116,16 +107,8 @@ def test_holdout_pool_excludes_holdout_proteins():
         assert _get_protein_id(rid) not in holdout, "holdout protein leaked"
 
 
-def test_cluster_sets_filter_unknown_template_chain_by_entry_union():
-    idx = FaissIndex.__new__(FaissIndex)
-    idx.chain2cluster = {"query_A": -1, "tpl_H": -1}
-    idx.prot2clusters = {"query": {737}, "tpl": {737}}
-    assert idx._clusters_for_chain("query_A", "query") == {737}
-    assert idx._same_cluster({737}, "tpl_H", -1), "template entry-level cluster fallback failed"
-
-
 def test_known_chain_cluster_does_not_block_sibling_entities():
-    """A chain with a known cluster is filtered on THAT cluster alone.
+    """A chain is filtered on its OWN cluster, never its PDB entry's union.
 
     Unioning sibling-entity clusters would block legitimate remote homologs of
     unrelated chains that merely share a crystal (and would inflate search_k).
@@ -133,30 +116,25 @@ def test_known_chain_cluster_does_not_block_sibling_entities():
     idx = FaissIndex.__new__(FaissIndex)
     # PDB `q` holds two entities: chain A in cluster 737, chain B in cluster 999.
     idx.chain2cluster = {"q_A": 737, "q_B": 999, "t_X": 999, "t_Y": 737}
-    idx.prot2clusters = {"q": {737, 999}, "t": {737, 999}}
 
     assert idx._clusters_for_chain("q_A", "q") == {737}, "sibling entity leaked into query set"
-    assert idx._same_cluster({737}, "t_Y", 737), "true same-cluster template not blocked"
-    assert not idx._same_cluster({737}, "t_X", 999), "sibling-entity cluster wrongly blocked"
+    assert idx._same_cluster({737}, 737), "true same-cluster template not blocked"
+    assert not idx._same_cluster({737}, 999), "sibling-entity cluster wrongly blocked"
 
 
-def test_unknown_cluster_blocks_instead_of_admitting():
-    """Unknown cluster on EITHER side must block (2026-08-05).
+def test_unknown_cluster_blocks_on_either_side():
+    """Backstop for query chains outside the index; -1 never means "admissible".
 
-    RCSB omits some entries/entities from `clusters_30.txt`. The old predicate
-    fell through to `set().intersection(...)` → falsy → admitted, which let
-    identical-sequence templates from unclustered entries (e.g. 8AIQ, 8ZFJ)
-    through: 3.29 % of best-retrieved templates, median identity 1.000.
+    Indexed chains can no longer be unclustered (FaissIndex.__init__ rejects
+    them), but a query chain absent from the metadata still resolves to an empty
+    set, and that must block rather than wave everything through.
     """
     idx = FaissIndex.__new__(FaissIndex)
-    idx.chain2cluster = {"q_A": 737, "ghost_B": -1}
-    # `ghost` is absent from clusters_30.txt entirely — no clustered sibling.
-    idx.prot2clusters = {"q": {737}}
+    idx.chain2cluster = {"q_A": 737}
 
-    assert idx._same_cluster({737}, "ghost_B", -1), "unclustered template was admitted"
-    # A query whose own cluster is unknown cannot prove anything is admissible.
     assert idx._clusters_for_chain("ghost_B", "ghost") == set()
-    assert idx._same_cluster(set(), "q_A", 737), "unknown query admitted a template"
+    assert idx._same_cluster(set(), 737), "unknown query admitted a template"
+    assert idx._same_cluster({737}, -1), "unclustered template was admitted"
 
 
 def test_unknown_cluster_template_pool_is_empty_end_to_end():
@@ -166,21 +144,36 @@ def test_unknown_cluster_template_pool_is_empty_end_to_end():
     assert out == [], f"unclustered pool must yield no templates, got {len(out)}"
 
 
-def test_cluster_metadata_resolution_prefers_mmcif_entity_over_exact_id():
-    member2cluster = {
-        "6xmx_1": 16149,
-        "6xmx_2": 737,
-        "af_test_1": 9,
-    }
-    assert resolve_cluster("6xmx_H", member2cluster, {"6xmx_h": "6xmx_2"}) == (
-        737,
-        "entity",
-    )
-    assert resolve_cluster("6xmx_1", member2cluster, {}) == (
-        -1,
-        "numeric_exact_suppressed",
-    )
-    assert resolve_cluster("AF_TEST_1", member2cluster, {}) == (9, "exact")
+def test_faiss_index_rejects_ids_json_with_unclustered_rows():
+    """An index built by an older/broken pipeline must fail loudly at load.
+
+    Silently degrading is how 3.29 % of best-retrieved templates ended up
+    carrying cluster -1 at a median sequence identity of 1.000.
+    """
+    import json
+    import tempfile
+
+    faiss_mod = sys.modules["faiss"]
+    original = getattr(faiss_mod, "read_index", None)
+    faiss_mod.read_index = lambda _path: types.SimpleNamespace(d=8, ntotal=2)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "ids.json").write_text(json.dumps([
+                {"id": "1abc_A", "npz": "1abc_A.npz", "cluster_id": 7},
+                {"id": "2def_B", "npz": "2def_B.npz", "cluster_id": -1},
+            ]))
+            try:
+                FaissIndex(tmp)
+            except ValueError as exc:
+                assert "cluster_id=-1" in str(exc), exc
+                assert "2def_B" in str(exc), exc
+            else:
+                raise AssertionError("index with an unclustered row was accepted")
+    finally:
+        if original is None:
+            del faiss_mod.read_index
+        else:
+            faiss_mod.read_index = original
 
 
 def _naive_scan_topk(idx, query_prot_id, query_cluster, k):

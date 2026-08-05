@@ -118,7 +118,7 @@ def test_audit_manifest_fingerprints_index_splits_and_checkpoint():
                 "test_ids": str(test),
                 "splits_json_path": None,
                 "holdout_id_files": [str(holdout)],
-                "skip_ids_file": str(skip),
+                "skip_ids_files": [str(skip)],
                 "index_dir": str(index_dir),
                 "topk": 4,
                 "random_retrieval": False,
@@ -150,7 +150,7 @@ def test_audit_manifest_fingerprints_index_splits_and_checkpoint():
         assert splits["validation"]["fingerprint_type"] == "sha256"
         assert splits["test"]["fingerprint_type"] == "sha256"
         assert splits["holdout_filters"][0]["fingerprint"]
-        assert splits["skip_ids"]["fingerprint"]
+        assert splits["skip_ids"][0]["fingerprint"]
 
 
 def _run_all():

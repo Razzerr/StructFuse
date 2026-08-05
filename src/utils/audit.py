@@ -183,6 +183,7 @@ def _split_identities(cfg: DictConfig) -> dict[str, Any]:
     split_dir = Path(_safe_select(cfg, "data.split_dir", "data/output_splits"))
     train_path = _safe_select(cfg, "data.train_ids") or split_dir / "all_train_ids.txt"
     holdout_paths = _plain_list(_safe_select(cfg, "data.holdout_id_files"))
+    skip_paths = _plain_list(_safe_select(cfg, "data.skip_ids_files"))
     return {
         "train": _file_identity(train_path, force_full_hash=True),
         "validation": _file_identity(
@@ -197,9 +198,9 @@ def _split_identities(cfg: DictConfig) -> dict[str, Any]:
         "holdout_filters": [
             _file_identity(path, force_full_hash=True) for path in holdout_paths
         ],
-        "skip_ids": _file_identity(
-            _safe_select(cfg, "data.skip_ids_file"), force_full_hash=True
-        ),
+        "skip_ids": [
+            _file_identity(path, force_full_hash=True) for path in skip_paths
+        ],
     }
 
 
@@ -219,6 +220,9 @@ def dump_audit_manifest(
     holdout_files = _safe_select(cfg, "data.holdout_id_files")
     if holdout_files is not None:
         holdout_files = _plain_list(holdout_files)
+    skip_files = _safe_select(cfg, "data.skip_ids_files")
+    if skip_files is not None:
+        skip_files = _plain_list(skip_files)
 
     # Convert fusion_feature_groups (DictConfig → dict) for JSON serialization.
     feature_groups = _safe_select(cfg, "model.fusion_feature_groups")
@@ -253,7 +257,7 @@ def dump_audit_manifest(
             "min_template_similarity": _safe_select(cfg, "data.min_template_similarity"),
             "holdout_id_files": holdout_files,
             "esm_embeddings_dir": _safe_select(cfg, "data.esm_embeddings_dir"),
-            "skip_ids_file": _safe_select(cfg, "data.skip_ids_file"),
+            "skip_ids_files": skip_files,
             # filter_holdout policy is hard-wired in DataModule:
             # train collate uses True, val/test use False (see contact_lit_datamodule.py).
             "filter_holdout_train": True,

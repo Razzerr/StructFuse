@@ -73,27 +73,30 @@ class FaissIndex:
 
         # Cluster-based filtering
         self.row2cluster: List[int] = [int(m.get("cluster_id", -1)) for m in self.meta]
-        # chain_id -> cluster_id. This is the authoritative lookup for query
-        # chains. A single PDB entry can contain multiple polymer entities that
-        # belong to different sequence clusters, so a protein-level lookup would
-        # assign the wrong cluster to some chains and leak near-identical
-        # templates through the same-cluster filter.
+        # chain_id -> cluster_id. This is the authoritative (and only) lookup. A
+        # single PDB entry can contain multiple polymer entities belonging to
+        # different sequence clusters, so a protein-level lookup would assign the
+        # wrong cluster to some chains and leak near-identical templates through
+        # the same-cluster filter.
         self.chain2cluster: Dict[str, int] = {
             m["id"]: int(m.get("cluster_id", -1)) for m in self.meta
         }
-        # protein_id -> set(cluster_id). A single PDB entry can contain
-        # multiple polymer entities from different sequence clusters. The
-        # filtering path uses the union as a conservative fallback whenever an
-        # exact chain/entity cluster is unavailable (-1).
-        self.prot2clusters: Dict[str, Set[int]] = {}
-        # Legacy/debug fallback for callers that still inspect this attribute.
-        self.prot2cluster: Dict[str, int] = {}
-        for m in self.meta:
-            pid = _get_protein_id(m["id"])
-            cid = int(m.get("cluster_id", -1))
-            if cid != -1:
-                self.prot2clusters.setdefault(pid, set()).add(cid)
-                self.prot2cluster.setdefault(pid, cid)
+        # Every indexed chain must carry a real cluster. scripts/build_index.py
+        # drops unresolved chains (see scripts/resolve_chain_clusters.py), so a -1
+        # here means the index was built by an older or broken pipeline — and an
+        # unknown cluster is unfilterable in both directions, which is exactly how
+        # identical-sequence templates used to slip past. Fail loudly.
+        n_unclustered = sum(1 for cid in self.row2cluster if cid == -1)
+        if n_unclustered:
+            examples = [
+                m["id"] for m, cid in zip(self.meta, self.row2cluster) if cid == -1
+            ][:5]
+            raise ValueError(
+                f"{index_dir}/ids.json has {n_unclustered} chains with cluster_id=-1 "
+                f"(e.g. {examples}). Rebuild the index after running "
+                f"scripts/resolve_chain_clusters.py; unclustered chains must be "
+                f"excluded, not indexed."
+            )
         # cluster_id -> #chains in that cluster. Used to expand search_k when a
         # query sits in a mega-cluster (e.g. ribosomal proteins, ~63k chains):
         # the top-500 FAISS neighbours would all be same-cluster and get
@@ -131,56 +134,40 @@ class FaissIndex:
     def _clusters_for_chain(self, chain_id: str, prot_id: Optional[str] = None) -> Set[int]:
         """Return the sequence-cluster ID(s) to filter a query/template against.
 
-        The chain-level ID from strict `ids.json` metadata is authoritative and
-        is used alone whenever it is known (99.6 % of chains). The PDB-level
-        union of sibling entities is a fallback used ONLY when the chain-level
-        ID is missing (-1) — using it unconditionally would block legitimate
-        remote homologs of unrelated chains that merely share a crystal, and
-        would inflate the `search_k` over-fetch below.
+        The chain-level ID is authoritative and is used alone. Unioning the
+        sibling entities of the same PDB entry would block legitimate remote
+        homologs of unrelated chains that merely share a crystal, and would
+        inflate the `search_k` over-fetch below.
 
         An EMPTY return means "cluster genuinely unknown", not "no restriction":
-        `_same_cluster` blocks every template for such a query.
+        `_same_cluster` blocks every template for such a query. For an indexed
+        chain this cannot happen (`__init__` rejects -1); it can still happen for
+        a *query* chain that is absent from the index metadata.
         """
         exact = int(self.chain2cluster.get(chain_id, -1))
-        if exact != -1:
-            return {exact}
-        pid = prot_id or _get_protein_id(chain_id)
-        return set(self.prot2clusters.get(pid, set()))
+        return {exact} if exact != -1 else set()
 
     def _same_cluster(
         self,
         query_clusters: Set[int],
-        tpl_id: str,
         tpl_cluster: int,
     ) -> bool:
         """Same-cluster predicate shared by all retrieval paths. True ⇒ blocked.
 
         An unknown cluster on either side is never treated as evidence that the
-        pair is admissible — it BLOCKS. Concretely:
-
-        * empty ``query_clusters`` — the query's own chain cluster is -1 and its
-          PDB has no clustered sibling either, so no template can be *shown* to
-          be out-of-cluster. Nothing is admissible.
-        * template cluster -1 — fall back to the template's PDB-level union; if
-          that union is empty too (the entry is absent from ``clusters_30.txt``
-          entirely), block.
-
-        The empty-union case used to fall through to ``set().intersection(...)``
-        → falsy → admitted, which is the exact opposite of the stated policy. It
-        was the mechanism behind 3.29 % of best-retrieved templates carrying
-        cluster -1 at a median sequence identity of 1.000 (2026-08-05 audit):
-        RCSB omits some entries/entities from the 30 % cluster file, and those
-        omissions were being read as "different cluster, therefore fine".
+        pair is admissible — it BLOCKS. Reading "unknown" as "different cluster,
+        therefore fine" was the defect behind 3.29 % of best-retrieved templates
+        carrying cluster -1 at a median sequence identity of 1.000 (2026-08-05
+        audit). Unclustered chains are now excluded at index-build time, so the
+        -1 branches here are a backstop for query chains outside the index rather
+        than a routine path.
         """
         if not query_clusters:
             return True
         tpl_cluster = int(tpl_cluster)
-        if tpl_cluster != -1:
-            return tpl_cluster in query_clusters
-        tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
-        if not tpl_clusters:
+        if tpl_cluster == -1:
             return True
-        return bool(query_clusters.intersection(tpl_clusters))
+        return tpl_cluster in query_clusters
 
     @staticmethod
     def _mean_pool_esm(model, alphabet, seqs: List[Tuple[str, str]], device: str) -> np.ndarray:
@@ -297,7 +284,7 @@ class FaissIndex:
 
             # 3. Skip same 30 % seq-id cluster (prevents homolog leakage)
             tpl_cluster = self.row2cluster[row]
-            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
+            if self._same_cluster(query_clusters, tpl_cluster):
                 filtered_cluster.append((tpl_id, float(sim)))
                 continue
 
@@ -391,7 +378,7 @@ class FaissIndex:
             if filter_holdout and tpl_prot_id in self.holdout_prot_ids:
                 continue
             tpl_cluster = self.row2cluster[row_idx]
-            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
+            if self._same_cluster(query_clusters, tpl_cluster):
                 continue
             if sim < min_similarity:
                 continue
@@ -453,7 +440,7 @@ class FaissIndex:
                 return False
             tpl_id = self.row2id[row]
             tpl_cluster = int(self._row2cluster_arr[row])
-            if self._same_cluster(query_clusters, tpl_id, tpl_cluster):
+            if self._same_cluster(query_clusters, tpl_cluster):
                 return False
             return True
 
