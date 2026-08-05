@@ -7,7 +7,7 @@ ESM2 forward pass entirely (~5-10x speedup).
 
 Usage:
     python scripts/precompute_esm2_embeddings.py \
-        --data_root data/processed \
+        --data_root data/processed_2026 \
         --output_dir data/esm2_embeddings \
         --model_name esm2_t33_650M_UR50D \
         --batch_size 4 \
@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 def main():
     parser = argparse.ArgumentParser(description="Pre-compute ESM2 embeddings")
-    parser.add_argument("--data_root", type=str, default="data/processed",
+    parser.add_argument("--data_root", type=str, default="data/processed_2026",
                         help="Directory with per-chain NPZ files")
     parser.add_argument("--output_dir", type=str, default="data/esm2_embeddings",
                         help="Output directory for embeddings")

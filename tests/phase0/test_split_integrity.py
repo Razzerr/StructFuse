@@ -150,7 +150,7 @@ def test_no_cluster_ids_must_match_the_resolver_output():
 
 def test_real_artifacts_when_present():
     """Opportunistic: on the server this runs against the actual pipeline output."""
-    tsv = ROOT / "data" / "output_splits" / "chain_clusters.tsv"
+    tsv = ROOT / "data" / "output_splits_2026" / "chain_clusters.tsv"
     if not tsv.exists():
         print("       (skipped — no real artifacts in this checkout)")
         return

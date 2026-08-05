@@ -1,7 +1,7 @@
 _target_: src.models.template_only_lit_module.TemplateOnlyLitModule
 
 # Retrieval settings
-index_dir: data/index_t6
+index_dir: ${paths.index_t6}
 topk: 4
 min_seq_sep: ${data.min_seq_sep}
 

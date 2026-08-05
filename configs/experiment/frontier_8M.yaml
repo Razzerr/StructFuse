@@ -12,7 +12,7 @@ seed: 42
 
 data:
   batch_size: 12          # 8M has more headroom than 650M
-  index_dir: data/index_t6
-  esm_embeddings_dir: data/precomputed/esm_t6_8M
+  index_dir: ${paths.index_t6}
+  esm_embeddings_dir: ${paths.esm_t6}
 
 # See frontier.yaml note on `trainer:` block — use CLI `+trainer.foo=bar`.

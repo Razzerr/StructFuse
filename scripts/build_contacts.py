@@ -15,7 +15,7 @@ Output: one NPZ per chain: {pdbid}_{chain}.npz
 Usage:
   python scripts/build_contacts.py \
     --mmcif_dir data/mmcif \
-    --out_dir data/processed \
+    --out_dir data/processed_2026 \
     --cutoff 8.0 \
     --min_sep 6 \
     --min_len 20 \
@@ -112,7 +112,7 @@ def main():
     ap.add_argument(
         "--out_dir",
         type=str,
-        default="data/processed",
+        default="data/processed_2026",
         help="Directory to write NPZ files.",
     )
     ap.add_argument(

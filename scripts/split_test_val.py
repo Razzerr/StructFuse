@@ -17,13 +17,13 @@ SEED = 42
 VAL_FRACTION = 0.4
 
 ROOT = Path(__file__).resolve().parent.parent
-SPLITS_JSON = ROOT / "data" / "output_splits" / "mmcif_final_splits.json"
-TEST_IDS_FILE = ROOT / "data" / "output_splits" / "all_test_ids.txt"
+SPLITS_JSON = ROOT / "data" / "output_splits_2026" / "mmcif_final_splits.json"
+TEST_IDS_FILE = ROOT / "data" / "output_splits_2026" / "all_test_ids.txt"
 # Must be the same cluster file prepare_data_splits.py used; entries with no
 # clustered chain are already absent from mmcif_final_splits.json, so no extra
 # exclusion is needed here.
-CLUSTERS_FILE = ROOT / "data" / "clusters_30_05_08_2026.txt"
-OUT_DIR = ROOT / "data" / "output_splits"
+CLUSTERS_FILE = ROOT / "data" / "clusters_30_snapshot2025.txt"
+OUT_DIR = ROOT / "data" / "output_splits_2026"
 
 
 # ── Union-Find ──────────────────────────────────────────────────────────────

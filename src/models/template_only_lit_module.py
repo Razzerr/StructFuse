@@ -107,7 +107,7 @@ class TemplateOnlyLitModule(LightningModule):
     def __init__(
         self,
         # Retrieval settings
-        index_dir: str = "data/index_t6",
+        index_dir: str = "data/index_t6_2026",
         topk: int = 4,
         min_seq_sep: int = 6,
         # Head settings

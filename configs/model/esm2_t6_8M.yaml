@@ -7,7 +7,7 @@ _target_: src.models.contact_lit_module.ContactLitModule
 # retrieval params — passed-through to internal _prior_builder fallback
 # (used by TemplateOnlyLitModule.forward; main path uses DataModule).
 # Override via data.topk / data.random_retrieval for paper runs.
-index_dir: data/index_t6
+index_dir: ${paths.index_t6}
 topk: 4
 only_positive_transfer: false
 min_seq_sep: ${data.min_seq_sep}

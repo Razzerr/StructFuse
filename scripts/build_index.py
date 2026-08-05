@@ -13,15 +13,15 @@ script reads its TSV and refuses to index any chain that resolved to -1, so ever
 row of ids.json carries a checkable cluster by construction.
 
 Usage:
-  python scripts/resolve_chain_clusters.py --cluster-file data/clusters_30_05_08_2026.txt
+  python scripts/resolve_chain_clusters.py --cluster-file data/clusters_30_snapshot2025.txt
   python scripts/build_index.py \
-      --processed_dir data/processed \
-      --out_dir data/index_t6 \
+      --processed_dir data/processed_2026 \
+      --out_dir data/index_t6_2026 \
       --esm_model esm2_t6_8M_UR50D \
       --batch_size 8 \
       --device cuda \
       --exclude_ids "" \
-      --chain_clusters_tsv data/output_splits/chain_clusters.tsv
+      --chain_clusters_tsv data/output_splits_2026/chain_clusters.tsv
 """
 
 import argparse
@@ -438,7 +438,7 @@ def main():
     ap.add_argument(
         "--processed_dir",
         type=str,
-        default="data/processed",
+        default="data/processed_2026",
         help="Directory with NPZ files from build_contacts.py",
     )
     ap.add_argument(
@@ -475,13 +475,13 @@ def main():
     ap.add_argument(
         "--exclude_ids",
         type=str,
-        default="data/output_splits/all_test_ids.txt",
+        default="data/output_splits_2026/all_test_ids.txt",
         help="Path to text file with PDB IDs to exclude (e.g., test set)",
     )
     ap.add_argument(
         "--chain_clusters_tsv",
         type=str,
-        default="data/output_splits/chain_clusters.tsv",
+        default="data/output_splits_2026/chain_clusters.tsv",
         help="Resolved chain → cluster map from scripts/resolve_chain_clusters.py. "
              "Chains marked -1 there are dropped from the index: an unknown cluster "
              "cannot be checked by the same-cluster retrieval filter.",

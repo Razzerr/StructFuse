@@ -375,22 +375,22 @@ def __main__():
     parser.add_argument(
         "--input_dir",
         type=str,
-        default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2025/mmCIF",
+        default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2026/mmCIF",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="data/output_splits",
+        default="data/output_splits_2026",
     )
     parser.add_argument(
         "--clusters_file",
         type=str,
-        default="data/clusters_30_05_08_2026.txt",
+        default="data/clusters_30_snapshot2025.txt",
     )
     parser.add_argument(
         "--exclude_entries_file",
         type=str,
-        default="data/output_splits/no_cluster_entries.txt",
+        default="data/output_splits_2026/no_cluster_entries.txt",
         help="PDB entries with no clustered chain at all, from "
              "scripts/resolve_chain_clusters.py. Dropped before any split is drawn: "
              "without a cluster they can be placed in neither the split nor the "

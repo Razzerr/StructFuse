@@ -16,6 +16,6 @@ model:
 
 data:
   batch_size: 8
-  index_dir: data/index_t33
-  esm_embeddings_dir: data/precomputed/esm_t33_650M
+  index_dir: ${paths.index_t33}
+  esm_embeddings_dir: ${paths.esm_t33}
   compute_dist_bins: true

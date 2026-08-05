@@ -387,7 +387,7 @@ class ContactDataset(Dataset):
     def __init__(
         self,
         id_list_file: Path,
-        root: Path = Path("data/processed"),
+        root: Path = Path("data/processed_2026"),
         min_len: int = 1,
         splits_json_path: Optional[Path] = None,
         exclude_subsets: Optional[List[str]] = None,

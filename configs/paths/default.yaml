@@ -5,8 +5,22 @@ root_dir: ${oc.env:PROJECT_ROOT}
 
 # path to data directory
 data_dir: ${paths.root_dir}/data/
-processed_dir: ${paths.data_dir}/processed
-split_dir: ${paths.data_dir}/output_splits
+
+# Generation of the derived data artifacts. Everything downstream of the mmCIF
+# snapshot — contact NPZs, precomputed embeddings, splits, FAISS indexes — is
+# tagged with it, so a run's audit manifest records which data build produced it
+# and two generations can coexist on disk during a migration. Override with
+# `paths.data_version=2025` to reproduce anything built before 2026-08.
+data_version: "2026"
+
+processed_dir: ${paths.data_dir}/processed_${paths.data_version}
+split_dir: ${paths.data_dir}/output_splits_${paths.data_version}
+
+# Retrieval indexes and precomputed ESM2 embeddings, per backbone.
+index_t6: ${paths.data_dir}/index_t6_${paths.data_version}
+index_t33: ${paths.data_dir}/index_t33_${paths.data_version}
+esm_t6: ${paths.data_dir}/precomputed/esm_t6_8M_${paths.data_version}
+esm_t33: ${paths.data_dir}/precomputed/esm_t33_650M_${paths.data_version}
 
 # path to logging directory
 log_dir: ${paths.root_dir}/logs/

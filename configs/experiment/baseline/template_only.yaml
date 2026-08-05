@@ -16,11 +16,11 @@ seed: 42
 # from esm_embeddings_dir, so index_t33 alone fully determines retrieval space.
 data:
   batch_size: 8
-  index_dir: data/index_t33
+  index_dir: ${paths.index_t33}
   topk: 4
   esm_embeddings_dir: null
   compute_dist_bins: false
 
 model:
-  index_dir: data/index_t33
+  index_dir: ${paths.index_t33}
   topk: 4

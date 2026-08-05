@@ -6,7 +6,7 @@ retrieval with the same admissibility filters used at validation/test time,
 loads the query/template NPZ sequences, computes global-alignment sequence
 identity, and aggregates the results by retrieval-score bin.
 
-Run it on the server that has `data/processed` and `data/index_t33` or
+Run it on the server that has `data/processed` and `data/index_t33_2026` or
 `data/index_t6`; those files are not part of the lightweight local paper
 checkout.
 """
@@ -365,10 +365,10 @@ def summarize(rows: list[dict[str, object]], n_bootstrap: int, seed: int) -> lis
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", default="650m_trufor_k4")
-    parser.add_argument("--index-dir", default="data/index_t33")
-    parser.add_argument("--data-root", default="data/processed")
-    parser.add_argument("--id-list", default="data/output_splits/test_ids.txt")
-    parser.add_argument("--splits-json", default="data/output_splits/mmcif_final_splits.json")
+    parser.add_argument("--index-dir", default="data/index_t33_2026")
+    parser.add_argument("--data-root", default="data/processed_2026")
+    parser.add_argument("--id-list", default="data/output_splits_2026/test_ids.txt")
+    parser.add_argument("--splits-json", default="data/output_splits_2026/mmcif_final_splits.json")
     parser.add_argument("--skip-ids-file", default="data/corrupt_ids.txt")
     parser.add_argument("--topk", type=int, default=4)
     parser.add_argument("--crop-size", type=int, default=384)

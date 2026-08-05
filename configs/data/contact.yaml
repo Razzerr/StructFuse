@@ -5,11 +5,11 @@ data_root: ${paths.processed_dir}
 
 # Override split files
 train_ids: null
-val_ids: data/output_splits/val_holdout_ids.txt
-test_ids: data/output_splits/test_ids.txt
+val_ids: ${paths.split_dir}/val_holdout_ids.txt
+test_ids: ${paths.split_dir}/test_ids.txt
 
 # Path to mmcif_final_splits.json for per-subset evaluation (gold, casp16, cluster_promoted)
-splits_json_path: data/output_splits/mmcif_final_splits.json
+splits_json_path: ${paths.split_dir}/mmcif_final_splits.json
 
 # Subsets to exclude from test evaluation (saves time; set to [] for full test)
 # NOTE: val_holdout_ids.txt and test_ids.txt already exclude cluster_promoted
@@ -36,7 +36,7 @@ cluster_sampling: true
 # so the trajectory reflects model improvement, not which chains were sampled.
 # Train rotation is independent and unaffected.
 rotate_val: false
-index_dir: data/index_t6
+index_dir: ${paths.index_t6}
 
 # Retrieval / prior-building (PriorBuilder runs in DataLoader workers)
 topk: 4
@@ -59,12 +59,12 @@ compute_dist_bins: true
 # train sample ever sees a val/test structure (leakage prevention).
 # Set to null or [] to disable (e.g. if the index itself already excludes them).
 holdout_id_files:
-  - data/output_splits/val_holdout_ids.txt
-  - data/output_splits/test_ids.txt
+  - ${paths.split_dir}/val_holdout_ids.txt
+  - ${paths.split_dir}/test_ids.txt
 
 # Precomputed ESM2 embeddings (skip frozen ESM2 forward during training)
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
-esm_embeddings_dir: data/precomputed/esm_t6_8M
+esm_embeddings_dir: ${paths.esm_t6}
 
 # Skip-lists of chain stems, one stem per line (e.g. `8tz6_B`), filtered out of
 # every dataset at setup time. Kept as separate files because the two reasons are
@@ -78,4 +78,4 @@ esm_embeddings_dir: data/precomputed/esm_t6_8M
 #                        special-cased at query time.
 skip_ids_files:
   - data/corrupt_ids.txt
-  - data/no_cluster_ids.txt
+  - ${paths.split_dir}/no_cluster_ids.txt

@@ -6,7 +6,7 @@ This index is required by ContactDataset so that training starts instantly
 instead of opening every NPZ file to read L.
 
 Usage:
-    python scripts/build_npz_lengths.py --processed_dir data/processed
+    python scripts/build_npz_lengths.py --processed_dir data/processed_2026
 
 The output file is written to <processed_dir>/npz_lengths.json.
 Run again whenever you add / remove NPZ files.
@@ -33,8 +33,8 @@ def main():
     parser.add_argument(
         "--processed_dir",
         type=Path,
-        default=Path("data/processed"),
-        help="Directory containing *.npz files (default: data/processed)",
+        default=Path("data/processed_2026"),
+        help="Directory containing *.npz files (default: data/processed_2026)",
     )
     args = parser.parse_args()
 

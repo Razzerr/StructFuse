@@ -16,7 +16,7 @@ Run after `resolve_chain_clusters.py`, the split regeneration and the index
 rebuild; `verify_no_leak.py` covers the remaining train-time retrieval check.
 
     python scripts/verify_data_integrity.py \
-        --index-dirs data/index_t33 data/index_t6
+        --index-dirs data/index_t33_2026 data/index_t6_2026
 """
 
 from __future__ import annotations
@@ -71,13 +71,13 @@ def chain_stems_for_split(split_ids: Set[str], all_stems: Set[str]) -> Set[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--index-dirs", nargs="+", default=["data/index_t33", "data/index_t6"])
-    ap.add_argument("--chain-clusters-tsv", default="data/output_splits/chain_clusters.tsv")
-    ap.add_argument("--no-cluster-ids", default="data/no_cluster_ids.txt")
+    ap.add_argument("--index-dirs", nargs="+", default=["data/index_t33_2026", "data/index_t6_2026"])
+    ap.add_argument("--chain-clusters-tsv", default="data/output_splits_2026/chain_clusters.tsv")
+    ap.add_argument("--no-cluster-ids", default="data/output_splits_2026/no_cluster_ids.txt")
     ap.add_argument("--corrupt-ids", default="data/corrupt_ids.txt")
-    ap.add_argument("--train-ids", default="data/output_splits/all_train_ids.txt")
-    ap.add_argument("--val-ids", default="data/output_splits/val_holdout_ids.txt")
-    ap.add_argument("--test-ids", default="data/output_splits/test_ids.txt")
+    ap.add_argument("--train-ids", default="data/output_splits_2026/all_train_ids.txt")
+    ap.add_argument("--val-ids", default="data/output_splits_2026/val_holdout_ids.txt")
+    ap.add_argument("--test-ids", default="data/output_splits_2026/test_ids.txt")
     ap.add_argument(
         "--check-embeddings",
         action="store_true",

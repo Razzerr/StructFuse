@@ -19,8 +19,8 @@ Outputs (see --out-*):
   no_cluster_ids.txt       stems that resolved to -1
   no_cluster_entries.txt   PDB entries where EVERY chain resolved to -1
 
-Deliberately stdlib + tqdm only: `gemmi` is absent from the experiment env and the
-cluster nodes have no channel access, so the mmCIF reader below is plain Python.
+Deliberately stdlib + tqdm only, so this step never depends on the experiment
+environment staying in a particular state — the mmCIF reader below is plain Python.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ def _cif_tokens(path: Path) -> Iterator[str]:
     Multi-line ``;``-delimited text fields (e.g. the one-letter sequence inside
     the `_entity_poly` loop) are emitted as a SINGLE token, which is what keeps
     loop columns aligned. Written in plain Python on purpose: this script must
-    run without touching the experiment environment.
+    run without depending on the experiment environment.
     """
     open_func = gzip.open if str(path).endswith(".gz") else open
     with open_func(path, "rt", encoding="latin-1", errors="replace") as handle:
@@ -374,22 +374,22 @@ def write_audit(path: Path, rows: list[dict[str, object]]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--processed-dir", default="data/processed")
+    parser.add_argument("--processed-dir", default="data/processed_2026")
     parser.add_argument(
         "--chain-list",
         default="",
         help="Optional explicit file of chain stems (one per line); "
         "overrides <processed-dir>/npz_lengths.json.",
     )
-    parser.add_argument("--cluster-file", default="data/clusters_30_05_08_2026.txt")
+    parser.add_argument("--cluster-file", default="data/clusters_30_snapshot2025.txt")
     parser.add_argument(
         "--mmcif-dir",
-        default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2025/mmCIF",
+        default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2026/mmCIF",
     )
-    parser.add_argument("--out-tsv", default="data/output_splits/chain_clusters.tsv")
-    parser.add_argument("--out-no-cluster-ids", default="data/no_cluster_ids.txt")
+    parser.add_argument("--out-tsv", default="data/output_splits_2026/chain_clusters.tsv")
+    parser.add_argument("--out-no-cluster-ids", default="data/output_splits_2026/no_cluster_ids.txt")
     parser.add_argument(
-        "--out-no-cluster-entries", default="data/output_splits/no_cluster_entries.txt"
+        "--out-no-cluster-entries", default="data/output_splits_2026/no_cluster_entries.txt"
     )
     parser.add_argument(
         "--workers",
