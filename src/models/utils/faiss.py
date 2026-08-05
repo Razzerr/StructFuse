@@ -137,6 +137,9 @@ class FaissIndex:
         ID is missing (-1) — using it unconditionally would block legitimate
         remote homologs of unrelated chains that merely share a crystal, and
         would inflate the `search_k` over-fetch below.
+
+        An EMPTY return means "cluster genuinely unknown", not "no restriction":
+        `_same_cluster` blocks every template for such a query.
         """
         exact = int(self.chain2cluster.get(chain_id, -1))
         if exact != -1:
@@ -150,18 +153,33 @@ class FaissIndex:
         tpl_id: str,
         tpl_cluster: int,
     ) -> bool:
-        """Same-cluster predicate shared by all retrieval paths.
+        """Same-cluster predicate shared by all retrieval paths. True ⇒ blocked.
 
-        An unknown (-1) cluster on either side is never treated as evidence that
-        the pair is admissible: the template falls back to its PDB-level union
-        so a chain missing from the cluster map cannot slip through unfiltered.
+        An unknown cluster on either side is never treated as evidence that the
+        pair is admissible — it BLOCKS. Concretely:
+
+        * empty ``query_clusters`` — the query's own chain cluster is -1 and its
+          PDB has no clustered sibling either, so no template can be *shown* to
+          be out-of-cluster. Nothing is admissible.
+        * template cluster -1 — fall back to the template's PDB-level union; if
+          that union is empty too (the entry is absent from ``clusters_30.txt``
+          entirely), block.
+
+        The empty-union case used to fall through to ``set().intersection(...)``
+        → falsy → admitted, which is the exact opposite of the stated policy. It
+        was the mechanism behind 3.29 % of best-retrieved templates carrying
+        cluster -1 at a median sequence identity of 1.000 (2026-08-05 audit):
+        RCSB omits some entries/entities from the 30 % cluster file, and those
+        omissions were being read as "different cluster, therefore fine".
         """
         if not query_clusters:
-            return False
+            return True
         tpl_cluster = int(tpl_cluster)
         if tpl_cluster != -1:
             return tpl_cluster in query_clusters
         tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
+        if not tpl_clusters:
+            return True
         return bool(query_clusters.intersection(tpl_clusters))
 
     @staticmethod

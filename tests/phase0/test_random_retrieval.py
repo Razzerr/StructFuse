@@ -20,10 +20,18 @@ from src.models.utils.faiss import FaissIndex, _get_protein_id  # noqa: E402
 from scripts.rebuild_index_cluster_metadata import resolve_cluster  # noqa: E402
 
 
+# A cluster id no fake index ever assigns, so a query carrying it collides with
+# nothing and every template is admissible. NOT the empty set: since 2026-08-05
+# an empty query-cluster set means "cluster unknown" and blocks everything.
+NO_COLLISION = {10**9}
+
+
 def _make_index(n, random_seed=0, clusters=None, holdout=None):
     idx = FaissIndex.__new__(FaissIndex)
     idx.row2id = [f"aa{i:05d}_A" for i in range(n)]
-    idx.row2cluster = clusters if clusters is not None else [-1] * n
+    # Default to a distinct known cluster per row. All -1 would now mean "every
+    # template has an unknown cluster" and therefore block the whole pool.
+    idx.row2cluster = clusters if clusters is not None else list(range(n))
     idx.chain2cluster = {
         chain_id: int(idx.row2cluster[i]) for i, chain_id in enumerate(idx.row2id)
     }
@@ -47,7 +55,7 @@ def _make_index(n, random_seed=0, clusters=None, holdout=None):
 
 def test_returns_exactly_k_when_pool_large():
     idx = _make_index(50000)
-    out = idx._random_topk("q1_A", "qprot", set(), 4, filter_holdout=False)
+    out = idx._random_topk("q1_A", "qprot", NO_COLLISION, 4, filter_holdout=False)
     assert len(out) == 4, len(out)
     ids = [r[0] for r in out]
     assert len(set(ids)) == 4, "duplicates returned"
@@ -59,7 +67,7 @@ def _emit_selection():
     the cross-PROCESS determinism test (separate interpreter ⇒ different builtin
     hash() randomization; blake2b must still produce identical output)."""
     idx = _make_index(20000, random_seed=7)
-    out = idx._random_topk("chainX_A", "qprot", set(), 8, filter_holdout=False)
+    out = idx._random_topk("chainX_A", "qprot", NO_COLLISION, 8, filter_holdout=False)
     print(",".join(r[0] for r in out))
 
 
@@ -73,8 +81,8 @@ def test_deterministic_across_processes():
     assert outs[0], f"empty emit output (stderr: {runs[0].stderr[-300:]})"
     assert outs[0] == outs[1], "stable-hash determinism violated ACROSS processes"
     # in-process: different seed -> different selection
-    a = _make_index(20000, random_seed=7)._random_topk("chainX_A", "qprot", set(), 8, filter_holdout=False)
-    c = _make_index(20000, random_seed=99)._random_topk("chainX_A", "qprot", set(), 8, filter_holdout=False)
+    a = _make_index(20000, random_seed=7)._random_topk("chainX_A", "qprot", NO_COLLISION, 8, filter_holdout=False)
+    c = _make_index(20000, random_seed=99)._random_topk("chainX_A", "qprot", NO_COLLISION, 8, filter_holdout=False)
     assert a != c, "different random_seed should change the selection"
 
 
@@ -103,7 +111,7 @@ def test_holdout_pool_excludes_holdout_proteins():
     n = 1000
     holdout = {_get_protein_id(f"aa{i:05d}_A") for i in range(100)}  # first 100 prots
     idx = _make_index(n, holdout=holdout)
-    out = idx._random_topk("q_A", "qprot", set(), 10, filter_holdout=True)
+    out = idx._random_topk("q_A", "qprot", NO_COLLISION, 10, filter_holdout=True)
     for rid, _ in out:
         assert _get_protein_id(rid) not in holdout, "holdout protein leaked"
 
@@ -130,6 +138,32 @@ def test_known_chain_cluster_does_not_block_sibling_entities():
     assert idx._clusters_for_chain("q_A", "q") == {737}, "sibling entity leaked into query set"
     assert idx._same_cluster({737}, "t_Y", 737), "true same-cluster template not blocked"
     assert not idx._same_cluster({737}, "t_X", 999), "sibling-entity cluster wrongly blocked"
+
+
+def test_unknown_cluster_blocks_instead_of_admitting():
+    """Unknown cluster on EITHER side must block (2026-08-05).
+
+    RCSB omits some entries/entities from `clusters_30.txt`. The old predicate
+    fell through to `set().intersection(...)` → falsy → admitted, which let
+    identical-sequence templates from unclustered entries (e.g. 8AIQ, 8ZFJ)
+    through: 3.29 % of best-retrieved templates, median identity 1.000.
+    """
+    idx = FaissIndex.__new__(FaissIndex)
+    idx.chain2cluster = {"q_A": 737, "ghost_B": -1}
+    # `ghost` is absent from clusters_30.txt entirely — no clustered sibling.
+    idx.prot2clusters = {"q": {737}}
+
+    assert idx._same_cluster({737}, "ghost_B", -1), "unclustered template was admitted"
+    # A query whose own cluster is unknown cannot prove anything is admissible.
+    assert idx._clusters_for_chain("ghost_B", "ghost") == set()
+    assert idx._same_cluster(set(), "q_A", 737), "unknown query admitted a template"
+
+
+def test_unknown_cluster_template_pool_is_empty_end_to_end():
+    """The blocking policy reaches _random_topk, and it terminates cleanly."""
+    idx = _make_index(500, clusters=[-1] * 500)  # nothing in the index is clustered
+    out = idx._random_topk("q_A", "qprot", {42}, 4, filter_holdout=False)
+    assert out == [], f"unclustered pool must yield no templates, got {len(out)}"
 
 
 def test_cluster_metadata_resolution_prefers_mmcif_entity_over_exact_id():
@@ -168,7 +202,7 @@ def test_speedup_vs_naive_scan_at_least_20x():
     idx._ensure_random_pools()  # pre-build (mirrors the pre-fork eager build)
     t0 = time.perf_counter()
     for i in range(q):
-        idx._random_topk(f"q{i}_A", "qprot", set(), 4, filter_holdout=False)
+        idx._random_topk(f"q{i}_A", "qprot", NO_COLLISION, 4, filter_holdout=False)
     t_new = time.perf_counter() - t0
     t1 = time.perf_counter()
     for i in range(q):

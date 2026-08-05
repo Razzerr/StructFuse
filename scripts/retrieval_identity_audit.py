@@ -104,13 +104,21 @@ class LightweightFaissIndex:
         return set(self.prot2clusters.get(prot_id, set()))
 
     def same_cluster(self, query_clusters: set[int], tpl_id: str, tpl_cluster: int) -> bool:
-        """Mirror of ``FaissIndex._same_cluster`` — keep the two in sync."""
+        """Mirror of ``FaissIndex._same_cluster`` — keep the two in sync.
+
+        True ⇒ blocked. An unknown cluster on either side blocks: an empty
+        ``query_clusters`` admits nothing, and a template whose cluster is -1
+        with no clustered sibling in its PDB entry is refused rather than
+        waved through.
+        """
         if not query_clusters:
-            return False
+            return True
         tpl_cluster = int(tpl_cluster)
         if tpl_cluster != -1:
             return tpl_cluster in query_clusters
         tpl_clusters = self.prot2clusters.get(_get_protein_id(tpl_id), set())
+        if not tpl_clusters:
+            return True
         return bool(query_clusters.intersection(tpl_clusters))
 
     def _reconstruct_query(self, query_name: str) -> np.ndarray | None:
