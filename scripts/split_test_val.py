@@ -22,7 +22,7 @@ TEST_IDS_FILE = ROOT / "data" / "output_splits_2026" / "all_test_ids.txt"
 # Must be the same cluster file prepare_data_splits.py used; entries with no
 # clustered chain are already absent from mmcif_final_splits.json, so no extra
 # exclusion is needed here.
-CLUSTERS_FILE = ROOT / "data" / "clusters_30_snapshot2025.txt"
+CLUSTERS_FILE = ROOT / "data" / "clusters_30_2026.txt"
 OUT_DIR = ROOT / "data" / "output_splits_2026"
 
 

@@ -13,7 +13,7 @@ script reads its TSV and refuses to index any chain that resolved to -1, so ever
 row of ids.json carries a checkable cluster by construction.
 
 Usage:
-  python scripts/resolve_chain_clusters.py --cluster-file data/clusters_30_snapshot2025.txt
+  python scripts/resolve_chain_clusters.py --cluster-file data/clusters_30_2026.txt
   python scripts/build_index.py \
       --processed_dir data/processed_2026 \
       --out_dir data/index_t6_2026 \

@@ -381,7 +381,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional explicit file of chain stems (one per line); "
         "overrides <processed-dir>/npz_lengths.json.",
     )
-    parser.add_argument("--cluster-file", default="data/clusters_30_snapshot2025.txt")
+    parser.add_argument("--cluster-file", default="data/clusters_30_2026.txt")
     parser.add_argument(
         "--mmcif-dir",
         default="/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2026/mmCIF",

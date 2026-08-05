@@ -385,7 +385,7 @@ def __main__():
     parser.add_argument(
         "--clusters_file",
         type=str,
-        default="data/clusters_30_snapshot2025.txt",
+        default="data/clusters_30_2026.txt",
     )
     parser.add_argument(
         "--exclude_entries_file",
