@@ -71,7 +71,9 @@ def chain_stems_for_split(split_ids: Set[str], all_stems: Set[str]) -> Set[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--index-dirs", nargs="+", default=["data/index_t33_2026", "data/index_t6_2026"])
+    # nargs="*" so `--index-dirs` with no values checks splits/clusters only,
+    # which is the state before the indexes are built.
+    ap.add_argument("--index-dirs", nargs="*", default=["data/index_t33_2026", "data/index_t6_2026"])
     ap.add_argument("--chain-clusters-tsv", default="data/output_splits_2026/chain_clusters.tsv")
     ap.add_argument("--no-cluster-ids", default="data/output_splits_2026/no_cluster_ids.txt")
     ap.add_argument("--corrupt-ids", default="data/corrupt_ids.txt")
