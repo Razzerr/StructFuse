@@ -80,6 +80,11 @@ def cap_curve(counts: Sequence[int], caps: Sequence[Optional[int]]) -> List[dict
     for cap in caps:
         capped = [min(c, cap) if cap else c for c in counts]
         n = sum(capped)
+        # A cluster is "whole" when the cap does not truncate it: the cluster
+        # mean is then computed from every chain we have, and raising the cap
+        # cannot improve it. This is what makes a particular cap defensible
+        # rather than arbitrary.
+        whole = sum(1 for c in counts if not cap or c <= cap)
         rows.append(
             {
                 "cap": cap if cap else "full",
@@ -87,6 +92,8 @@ def cap_curve(counts: Sequence[int], caps: Sequence[Optional[int]]) -> List[dict
                 "n_eff": effective_n(capped),
                 "n_eff_frac": effective_n(capped) / n if n else 0.0,
                 "chains_frac_of_full": n / full if full else 0.0,
+                "clusters_whole": whole,
+                "clusters_whole_frac": whole / len(counts) if counts else 0.0,
             }
         )
     return rows
@@ -149,18 +156,21 @@ def main() -> int:
 
         print(f"\n== {split}")
         print(f"   {describe(counts)}")
-        print(f"   {'cap':>6}{'chains':>10}{'n_eff':>9}{'n_eff/N':>10}{'vs full':>9}")
+        print(f"   {'cap':>6}{'chains':>10}{'n_eff':>9}{'n_eff/N':>10}"
+              f"{'vs full':>9}{'whole clusters':>17}")
         for row in cap_curve(counts, caps):
             print(
                 f"   {str(row['cap']):>6}{row['chains']:>10}{row['n_eff']:>9.0f}"
                 f"{100 * row['n_eff_frac']:>9.1f}%{100 * row['chains_frac_of_full']:>8.1f}%"
+                f"{row['clusters_whole']:>10} ({100 * row['clusters_whole_frac']:>4.1f}%)"
             )
             out_rows.append({"split": split, **row})
 
     if args.out_tsv:
         out = resolve(args.out_tsv)
         out.parent.mkdir(parents=True, exist_ok=True)
-        cols = ["split", "cap", "chains", "n_eff", "n_eff_frac", "chains_frac_of_full"]
+        cols = ["split", "cap", "chains", "n_eff", "n_eff_frac",
+                "chains_frac_of_full", "clusters_whole", "clusters_whole_frac"]
         with out.open("w") as handle:
             handle.write("\t".join(cols) + "\n")
             for row in out_rows:
