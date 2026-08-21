@@ -151,6 +151,32 @@ def main() -> int:
 
     train_cl, val_cl, test_cl = clusters_of(train_c), clusters_of(val_c), clusters_of(test_c)
     rep.info(f"clusters — train={len(train_cl)} val={len(val_cl)} test={len(test_cl)}")
+
+    # ── benchmark composition (reported, NOT asserted) ─────────────────────
+    # Chains inside one cluster are near-duplicates by construction, so a mean
+    # over chains is really a weighted mean in which a large family votes many
+    # times. n_eff is the Kish effective sample size under the worst case of
+    # perfect intra-cluster correlation: N^2 / sum(n_i^2). A CI computed over
+    # chains claims N independent observations; the truth is nearer n_eff.
+    # This is benchmark composition, not a leak — no filter can change it.
+    for name, chains in (("val", val_c), ("test", test_c)):
+        sizes: Dict[int, int] = {}
+        for stem in chains:
+            cid = chain2cluster.get(stem, -1)
+            if cid != -1:
+                sizes[cid] = sizes.get(cid, 0) + 1
+        if not sizes:
+            continue
+        counts = sorted(sizes.values(), reverse=True)
+        total = sum(counts)
+        n_eff = total * total / sum(c * c for c in counts)
+        rep.info(
+            f"{name} composition — {total} chains / {len(counts)} clusters; "
+            f"largest={counts[0]} ({100 * counts[0] / total:.1f}% of chains), "
+            f"top10={100 * sum(counts[:10]) / total:.1f}%, "
+            f"median={counts[len(counts) // 2]}, "
+            f"n_eff={n_eff:.0f} ({100 * n_eff / total:.1f}% of chain count)"
+        )
     for a_name, a, b_name, b in (
         ("train", train_cl, "val", val_cl),
         ("train", train_cl, "test", test_cl),

@@ -33,6 +33,30 @@ import torch
 from tqdm import tqdm
 
 
+def load_skip_stems(skip_files) -> set:
+    """Union of chain stems listed in the given files, one stem per line.
+
+    A missing file is an error rather than an empty set: silently embedding the
+    unclustered chains would put them back into a pipeline that excludes them
+    everywhere else.
+    """
+    stems: set = set()
+    for raw in skip_files or []:
+        path = Path(raw)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"skip-ids file not found: {path}. Run "
+                f"scripts/resolve_chain_clusters.py first, or pass "
+                f"--skip_ids_files with no values to disable filtering."
+            )
+        before = len(stems)
+        stems.update(
+            line.strip() for line in path.read_text().splitlines() if line.strip()
+        )
+        print(f"  skip list {path}: {len(stems) - before} new stems")
+    return stems
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pre-compute ESM2 embeddings")
     parser.add_argument("--data_root", type=str, default="data/processed_2026",
@@ -47,6 +71,14 @@ def main():
                         help="Device to run ESM2 on")
     parser.add_argument("--max_len", type=int, default=1022,
                         help="Max sequence length (ESM2 limit is 1022 tokens)")
+    parser.add_argument("--skip_ids_files", type=str, nargs="*",
+                        default=["data/corrupt_ids.txt",
+                                 "data/output_splits_2026/no_cluster_ids.txt"],
+                        help="Files listing chain stems to exclude, one per line. "
+                             "Chains with no RCSB cluster assignment are excluded "
+                             "from the whole pipeline (splits, index, training), so "
+                             "they must not receive embeddings either. Pass with no "
+                             "values to disable filtering.")
     args = parser.parse_args()
 
     data_root = Path(args.data_root)
@@ -56,6 +88,14 @@ def main():
     # Collect all NPZ files
     npz_files = sorted(data_root.glob("*.npz"))
     print(f"Found {len(npz_files)} NPZ files in {data_root}")
+
+    # Drop chains excluded from the pipeline (corrupt, or no RCSB cluster)
+    skip_stems = load_skip_stems(args.skip_ids_files)
+    if skip_stems:
+        n_before = len(npz_files)
+        npz_files = [p for p in npz_files if p.stem not in skip_stems]
+        print(f"Excluded {n_before - len(npz_files)} chains via skip lists "
+              f"({len(skip_stems)} stems listed), {len(npz_files)} remaining")
 
     # Skip already processed
     todo = []
