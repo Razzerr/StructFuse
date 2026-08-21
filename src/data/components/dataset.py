@@ -302,6 +302,26 @@ SUBSET_CASP16 = "casp16"
 SUBSET_CLUSTER_PROMOTED = "cluster_promoted"
 
 
+def load_chain_cluster_tsv(path: Path) -> Dict[str, int]:
+    """Read `scripts/resolve_chain_clusters.py` output: chain stem -> cluster_id.
+
+    This file, not the FAISS index metadata, is the source of truth for the
+    evaluation cap. Models without retrieval (B1 raw attention, B3 esm2_only)
+    are constructed with `index_dir=None`, so keying the cap off `ids.json`
+    would evaluate them on a different subset than the retrieval models and
+    make the comparison invalid.
+    """
+    out: Dict[str, int] = {}
+    with open(path) as handle:
+        header = handle.readline().rstrip("\n").split("\t")
+        i_id, i_cluster = header.index("id"), header.index("cluster_id")
+        for line in handle:
+            if line.strip():
+                cols = line.rstrip("\n").split("\t")
+                out[cols[i_id]] = int(cols[i_cluster])
+    return out
+
+
 def load_subset_mapping(splits_json_path: Path) -> Dict[str, str]:
     """
     Load subset membership from mmcif_final_splits.json.
@@ -379,6 +399,11 @@ class ContactDataset(Dataset):
         min_len (int): Minimum sequence length to include
         splits_json_path (Path): Path to mmcif_final_splits.json for subset info
         index_dir (Path): Path to FAISS index directory (ids.json) for cluster info
+        max_chains_per_cluster (int): EVAL ONLY. Keep at most this many chains
+            per sequence cluster. Never set for training datasets.
+        chain_clusters_file (Path): chain -> cluster TSV backing the cap
+        cap_exempt_subsets (List[str]): subsets evaluated in full regardless of
+            the cap; defaults to ["casp16"]
 
     Returns:
         Dict with keys: pid, seq, contact, mask, L, subset
@@ -393,6 +418,9 @@ class ContactDataset(Dataset):
         exclude_subsets: Optional[List[str]] = None,
         index_dir: Optional[Path] = None,
         skip_ids_files: Optional[List[Path]] = None,
+        max_chains_per_cluster: Optional[int] = None,
+        chain_clusters_file: Optional[Path] = None,
+        cap_exempt_subsets: Optional[List[str]] = None,
     ):
         self.root = root
         self.ids = []
@@ -448,6 +476,58 @@ class ContactDataset(Dataset):
         log.info(f"Loaded {len(self.ids)} chains (min_len={min_len})")
         if n_excluded:
             log.info(f"  Excluded {n_excluded} chains from subsets: {sorted(_exclude)}")
+
+        # ── Evaluation cap: at most N chains per sequence cluster ───────────
+        # Chains inside one 30%-identity cluster are near-duplicates, so a mean
+        # over chains is a family-weighted average. Metrics are aggregated per
+        # cluster and this cap bounds how many chains each cluster contributes;
+        # `scripts/cluster_composition.py` reports the cost curve behind the
+        # chosen value. EVAL ONLY — training keeps the full redundancy.
+        self.max_chains_per_cluster = max_chains_per_cluster
+        if max_chains_per_cluster is not None:
+            if max_chains_per_cluster < 1:
+                raise ValueError(
+                    f"max_chains_per_cluster must be >= 1, got {max_chains_per_cluster}"
+                )
+            if chain_clusters_file is None:
+                raise ValueError(
+                    "max_chains_per_cluster requires chain_clusters_file "
+                    "(<split_dir>/chain_clusters.tsv)"
+                )
+            exempt = set(
+                cap_exempt_subsets if cap_exempt_subsets is not None else [SUBSET_CASP16]
+            )
+            cap_map = load_chain_cluster_tsv(Path(chain_clusters_file))
+            kept: List[str] = []
+            per_cluster: Dict[int, int] = {}
+            n_dropped = 0
+            n_exempt = 0
+            # sorted() makes the retained subset deterministic and independent
+            # of filesystem order, so every model sees the same chains.
+            for stem in sorted(self.ids):
+                if self._get_subset(stem) in exempt:
+                    kept.append(stem)
+                    n_exempt += 1
+                    continue
+                cid = cap_map.get(stem)
+                if cid is None or cid < 0:
+                    raise ValueError(
+                        f"chain {stem} has no cluster in {chain_clusters_file}. "
+                        "Unclustered chains must be removed via skip_ids_files "
+                        "before the evaluation cap is applied."
+                    )
+                seen = per_cluster.get(cid, 0)
+                if seen < max_chains_per_cluster:
+                    per_cluster[cid] = seen + 1
+                    kept.append(stem)
+                else:
+                    n_dropped += 1
+            log.info(
+                f"  Eval cap {max_chains_per_cluster}/cluster: kept {len(kept)} of "
+                f"{len(self.ids)} chains over {len(per_cluster)} clusters "
+                f"(dropped {n_dropped}, exempt {n_exempt} in {sorted(exempt)})"
+            )
+            self.ids = kept
 
         # Load cluster mapping from FAISS index metadata
         if index_dir is not None:

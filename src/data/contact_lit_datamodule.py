@@ -1,4 +1,4 @@
-from typing import Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +105,15 @@ class ContactDataModule(LightningDataModule):
         # cannot be checked by the same-cluster retrieval filter, so they are
         # excluded from the pipeline rather than special-cased at query time).
         skip_ids_files: Optional[List[str]] = None,
+        # EVAL ONLY. Cap how many chains each sequence cluster contributes to
+        # the val and test sets; training always sees the full redundancy.
+        # Chains inside a 30%-identity cluster are near-duplicates, so an
+        # uncapped mean over chains is family-weighted and its apparent sample
+        # size is inflated by roughly two orders of magnitude. See
+        # scripts/cluster_composition.py and Methods 4.11.
+        max_chains_per_cluster: Optional[int] = None,
+        chain_clusters_file: Optional[str] = None,
+        cap_exempt_subsets: Optional[List[str]] = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -147,6 +156,14 @@ class ContactDataModule(LightningDataModule):
         self.esm_embeddings_dir = Path(esm_embeddings_dir) if esm_embeddings_dir else None
         self.holdout_id_files: List[str] = [str(p) for p in (holdout_id_files or [])]
         self.skip_ids_files: List[str] = [str(p) for p in (skip_ids_files or [])]
+        self.max_chains_per_cluster = (
+            int(max_chains_per_cluster) if max_chains_per_cluster else None
+        )
+        self.chain_clusters_file = (
+            Path(chain_clusters_file) if chain_clusters_file
+            else (self.split_dir / "chain_clusters.tsv")
+        )
+        self.cap_exempt_subsets = cap_exempt_subsets
 
         # Initialize RNG for deterministic cropping
         self.crop_rng = np.random.RandomState(self.split_seed)
@@ -158,6 +175,16 @@ class ContactDataModule(LightningDataModule):
         self.dset_test = None
         self._cluster_sampler: Optional[ClusterTrainValSampler] = None
         self._prior_builder: Optional[PriorBuilder] = None
+
+    def _eval_cap_kwargs(self) -> Dict[str, Any]:
+        """Cap arguments for val/test datasets. Never passed to training sets."""
+        if self.max_chains_per_cluster is None:
+            return {}
+        return {
+            "max_chains_per_cluster": self.max_chains_per_cluster,
+            "chain_clusters_file": self.chain_clusters_file,
+            "cap_exempt_subsets": self.cap_exempt_subsets,
+        }
 
     def _write_list(self, path: Path, ids: List[str]):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +265,7 @@ class ContactDataModule(LightningDataModule):
                     splits_json_path=self.splits_json_path,
                     skip_ids_files=self.skip_ids_files,
                     exclude_subsets=self.test_exclude_subsets,
+                    **self._eval_cap_kwargs(),
                 )
                 log.info(f"  Val (validation-only): {len(self.dset_val)} samples")
             elif self.cluster_sampling and self.index_dir is not None:
@@ -280,8 +308,9 @@ class ContactDataModule(LightningDataModule):
                         root=self.data_root,
                         min_len=self.min_len,
                         splits_json_path=self.splits_json_path,
-                    skip_ids_files=self.skip_ids_files,
+                        skip_ids_files=self.skip_ids_files,
                         exclude_subsets=self.test_exclude_subsets,
+                        **self._eval_cap_kwargs(),
                     )
                     log.info(f"  Val (static): {len(self.dset_val)} samples")
             else:
@@ -312,6 +341,7 @@ class ContactDataModule(LightningDataModule):
                     min_len=self.min_len,
                     splits_json_path=self.splits_json_path,
                     skip_ids_files=self.skip_ids_files,
+                    **self._eval_cap_kwargs(),
                 )
                 log.info(f"  Train: {len(self.dset_train)} | Val: {len(self.dset_val)}")
 
@@ -345,6 +375,7 @@ class ContactDataModule(LightningDataModule):
                 splits_json_path=self.splits_json_path,
                 skip_ids_files=self.skip_ids_files,
                 exclude_subsets=self.test_exclude_subsets,
+                **self._eval_cap_kwargs(),
             )
             log.info(f"  Test:  {len(self.dset_test)} samples from {test_split_path}")
 

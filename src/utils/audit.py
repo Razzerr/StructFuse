@@ -195,6 +195,11 @@ def _split_identities(cfg: DictConfig) -> dict[str, Any]:
         "subset_membership": _file_identity(
             _safe_select(cfg, "data.splits_json_path"), force_full_hash=True
         ),
+        # The evaluation cap changes WHICH chains are scored, so the chain ->
+        # cluster file it reads is part of the result's identity.
+        "chain_clusters": _file_identity(
+            _safe_select(cfg, "data.chain_clusters_file"), force_full_hash=True
+        ),
         "holdout_filters": [
             _file_identity(path, force_full_hash=True) for path in holdout_paths
         ],
@@ -262,6 +267,14 @@ def dump_audit_manifest(
             # train collate uses True, val/test use False (see contact_lit_datamodule.py).
             "filter_holdout_train": True,
             "filter_holdout_eval": False,
+        },
+        "evaluation": {
+            # Eval-only cap on chains per sequence cluster; see Methods 4.11.
+            "max_chains_per_cluster": _safe_select(cfg, "data.max_chains_per_cluster"),
+            "cap_exempt_subsets": _plain_list(
+                _safe_select(cfg, "data.cap_exempt_subsets")
+            ),
+            "chain_clusters_file": _safe_select(cfg, "data.chain_clusters_file"),
         },
         "model": {
             "esm_model": _safe_select(cfg, "model.esm_model"),

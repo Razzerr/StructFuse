@@ -79,3 +79,27 @@ esm_embeddings_dir: ${paths.esm_t6}
 skip_ids_files:
   - data/corrupt_ids.txt
   - ${paths.split_dir}/no_cluster_ids.txt
+# ── Evaluation cap (EVAL ONLY — training keeps the full redundancy) ──────────
+# Chains inside one RCSB 30%-identity cluster are near-duplicates, so a mean
+# taken over chains is a family-weighted average: the 2026 test set holds
+# 165,412 chains from only 6,958 clusters, giving an effective sample size of
+# 471 (0.3% of nominal) and confidence intervals ~19x too narrow. Metrics are
+# therefore aggregated per cluster, and this cap bounds how many chains each
+# cluster contributes.
+#
+# C=8 costs ~1.0% CI width versus evaluating every chain while using 21% of the
+# compute; C=16 recovers 0.7pp for 47% more work, C=4 costs 3.3%. Full curve:
+# `python scripts/cluster_composition.py`. See Methods 4.11.
+#
+# Applies to val and test datasets only — never to train/trainval. Set to null
+# to evaluate every chain.
+max_chains_per_cluster: 8
+# Source of truth for chain -> cluster. NOT the FAISS ids.json: baselines
+# without retrieval (B1, B3) are built with index_dir=null, and keying the cap
+# off the index would evaluate them on a different subset than the retrieval
+# models. Defaults to ${paths.split_dir}/chain_clusters.tsv when null.
+chain_clusters_file: ${paths.split_dir}/chain_clusters.tsv
+# Subsets evaluated in full regardless of the cap. CASP16 is tiny (42 entries)
+# and the least redundant part of the benchmark, so it is never truncated.
+cap_exempt_subsets:
+  - casp16
