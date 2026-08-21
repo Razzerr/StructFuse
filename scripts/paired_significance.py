@@ -3,10 +3,20 @@
 Reads two `per_sample_metrics.tsv` files (one per model: e.g. frontier vs
 no_templates baseline), matches chains by `sample_id`, and reports per-metric
 per-subset:
-  - n (matched chains)
-  - mean_delta = mean(treatment - control)
-  - 95% bootstrap CI of mean_delta (10k resamples, percentile method)
-  - paired Wilcoxon signed-rank p-value (two-sided)
+  - n (matched chains), n_clusters (independent units)
+  - mean_delta = cluster-balanced mean(treatment - control): the mean delta
+    within each sequence cluster, averaged unweighted over clusters
+  - mean_delta_chain = the old per-chain mean, kept for comparison
+  - 95% CLUSTER bootstrap CI (resamples clusters, not chains, 10k resamples,
+    percentile method)
+  - paired Wilcoxon signed-rank p-value over per-cluster mean deltas
+
+Chains inside a 30%-identity cluster are near-duplicates, so resampling chains
+treats one protein family deposited a thousand times as a thousand independent
+observations. On the 2026 test set that inflates the apparent sample size from
+6,958 clusters to 165,412 chains and understates every interval by roughly an
+order of magnitude. `--bootstrap chain` restores the old behaviour for
+reproducing pre-2026 numbers; it is not a valid mode for new claims.
 
 Used in paper Methods/Results to defend headline (frontier_650M vs B2 trained
 no-templates) and ablation deltas (every R*/A* run vs frontier_8M baseline).
@@ -43,24 +53,50 @@ METRICS = (
 N_BOOTSTRAP = 10_000
 
 
-def _bootstrap_ci(delta: np.ndarray, n_resamples: int, alpha: float = 0.05) -> tuple[float, float]:
-    """Percentile bootstrap CI for mean(delta). Returns (lo, hi)."""
-    rng = np.random.default_rng(seed=0)  # deterministic across reruns
-    n = len(delta)
+def _cluster_means(delta: np.ndarray, clusters: np.ndarray) -> np.ndarray:
+    """Mean delta within each sequence cluster — one value per independent unit."""
+    _, inverse = np.unique(clusters, return_inverse=True)
+    counts = np.bincount(inverse)
+    sums = np.bincount(inverse, weights=delta)
+    return sums / counts
+
+
+def _bootstrap_ci(
+    delta: np.ndarray,
+    n_resamples: int,
+    alpha: float = 0.05,
+    clusters: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Percentile bootstrap CI for the mean delta.
+
+    With `clusters`, resamples CLUSTERS with replacement and takes the mean of
+    their mean deltas, so the interval reflects the number of independent
+    families rather than the number of deposited chains. Without it, falls back
+    to the per-chain bootstrap.
+    """
+    units = _cluster_means(delta, clusters) if clusters is not None else delta
+    n = len(units)
     if n < 2:
         return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed=0)  # deterministic across reruns
     means = np.empty(n_resamples, dtype=np.float64)
     for i in range(n_resamples):
         idx = rng.integers(0, n, size=n)
-        means[i] = float(delta[idx].mean())
+        means[i] = float(units[idx].mean())
     lo = float(np.percentile(means, 100 * alpha / 2))
     hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
     return lo, hi
 
 
-def _wilcoxon_p(delta: np.ndarray) -> float:
-    """Two-sided paired Wilcoxon signed-rank p-value. NaN for too-few-pairs / all-zeros."""
-    nz = delta[delta != 0]
+def _wilcoxon_p(delta: np.ndarray, clusters: np.ndarray | None = None) -> float:
+    """Two-sided paired Wilcoxon signed-rank p-value over independent units.
+
+    With `clusters`, the units are per-cluster mean deltas — the same units the
+    bootstrap resamples, so the p-value and the interval agree about what an
+    observation is. NaN for too-few-pairs / all-zeros.
+    """
+    units = _cluster_means(delta, clusters) if clusters is not None else delta
+    nz = units[units != 0]
     if len(nz) < 6:
         return float("nan")
     try:
@@ -117,6 +153,18 @@ def _paired_frame(
             ].head(5).to_dict("records")
             raise ValueError(f"Subset assignment mismatch between paired runs: {examples}")
         merged["subset"] = merged["subset_t"]
+    if "cluster_id_t" in merged.columns and "cluster_id_c" in merged.columns:
+        mismatch = merged["cluster_id_t"] != merged["cluster_id_c"]
+        if mismatch.any():
+            examples = merged.loc[
+                mismatch, ["sample_id", "cluster_id_t", "cluster_id_c"]
+            ].head(5).to_dict("records")
+            raise ValueError(
+                f"Cluster assignment mismatch between paired runs: {examples}. "
+                "The two runs were evaluated against different chain_clusters.tsv "
+                "files, so their clusters are not comparable."
+            )
+        merged["cluster_id"] = merged["cluster_id_t"]
     return merged
 
 
@@ -126,6 +174,13 @@ def main() -> None:
     p.add_argument("--control", required=True, type=Path, help="per_sample_metrics.tsv for the control run (e.g. no_templates)")
     p.add_argument("--out", required=True, type=Path, help="Output TSV path")
     p.add_argument("--n-bootstrap", type=int, default=N_BOOTSTRAP, help=f"Bootstrap resample count (default {N_BOOTSTRAP})")
+    p.add_argument(
+        "--bootstrap", choices=("cluster", "chain"), default="cluster",
+        help="Resampling unit. 'cluster' (default) treats one sequence cluster "
+             "as one observation, matching the headline aggregation. 'chain' "
+             "reproduces pre-2026 numbers and understates every interval; it is "
+             "not valid for new claims.",
+    )
     args = p.parse_args()
 
     a = pd.read_csv(args.treatment, sep="\t")
@@ -135,6 +190,13 @@ def main() -> None:
         merged = _paired_frame(a, b, args.treatment, args.control)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+    if args.bootstrap == "cluster" and "cluster_id" not in merged.columns:
+        raise SystemExit(
+            "Cluster resampling requested but neither TSV carries a 'cluster_id' "
+            "column. Re-run the evaluation with data.chain_clusters_file set, or "
+            "pass --bootstrap chain explicitly to reproduce a pre-2026 number."
+        )
 
     rows = []
     for subset_name, sub in _per_subset_groups(merged).items():
@@ -148,15 +210,42 @@ def main() -> None:
             if mask.sum() < 2:
                 continue
             delta = t_vals[mask] - c_vals[mask]
-            ci_lo, ci_hi = _bootstrap_ci(delta, args.n_bootstrap)
-            p_val = _wilcoxon_p(delta)
+
+            clusters = None
+            if args.bootstrap == "cluster":
+                cid = sub["cluster_id"].to_numpy()[mask]
+                # -1 marks an unknown cluster; such a chain is not an
+                # independent unit and must not join a pseudo-cluster of its own.
+                known = cid >= 0
+                if known.sum() < 2:
+                    continue
+                delta, clusters = delta[known], cid[known]
+                t_kept, c_kept = t_vals[mask][known], c_vals[mask][known]
+                units = _cluster_means(delta, clusters)
+                mean_delta = float(units.mean())
+                mean_t = float(_cluster_means(t_kept, clusters).mean())
+                mean_c = float(_cluster_means(c_kept, clusters).mean())
+                n_pairs, n_clusters = int(known.sum()), int(len(units))
+            else:
+                mean_delta = float(delta.mean())
+                mean_t = float(t_vals[mask].mean())
+                mean_c = float(c_vals[mask].mean())
+                n_pairs, n_clusters = int(mask.sum()), -1
+
+            ci_lo, ci_hi = _bootstrap_ci(delta, args.n_bootstrap, clusters=clusters)
+            p_val = _wilcoxon_p(delta, clusters=clusters)
             rows.append({
                 "subset": subset_name,
                 "metric": metric,
-                "n": int(mask.sum()),
-                "mean_treatment": round(float(t_vals[mask].mean()), 4),
-                "mean_control": round(float(c_vals[mask].mean()), 4),
-                "mean_delta": round(float(delta.mean()), 4),
+                "n": n_pairs,
+                "n_clusters": n_clusters,
+                "unit": args.bootstrap,
+                "mean_treatment": round(mean_t, 4),
+                "mean_control": round(mean_c, 4),
+                "mean_delta": round(mean_delta, 4),
+                # The old per-chain mean, so the effect of re-weighting is visible
+                # rather than merely asserted.
+                "mean_delta_chain": round(float(delta.mean()), 4),
                 "ci95_lo": round(ci_lo, 4),
                 "ci95_hi": round(ci_hi, 4),
                 "wilcoxon_p": p_val,
@@ -172,7 +261,8 @@ def main() -> None:
             sig = "***" if r["wilcoxon_p"] is not None and r["wilcoxon_p"] < 1e-3 else (
                 "**" if r["wilcoxon_p"] < 1e-2 else ("*" if r["wilcoxon_p"] < 5e-2 else "ns")
             )
-            print(f"  [{r['subset']:>18}] P@L_long: Δ={r['mean_delta']:+.4f} [{r['ci95_lo']:+.4f}, {r['ci95_hi']:+.4f}] p={r['wilcoxon_p']:.2e} {sig} (n={r['n']})")
+            unit = f"{r['n_clusters']} clusters / {r['n']} chains" if r["n_clusters"] >= 0 else f"{r['n']} chains"
+            print(f"  [{r['subset']:>18}] P@L_long: Δ={r['mean_delta']:+.4f} [{r['ci95_lo']:+.4f}, {r['ci95_hi']:+.4f}] p={r['wilcoxon_p']:.2e} {sig} ({unit})")
 
 
 if __name__ == "__main__":
