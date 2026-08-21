@@ -33,6 +33,33 @@ import torch
 from tqdm import tqdm
 
 
+def length_aware_batches(items_with_paths, batch_size, max_pair_elems, max_len):
+    """Group length-sorted items into batches bounded by B * L^2, not by B.
+
+    ESM2 materialises one attention map per layer-head over the full L x L pair
+    grid, so peak memory scales with `batch * n_maps * L^2`. A fixed sequence
+    count is the wrong unit when lengths span 50x: a batch of 32 is trivial at
+    L=100 and 16 GB at L=1022 on the 8M model (more on 650M, which has 660 maps
+    to the 8M's 120). Because the caller sorts ascending by length, the newest
+    item is always the longest in the batch, so the bound is exact.
+
+    A single item that exceeds the budget on its own still gets its own batch —
+    truncation to max_len is the only thing standing between us and OOM there.
+    """
+    batch = []
+    for entry in items_with_paths:
+        length = min(len(entry[0][1]), max_len)
+        if batch and (
+            len(batch) + 1 > batch_size
+            or (max_pair_elems and (len(batch) + 1) * length * length > max_pair_elems)
+        ):
+            yield batch
+            batch = []
+        batch.append(entry)
+    if batch:
+        yield batch
+
+
 def load_skip_stems(skip_files) -> set:
     """Union of chain stems listed in the given files, one stem per line.
 
@@ -71,6 +98,13 @@ def main():
                         help="Device to run ESM2 on")
     parser.add_argument("--max_len", type=int, default=1022,
                         help="Max sequence length (ESM2 limit is 1022 tokens)")
+    parser.add_argument("--max_pair_elems", type=int, default=4_000_000,
+                        help="Cap on batch*L^2 per forward. Peak memory is set by "
+                             "the L x L attention maps, so this bounds it directly "
+                             "where --batch_size cannot: at L=1022 it yields "
+                             "batches of 3, at L=384 batches of 27, and short "
+                             "chains stay limited by --batch_size. Set 0 to "
+                             "disable and batch purely by sequence count.")
     parser.add_argument("--skip_ids_files", type=str, nargs="*",
                         default=["data/corrupt_ids.txt",
                                  "data/output_splits_2026/no_cluster_ids.txt"],
@@ -139,9 +173,14 @@ def main():
     n_processed = 0
     n_truncated = 0
 
-    for batch_start in tqdm(range(0, len(items_with_paths), args.batch_size),
-                            desc="Computing embeddings"):
-        batch_items = items_with_paths[batch_start:batch_start + args.batch_size]
+    batches = list(length_aware_batches(
+        items_with_paths, args.batch_size, args.max_pair_elems, args.max_len
+    ))
+    sizes = [len(b) for b in batches]
+    print(f"Batching: {len(batches)} batches, size min={min(sizes)} max={max(sizes)} "
+          f"(batch_size={args.batch_size}, max_pair_elems={args.max_pair_elems})")
+
+    for batch_items in tqdm(batches, desc="Computing embeddings"):
 
         seq_list = []
         for (stem, seq), npz_path in batch_items:
