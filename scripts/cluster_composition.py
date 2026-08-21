@@ -74,8 +74,25 @@ def describe(counts: Sequence[int]) -> str:
     )
 
 
+def within_multiplier(counts: Sequence[int], cap: Optional[int]) -> float:
+    """m_C = mean over clusters of 1 / min(n_k, C).
+
+    For the cluster-balanced estimator (cluster means averaged over clusters),
+        Var = (1/K) * (sigma_between^2 + sigma_within^2 * m_C)
+    so the between-cluster term is fixed and the cap moves only the second one.
+    """
+    if not counts:
+        return 0.0
+    return sum(1.0 / (min(c, cap) if cap else c) for c in counts) / len(counts)
+
+
 def cap_curve(counts: Sequence[int], caps: Sequence[Optional[int]]) -> List[dict]:
     full = sum(counts)
+    # Widest-case reference: evaluating every chain. sigma_within == sigma_between
+    # is the conservative assumption — chains inside a 30%-identity cluster
+    # almost certainly vary less than clusters do, which makes any cap look
+    # better than this reports, never worse.
+    m_full = within_multiplier(counts, None)
     rows = []
     for cap in caps:
         capped = [min(c, cap) if cap else c for c in counts]
@@ -85,6 +102,7 @@ def cap_curve(counts: Sequence[int], caps: Sequence[Optional[int]]) -> List[dict
         # cannot improve it. This is what makes a particular cap defensible
         # rather than arbitrary.
         whole = sum(1 for c in counts if not cap or c <= cap)
+        m_cap = within_multiplier(counts, cap)
         rows.append(
             {
                 "cap": cap if cap else "full",
@@ -94,6 +112,9 @@ def cap_curve(counts: Sequence[int], caps: Sequence[Optional[int]]) -> List[dict
                 "chains_frac_of_full": n / full if full else 0.0,
                 "clusters_whole": whole,
                 "clusters_whole_frac": whole / len(counts) if counts else 0.0,
+                # How much wider the cluster-balanced CI gets versus evaluating
+                # every chain. This is the quantity a cap should be chosen on.
+                "ci_width_vs_full": ((1.0 + m_cap) / (1.0 + m_full)) ** 0.5,
             }
         )
     return rows
@@ -157,12 +178,13 @@ def main() -> int:
         print(f"\n== {split}")
         print(f"   {describe(counts)}")
         print(f"   {'cap':>6}{'chains':>10}{'n_eff':>9}{'n_eff/N':>10}"
-              f"{'vs full':>9}{'whole clusters':>17}")
+              f"{'vs full':>9}{'whole clusters':>17}{'CI vs full':>12}")
         for row in cap_curve(counts, caps):
             print(
                 f"   {str(row['cap']):>6}{row['chains']:>10}{row['n_eff']:>9.0f}"
                 f"{100 * row['n_eff_frac']:>9.1f}%{100 * row['chains_frac_of_full']:>8.1f}%"
                 f"{row['clusters_whole']:>10} ({100 * row['clusters_whole_frac']:>4.1f}%)"
+                f"{100 * (row['ci_width_vs_full'] - 1):>+11.1f}%"
             )
             out_rows.append({"split": split, **row})
 
@@ -170,7 +192,8 @@ def main() -> int:
         out = resolve(args.out_tsv)
         out.parent.mkdir(parents=True, exist_ok=True)
         cols = ["split", "cap", "chains", "n_eff", "n_eff_frac",
-                "chains_frac_of_full", "clusters_whole", "clusters_whole_frac"]
+                "chains_frac_of_full", "clusters_whole", "clusters_whole_frac",
+                "ci_width_vs_full"]
         with out.open("w") as handle:
             handle.write("\t".join(cols) + "\n")
             for row in out_rows:
