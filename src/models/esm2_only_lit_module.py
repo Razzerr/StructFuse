@@ -361,6 +361,7 @@ class ESM2OnlyLitModule(LightningModule):
             per_sample_metric_rows(
                 prob, contact, mask, pids, subsets, self.pred_threshold,
                 seq_lens=batch.get("seq_len"),
+                cluster_ids=batch.get("cluster_id"),
             )
         )
         return loss

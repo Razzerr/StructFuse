@@ -1072,6 +1072,7 @@ class ContactLitModule(LightningModule):
                 seq_lens=batch.get("seq_len"),
                 n_templates=batch.get("n_templates_retrieved"),
                 best_sims=batch.get("best_tpl_sim"),
+                cluster_ids=batch.get("cluster_id"),
             )
         )
 

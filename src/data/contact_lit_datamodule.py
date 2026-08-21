@@ -177,9 +177,11 @@ class ContactDataModule(LightningDataModule):
         self._prior_builder: Optional[PriorBuilder] = None
 
     def _eval_cap_kwargs(self) -> Dict[str, Any]:
-        """Cap arguments for val/test datasets. Never passed to training sets."""
-        if self.max_chains_per_cluster is None:
-            return {}
+        """Cluster arguments for val/test datasets. Never passed to training sets.
+
+        The cluster file goes through even when no cap is set: headline metrics
+        are aggregated per cluster, so the batch needs `cluster_id` regardless.
+        """
         return {
             "max_chains_per_cluster": self.max_chains_per_cluster,
             "chain_clusters_file": self.chain_clusters_file,

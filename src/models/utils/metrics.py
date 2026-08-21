@@ -4,6 +4,10 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from sklearn.metrics import average_precision_score, matthews_corrcoef
 
+from src.utils import RankedLogger
+
+log = RankedLogger(__name__, rank_zero_only=True)
+
 
 # Range definitions for contact prediction
 RANGE_SHORT = (6, 12)    # Short-range: 6 <= |i-j| < 12
@@ -148,7 +152,8 @@ def _binary_prf(prob_b, contact_b, mask_b, threshold):
 
 
 def per_sample_metric_rows(prob, contact, mask, pids, subsets, threshold,
-                           seq_lens=None, n_templates=None, best_sims=None):
+                           seq_lens=None, n_templates=None, best_sims=None,
+                           cluster_ids=None):
     """Per-chain test metrics → list of row dicts for per_sample_metrics.tsv.
 
     Single implementation shared by ContactLitModule + the B1/B4 baselines so the
@@ -167,6 +172,10 @@ def per_sample_metric_rows(prob, contact, mask, pids, subsets, threshold,
         threshold: val-selected decision threshold for f1/precision/recall.
         seq_lens: optional per-chain nominal lengths (crop_end-crop_start).
         n_templates, best_sims: optional per-chain retrieval stats.
+        cluster_ids: optional per-chain sequence-cluster ids. Emitted as a
+            `cluster_id` column so the headline aggregation and
+            `paired_significance.py` can both work over clusters rather than
+            chains; -1 marks unknown.
     """
     prob = prob.detach()
     contact = contact.detach()
@@ -221,6 +230,10 @@ def per_sample_metric_rows(prob, contact, mask, pids, subsets, threshold,
             "pdb_id": pdb_id,
             "chain_id": chain_id,
             "subset": subsets[b] if b < len(subsets) else "all",
+            "cluster_id": (
+                int(cluster_ids[b]) if cluster_ids is not None and b < len(cluster_ids)
+                else -1
+            ),
             "seq_len": sl,
             "P@L": pl_all,
             "P@L/2": pl2_all,
@@ -265,45 +278,127 @@ _HEADLINE_KEYS = (
 )
 
 
+_SUBSET_KEYS = (
+    "P@L", "P@L/2", "P@L/5", "P@L_short", "P@L_medium", "P@L_long",
+    "P@L/2_long", "P@L/5_long", "AUC-PR_long",
+    "f1_long", "precision_long", "recall_long",
+)
+
+
+def _finite(rs, key):
+    """Finite values of `key` across rows, paired with their cluster id."""
+    out = []
+    for r in rs:
+        v = r.get(key)
+        if v is None:
+            continue
+        v = float(v)
+        if np.isfinite(v):
+            out.append((int(r.get("cluster_id", -1)), v))
+    return out
+
+
+def chain_macro(rs, key):
+    """Unweighted mean over chains. Supplementary — see `cluster_macro`."""
+    vals = [v for _, v in _finite(rs, key)]
+    return (float(np.mean(vals)) if vals else float("nan")), len(vals)
+
+
+def cluster_macro(rs, key):
+    """HEADLINE aggregation: mean within each sequence cluster, then unweighted
+    mean over clusters.
+
+    Chains inside a 30%-identity cluster are near-duplicates, so averaging over
+    chains weights each protein family by how many times it was deposited and
+    inflates the apparent sample size by about two orders of magnitude. Averaging
+    over clusters makes the estimand "performance on a randomly drawn family"
+    and the number of independent units the cluster count. NaN-aware at both
+    levels: a chain with an undefined metric drops out of its cluster mean, and a
+    cluster with no defined chain drops out of the outer mean.
+
+    Returns (value, n_clusters). n_clusters is 0 when no row carries a cluster.
+    """
+    by_cluster: Dict[int, List[float]] = {}
+    for cid, v in _finite(rs, key):
+        if cid >= 0:
+            by_cluster.setdefault(cid, []).append(v)
+    if not by_cluster:
+        return float("nan"), 0
+    means = [float(np.mean(v)) for v in by_cluster.values()]
+    return float(np.mean(means)), len(means)
+
+
 def log_macro_test_metrics(log_fn, rows, subset_names):
-    """Log HEADLINE per-protein MACRO test metrics (+ per-subset) from per-sample
-    rows. `log_fn` is a Lightning module's `self.log`. Canonical key names match
-    ContactLitModule so every module (frontier + B1/B4) reports identically.
-    NaN per-protein values (e.g. undefined AUC) are excluded from the mean. W&B
-    keys use the no-slash convention (P@L2) via `_WANDB_KEY`; TSV columns keep the
-    slash form. Each canonical key is written exactly once (no _batchavg clash)."""
-    def _macro(rs, key):
-        vals = np.array([r[key] for r in rs if r.get(key) is not None], dtype=float)
-        finite = vals[np.isfinite(vals)] if vals.size else vals
-        return (float(finite.mean()) if finite.size else float("nan")), int(finite.size)
+    """Log HEADLINE test metrics (+ per-subset) from per-sample rows. `log_fn` is
+    a Lightning module's `self.log`. Canonical key names match ContactLitModule so
+    every module (frontier + B1/B4) reports identically.
+
+    Canonical `test/*` keys are CLUSTER-BALANCED (Methods 4.11); the older
+    per-chain macro is kept alongside as `test/*_chainmacro` so the two are
+    comparable and nothing silently changes meaning under an existing key.
+
+    W&B keys use the no-slash convention (P@L2) via `_WANDB_KEY`; TSV columns keep
+    the slash form. Each canonical key is written exactly once.
+
+    If no row carries a cluster id, the canonical keys fall back to the chain
+    macro and `test/cluster_balanced` is logged as 0. That is a protocol error,
+    not a supported mode — it means `data.chain_clusters_file` did not reach the
+    eval dataset. The run is not lost: `per_sample_metrics.tsv` is still written
+    and can be re-aggregated offline against the cluster TSV.
+    """
+    _, n_clusters = cluster_macro(rows, "P@L_long")
+    balanced = n_clusters > 0
+    if not balanced:
+        log.error(
+            "No cluster ids in per-sample rows: headline metrics fall back to the "
+            "per-chain macro, which is family-weighted. Check that "
+            "data.chain_clusters_file reaches the val/test datasets. Re-aggregate "
+            "per_sample_metrics.tsv offline rather than trusting test/* here."
+        )
+    headline = cluster_macro if balanced else chain_macro
 
     for key in _HEADLINE_KEYS:
-        v, _ = _macro(rows, key)
-        log_fn(f"test/{_WANDB_KEY.get(key, key)}", v,
+        wandb_key = _WANDB_KEY.get(key, key)
+        v, _ = headline(rows, key)
+        log_fn(f"test/{wandb_key}", v,
                prog_bar=(key in ("P@L_long", "f1_long")), sync_dist=False)
-    av, an = _macro(rows, "AUC-PR_long")
+        cv, _ = chain_macro(rows, key)
+        log_fn(f"test/{wandb_key}_chainmacro", cv, prog_bar=False, sync_dist=False)
+
+    av, an = headline(rows, "AUC-PR_long")
     log_fn("test/AUC-PR_long", av, prog_bar=True, sync_dist=False)
-    log_fn("test/AUC-PR_long_n_defined", float(an), prog_bar=False, sync_dist=False)
+    cav, can = chain_macro(rows, "AUC-PR_long")
+    log_fn("test/AUC-PR_long_chainmacro", cav, prog_bar=False, sync_dist=False)
+    log_fn("test/AUC-PR_long_n_defined", float(an if balanced else can),
+           prog_bar=False, sync_dist=False)
+
     n_long_defined = sum(int(r.get("n_valid_long_pairs", 0)) > 0 for r in rows)
     log_fn("test/n_proteins_long_defined", float(n_long_defined),
            prog_bar=False, sync_dist=False)
     log_fn("test/n_proteins", float(len(rows)), prog_bar=False, sync_dist=False)
+    log_fn("test/n_clusters", float(n_clusters), prog_bar=False, sync_dist=False)
+    log_fn("test/cluster_balanced", float(balanced), prog_bar=False, sync_dist=False)
 
     for subset_name in subset_names:
         srows = [r for r in rows if r.get("subset") == subset_name]
         if not srows:
             continue
-        log_fn(f"test/{subset_name}/n_samples", float(len(srows)), prog_bar=False, sync_dist=False)
+        log_fn(f"test/{subset_name}/n_samples", float(len(srows)),
+               prog_bar=False, sync_dist=False)
         n_long_defined = sum(int(r.get("n_valid_long_pairs", 0)) > 0 for r in srows)
         log_fn(f"test/{subset_name}/n_proteins_long_defined", float(n_long_defined),
                prog_bar=False, sync_dist=False)
-        # Complete metric set per subset (incl. P@L2/P@L5/short/medium).
-        for key in ("P@L", "P@L/2", "P@L/5", "P@L_short", "P@L_medium", "P@L_long",
-                    "P@L/2_long", "P@L/5_long", "AUC-PR_long",
-                    "f1_long", "precision_long", "recall_long"):
-            v, _ = _macro(srows, key)
-            log_fn(f"test/{subset_name}/{_WANDB_KEY.get(key, key)}", v,
+        _, sn_clusters = cluster_macro(srows, "P@L_long")
+        log_fn(f"test/{subset_name}/n_clusters", float(sn_clusters),
+               prog_bar=False, sync_dist=False)
+        for key in _SUBSET_KEYS:
+            wandb_key = _WANDB_KEY.get(key, key)
+            v, _ = headline(srows, key)
+            log_fn(f"test/{subset_name}/{wandb_key}", v,
                    prog_bar=(key == "P@L_long"), sync_dist=False)
+            cv, _ = chain_macro(srows, key)
+            log_fn(f"test/{subset_name}/{wandb_key}_chainmacro", cv,
+                   prog_bar=False, sync_dist=False)
 
 
 def export_per_sample_tsv(rows, trainer):

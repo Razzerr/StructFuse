@@ -483,6 +483,16 @@ class ContactDataset(Dataset):
         # cluster and this cap bounds how many chains each cluster contributes;
         # `scripts/cluster_composition.py` reports the cost curve behind the
         # chosen value. EVAL ONLY — training keeps the full redundancy.
+        # Chain -> cluster from the resolver's TSV. Loaded whenever the file is
+        # given, not only when a cap is set: cluster-balanced aggregation needs
+        # the ids in the batch even at max_chains_per_cluster=None.
+        if chain_clusters_file is not None and Path(chain_clusters_file).exists():
+            self._chain2cluster = load_chain_cluster_tsv(Path(chain_clusters_file))
+            log.info(
+                f"  Cluster map: {len(self._chain2cluster)} chains from "
+                f"{chain_clusters_file}"
+            )
+
         self.max_chains_per_cluster = max_chains_per_cluster
         if max_chains_per_cluster is not None:
             if max_chains_per_cluster < 1:
@@ -497,7 +507,12 @@ class ContactDataset(Dataset):
             exempt = set(
                 cap_exempt_subsets if cap_exempt_subsets is not None else [SUBSET_CASP16]
             )
-            cap_map = load_chain_cluster_tsv(Path(chain_clusters_file))
+            if not self._chain2cluster:
+                raise FileNotFoundError(
+                    f"chain_clusters_file not found: {chain_clusters_file}. "
+                    "The evaluation cap cannot be applied without it."
+                )
+            cap_map = self._chain2cluster
             kept: List[str] = []
             per_cluster: Dict[int, int] = {}
             n_dropped = 0
@@ -529,8 +544,10 @@ class ContactDataset(Dataset):
             )
             self.ids = kept
 
-        # Load cluster mapping from FAISS index metadata
-        if index_dir is not None:
+        # Load cluster mapping from FAISS index metadata. Only when the TSV did
+        # not already provide one — the TSV is the source of truth, ids.json is
+        # derived from it and omits chains the index skipped.
+        if index_dir is not None and not self._chain2cluster:
             ids_json = Path(index_dir) / "ids.json"
             if ids_json.exists():
                 with open(ids_json) as f:
@@ -597,6 +614,7 @@ class ContactDataset(Dataset):
             "mask": mask,
             "L": L,
             "subset": subset,
+            "cluster_id": self._chain2cluster.get(pid, -1),
             "coords": coords,
         }
 
@@ -679,6 +697,7 @@ def collate_padded(
                 "pid": item["pid"],
                 "seq": item["seq"],
                 "subset": item.get("subset", SUBSET_ALL),
+                "cluster_id": item.get("cluster_id", -1),
                 "contact": item["contact"][crop_start:crop_end, crop_start:crop_end],
                 "mask": item["mask"][crop_start:crop_end],
                 "L": crop_end - crop_start,
@@ -703,12 +722,14 @@ def collate_padded(
     pids: List[str] = []
     seqs: List[str] = []
     subsets: List[str] = []
+    cluster_ids: List[int] = []
     crop_bounds = torch.zeros(B, 2, dtype=torch.long)
 
     for b, item in enumerate(cropped):
         pids.append(item["pid"])
         seqs.append(item["seq"])
         subsets.append(item["subset"])
+        cluster_ids.append(int(item.get("cluster_id", -1)))
 
         L = item["L"]
         crop_bounds[b, 0] = item["crop_bounds"][0]
@@ -737,6 +758,9 @@ def collate_padded(
         "pid": pids,
         "seq": seqs,
         "subset": subsets,
+        # Sequence cluster per chain; -1 when unknown. Headline metrics are
+        # aggregated over these, not over chains (see Methods 4.11).
+        "cluster_id": cluster_ids,
         "crop_bounds": crop_bounds,  # (B, 2)
         # Nominal per-chain length (crop_end-crop_start). Used as K for P@K so
         # missing-coordinate residues do NOT shrink L below the standard nominal.
