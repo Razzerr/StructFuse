@@ -211,6 +211,23 @@ R 4  16G 00:30:00 "python -m pytest tests/phase0 -q"
 `pytest` on the server covers `test_fusion_distance_bins.py` and
 `test_no_template_fusion.py`, which cannot run in the local `AI` env.
 
+### Step 4b — evaluation protocol sanity
+
+The first run on the rebuilt data must show, in the test logs and in W&B:
+
+- `Eval cap 8/cluster: kept N of M chains over K clusters` at dataset setup,
+  for **val and test only** — if it appears for train, the cap leaked into the
+  training set;
+- `test/cluster_balanced = 1` and a plausible `test/n_clusters` (~6,958 for the
+  full test set, fewer after the cap trims singleton-poor clusters);
+- `test/P@L_long` differing from `test/P@L_long_chainmacro` — identical values
+  would mean every cluster has one chain, i.e. the cluster map did not load.
+
+`test/cluster_balanced = 0` means `data.chain_clusters_file` never reached the
+eval dataset. The run is not lost — `per_sample_metrics.tsv` still carries every
+per-chain value — but the logged `test/*` are family-weighted and must be
+re-aggregated offline before use.
+
 ### Step 5 — 8M gate
 
 Paired, so both the absolute shift and the recomputed retrieval delta are
