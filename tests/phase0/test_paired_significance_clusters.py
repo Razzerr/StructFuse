@@ -21,17 +21,8 @@ spec = importlib.util.spec_from_file_location("ps", SCRIPT)
 ps = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ps)
 
-PASSED, FAILED = [], []
 
 
-def check(name, fn):
-    try:
-        fn()
-        PASSED.append(name)
-        print(f"PASS {name}")
-    except Exception as exc:  # noqa: BLE001
-        FAILED.append((name, exc))
-        print(f"FAIL {name}: {type(exc).__name__}: {exc}")
 
 
 def test_cluster_means_collapses_each_family_to_one_value():
@@ -163,10 +154,20 @@ def test_cluster_mismatch_between_runs_is_an_error():
         assert r.returncode != 0, "differing cluster files must not be compared"
         assert "Cluster assignment mismatch" in (r.stderr + r.stdout)
 
+def _run_all() -> int:
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"PASS {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns) - failed}/{len(fns)} passed")
+    return 1 if failed else 0
 
-for name, fn in sorted(globals().items()):
-    if name.startswith("test_") and callable(fn):
-        check(name, fn)
 
-print(f"\n{len(PASSED)}/{len(PASSED) + len(FAILED)} passed")
-sys.exit(1 if FAILED else 0)
+if __name__ == "__main__":
+    sys.exit(_run_all())

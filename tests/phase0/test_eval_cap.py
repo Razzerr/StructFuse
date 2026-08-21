@@ -7,6 +7,7 @@ is never truncated, training is never capped, and an unclustered chain is a hard
 error rather than a silent pass.
 """
 
+import contextlib
 import json
 import sys
 import tempfile
@@ -21,19 +22,6 @@ from src.data.components.dataset import (  # noqa: E402
     ContactDataset,
     load_chain_cluster_tsv,
 )
-
-PASSED, FAILED = [], []
-
-
-def check(name, fn):
-    try:
-        fn()
-        PASSED.append(name)
-        print(f"PASS {name}")
-    except Exception as exc:  # noqa: BLE001
-        FAILED.append((name, exc))
-        print(f"FAIL {name}: {type(exc).__name__}: {exc}")
-
 
 class Fixture:
     """A synthetic split: 3 clusters of 10 chains + one CASP16 entry."""
@@ -102,80 +90,90 @@ class Fixture:
         )
 
 
-def _with_fixture(fn):
-    def run():
-        with tempfile.TemporaryDirectory() as td:
-            fn(Fixture(Path(td)))
-    return run
+@contextlib.contextmanager
+def fixture():
+    """Opened by each test rather than injected, so the functions take no
+    arguments: pytest collects them without a pytest-only fixture, and
+    `python <file>` still runs the module standalone."""
+    with tempfile.TemporaryDirectory() as td:
+        yield Fixture(Path(td))
 
 
-def test_uncapped_keeps_every_chain(fx):
-    assert len(fx.dataset().ids) == 36, len(fx.dataset().ids)
+def test_uncapped_keeps_every_chain():
+    with fixture() as fx:
+        assert len(fx.dataset().ids) == 36, len(fx.dataset().ids)
 
 
-def test_cap_limits_each_cluster_but_exempts_casp16(fx):
-    ds = fx.dataset(max_chains_per_cluster=4, chain_clusters_file=fx.clusters_tsv)
-    stems = ds.ids
-    # 3 ordinary clusters capped at 4, CASP16's 6 chains kept in full
-    assert len(stems) == 3 * 4 + 6, len(stems)
-    casp = [s for s in stems if s.startswith("9zzz")]
-    assert len(casp) == 6, casp
-    for cluster in range(3):
-        got = [s for s in stems if s.startswith(f"{cluster + 1}abc")]
-        assert len(got) == 4, (cluster, got)
+def test_cap_limits_each_cluster_but_exempts_casp16():
+    with fixture() as fx:
+        ds = fx.dataset(max_chains_per_cluster=4, chain_clusters_file=fx.clusters_tsv)
+        stems = ds.ids
+        # 3 ordinary clusters capped at 4, CASP16's 6 chains kept in full
+        assert len(stems) == 3 * 4 + 6, len(stems)
+        casp = [s for s in stems if s.startswith("9zzz")]
+        assert len(casp) == 6, casp
+        for cluster in range(3):
+            got = [s for s in stems if s.startswith(f"{cluster + 1}abc")]
+            assert len(got) == 4, (cluster, got)
 
 
-def test_retained_subset_is_deterministic_and_sorted(fx):
-    a = fx.dataset(max_chains_per_cluster=3, chain_clusters_file=fx.clusters_tsv).ids
-    b = fx.dataset(max_chains_per_cluster=3, chain_clusters_file=fx.clusters_tsv).ids
-    assert a == b, "cap is not reproducible across constructions"
-    # first-N-by-sorted-stem, so a model without retrieval sees the same chains
-    assert [s for s in a if s.startswith("1abc")] == ["1abc_A", "1abc_B", "1abc_C"]
+def test_retained_subset_is_deterministic_and_sorted():
+    with fixture() as fx:
+        a = fx.dataset(max_chains_per_cluster=3, chain_clusters_file=fx.clusters_tsv).ids
+        b = fx.dataset(max_chains_per_cluster=3, chain_clusters_file=fx.clusters_tsv).ids
+        assert a == b, "cap is not reproducible across constructions"
+        # first-N-by-sorted-stem, so a model without retrieval sees the same chains
+        assert [s for s in a if s.startswith("1abc")] == ["1abc_A", "1abc_B", "1abc_C"]
 
 
-def test_cap_is_monotone_in_c(fx):
-    sizes = [
-        len(fx.dataset(max_chains_per_cluster=c,
-                       chain_clusters_file=fx.clusters_tsv).ids)
-        for c in (1, 2, 4, 8, 16)
-    ]
-    assert sizes == sorted(sizes), sizes
-    assert sizes[-1] == 36, sizes  # cap above the largest cluster is a no-op
+def test_cap_is_monotone_in_c():
+    with fixture() as fx:
+        sizes = [
+            len(fx.dataset(max_chains_per_cluster=c,
+                           chain_clusters_file=fx.clusters_tsv).ids)
+            for c in (1, 2, 4, 8, 16)
+        ]
+        assert sizes == sorted(sizes), sizes
+        assert sizes[-1] == 36, sizes  # cap above the largest cluster is a no-op
 
 
-def test_exempt_subsets_can_be_overridden(fx):
-    ds = fx.dataset(max_chains_per_cluster=4,
-                    chain_clusters_file=fx.clusters_tsv,
-                    cap_exempt_subsets=[])
-    assert len(ds.ids) == 4 * 4, len(ds.ids)  # CASP16 now capped too
+def test_exempt_subsets_can_be_overridden():
+    with fixture() as fx:
+        ds = fx.dataset(max_chains_per_cluster=4,
+                        chain_clusters_file=fx.clusters_tsv,
+                        cap_exempt_subsets=[])
+        assert len(ds.ids) == 4 * 4, len(ds.ids)  # CASP16 now capped too
 
 
-def test_unclustered_chain_is_an_error_not_a_silent_pass(fx):
-    rows = fx.clusters_tsv.read_text().splitlines()
-    rows = [r.replace("\t100\t", "\t-1\t") if r.startswith("1abc_A\t") else r
-            for r in rows]
-    fx.clusters_tsv.write_text("\n".join(rows) + "\n")
-    try:
-        fx.dataset(max_chains_per_cluster=4, chain_clusters_file=fx.clusters_tsv)
-    except ValueError as exc:
-        assert "no cluster" in str(exc)
-        return
-    raise AssertionError("expected ValueError for an unclustered chain")
+def test_unclustered_chain_is_an_error_not_a_silent_pass():
+    with fixture() as fx:
+        rows = fx.clusters_tsv.read_text().splitlines()
+        rows = [r.replace("\t100\t", "\t-1\t") if r.startswith("1abc_A\t") else r
+                for r in rows]
+        fx.clusters_tsv.write_text("\n".join(rows) + "\n")
+        try:
+            fx.dataset(max_chains_per_cluster=4, chain_clusters_file=fx.clusters_tsv)
+        except ValueError as exc:
+            assert "no cluster" in str(exc)
+            return
+        raise AssertionError("expected ValueError for an unclustered chain")
 
 
-def test_cap_requires_the_cluster_file(fx):
-    try:
-        fx.dataset(max_chains_per_cluster=4)
-    except ValueError as exc:
-        assert "chain_clusters_file" in str(exc)
-        return
-    raise AssertionError("expected ValueError when the cluster file is missing")
+def test_cap_requires_the_cluster_file():
+    with fixture() as fx:
+        try:
+            fx.dataset(max_chains_per_cluster=4)
+        except ValueError as exc:
+            assert "chain_clusters_file" in str(exc)
+            return
+        raise AssertionError("expected ValueError when the cluster file is missing")
 
 
-def test_tsv_reader_roundtrips(fx):
-    m = load_chain_cluster_tsv(fx.clusters_tsv)
-    assert m["1abc_A"] == 100 and m["9zzz_A"] == 200
-    assert len(m) == 36
+def test_tsv_reader_roundtrips():
+    with fixture() as fx:
+        m = load_chain_cluster_tsv(fx.clusters_tsv)
+        assert m["1abc_A"] == 100 and m["9zzz_A"] == 200
+        assert len(m) == 36
 
 
 def test_datamodule_never_caps_training():
@@ -189,9 +187,21 @@ def test_datamodule_never_caps_training():
     assert src.count("**self._eval_cap_kwargs(),") == 4, "expected 4 eval sites"
 
 
-for name, fn in sorted(globals().items()):
-    if name.startswith("test_") and callable(fn):
-        check(name, _with_fixture(fn) if fn.__code__.co_argcount else fn)
 
-print(f"\n{len(PASSED)}/{len(PASSED) + len(FAILED)} passed")
-sys.exit(1 if FAILED else 0)
+def _run_all() -> int:
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"PASS {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns) - failed}/{len(fns)} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(_run_all())
