@@ -298,6 +298,22 @@ eval dataset. The run is not lost — `per_sample_metrics.tsv` still carries eve
 per-chain value — but the logged `test/*` are family-weighted and must be
 re-aggregated offline before use.
 
+The first run on the rebuilt data must also show the validation contract is
+live (changed 2026-08-22 — canonical val metrics are cluster-balanced, matching
+the headline estimand):
+
+- `val/cluster_balanced = 1`. A `0` means no usable `cluster_id` reached
+  validation: the module logged an error and fell back to the pooled statistic,
+  and that run's threshold and checkpoint are NOT comparable to the others.
+- `val/n_clusters` close to **4,460**. The cap bounds chains *per* cluster, not
+  the number of clusters, so it should not visibly drop — only clusters whose
+  chains all lack valid long-range pairs fall out. A large drop is a defect
+  signal, not the cap working.
+- **Both** `val/f1_long` and `val/f1_long_micro` present, and differing. The
+  first is cluster-balanced and is what `ModelCheckpoint` / `EarlyStopping`
+  monitor; the second is the old pooled statistic and drives nothing. Identical
+  values would mean the cluster map never loaded.
+
 ### Step 5 — 8M gate
 
 Paired, so both the absolute shift and the recomputed retrieval delta are
