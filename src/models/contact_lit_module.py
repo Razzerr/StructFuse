@@ -23,6 +23,8 @@ from src.models.utils.metrics import (
     range_metrics_at_threshold,
     log_macro_test_metrics,
     export_per_sample_tsv,
+    cluster_macro_curves,
+    per_chain_range_counts,
 )
 from src.models.utils.visualize import (
     plot_contact_map_comparison,
@@ -161,6 +163,14 @@ class ContactLitModule(LightningModule):
         # 20 thresholds for F1/precision/recall/MCC search
         self._val_thresholds = torch.linspace(0.05, 0.99, 20)
         # Per-range TP/FP/FN/TN: keys = "short", "medium", "long"
+        # Per-chain counts at every threshold, kept alongside the pooled ones so
+        # the canonical val metrics can be CLUSTER-BALANCED (Methods 4.11) —
+        # the same estimand as the headline test metrics, so the threshold that
+        # early stopping and checkpoint selection see optimises what we report.
+        self._val_chain_cids: Dict[str, List[int]] = {}
+        self._val_chain_tp: Dict[str, List[np.ndarray]] = {}   # each (B', 20)
+        self._val_chain_fp: Dict[str, List[np.ndarray]] = {}
+        self._val_chain_fn: Dict[str, List[np.ndarray]] = {}
         self._val_range_tp: Dict[str, torch.Tensor] = {}   # each (20,)
         self._val_range_fp: Dict[str, torch.Tensor] = {}
         self._val_range_fn: Dict[str, torch.Tensor] = {}
@@ -616,6 +626,7 @@ class ContactLitModule(LightningModule):
 
         B, L, _ = prob.shape
         thresholds = self._val_thresholds.to(prob.device)  # (20,)
+        cluster_ids = batch.get("cluster_id")
 
         # Per-range accumulation of TP/FP/FN/TN and AUC-PR pairs
         for rname, (min_sep, max_sep) in self._range_defs.items():
@@ -628,13 +639,29 @@ class ContactLitModule(LightningModule):
             if p_flat.numel() == 0:
                 continue
 
-            # TP/FP/FN/TN at each threshold
-            preds = (p_flat.unsqueeze(0) >= thresholds.unsqueeze(1)).float()  # (20, N)
-            t_exp = t_flat.unsqueeze(0).expand_as(preds)
-            tp = (preds * t_exp).sum(dim=1)              # (20,)
-            fp = (preds * (1 - t_exp)).sum(dim=1)
-            fn = ((1 - preds) * t_exp).sum(dim=1)
-            tn = ((1 - preds) * (1 - t_exp)).sum(dim=1)
+            # TP/FP/FN/TN at each threshold, computed PER CHAIN. The pooled
+            # totals below are these summed, so `val/*_micro` reproduces the
+            # pre-2026-08-22 statistic exactly while the canonical keys become
+            # cluster-balanced. A chain with no valid pairs in this range is
+            # skipped, mirroring the test-side `n_valid_long_pairs == 0` rule.
+            tp_c, fp_c, fn_c, tn_c, kept = per_chain_range_counts(
+                prob, contact, combined, thresholds
+            )
+            if not kept:
+                continue
+            cid_rows = [
+                int(cluster_ids[b]) if cluster_ids is not None else -1 for b in kept
+            ]
+
+            self._val_chain_cids.setdefault(rname, []).extend(cid_rows)
+            self._val_chain_tp.setdefault(rname, []).append(tp_c.cpu().numpy())
+            self._val_chain_fp.setdefault(rname, []).append(fp_c.cpu().numpy())
+            self._val_chain_fn.setdefault(rname, []).append(fn_c.cpu().numpy())
+
+            tp = tp_c.sum(dim=0)          # (20,) pooled
+            fp = fp_c.sum(dim=0)
+            fn = fn_c.sum(dim=0)
+            tn = tn_c.sum(dim=0)
 
             if rname not in self._val_range_tp:
                 self._val_range_tp[rname] = tp
@@ -672,6 +699,10 @@ class ContactLitModule(LightningModule):
     def on_validation_epoch_start(self):
         """Reset streaming accumulators at start of each validation epoch."""
         self._val_viz_logged = False
+        self._val_chain_cids = {}
+        self._val_chain_tp = {}
+        self._val_chain_fp = {}
+        self._val_chain_fn = {}
         self._val_range_tp = {}
         self._val_range_fp = {}
         self._val_range_fn = {}
@@ -680,6 +711,22 @@ class ContactLitModule(LightningModule):
         self._val_auc_probs = {}
         self._val_auc_targets = {}
         self._val_auc_n_pairs = {}
+
+    def _val_cluster_macro(self, rname):
+        """Cluster-balanced F1/precision/recall curves for one range.
+
+        Thin adapter over `cluster_macro_curves`: concatenates the per-chain
+        counts accumulated this epoch and delegates the aggregation, so the val
+        threshold and the headline test metrics share one implementation.
+        """
+        if rname not in self._val_chain_tp:
+            return None
+        return cluster_macro_curves(
+            self._val_chain_cids[rname],
+            np.concatenate(self._val_chain_tp[rname], axis=0),
+            np.concatenate(self._val_chain_fp[rname], axis=0),
+            np.concatenate(self._val_chain_fn[rname], axis=0),
+        )
 
     def on_validation_epoch_end(self):
         """Aggregate streaming stats into final metrics — zero large tensor allocations."""
@@ -700,15 +747,43 @@ class ContactLitModule(LightningModule):
             fn = self._val_range_fn[rname].cpu()
             tn = self._val_range_tn[rname].cpu()
 
-            # F1 / precision / recall at best-F1 threshold
-            f1 = 2 * tp / (2 * tp + fp + fn + 1e-8)  # (20,)
-            best_idx = int(f1.argmax())
-            best_f1 = f1[best_idx].item()
-            best_thresh = self._val_thresholds[best_idx].item()
-            prec = (tp[best_idx] / (tp[best_idx] + fp[best_idx] + 1e-8)).item()
-            rec = (tp[best_idx] / (tp[best_idx] + fn[best_idx] + 1e-8)).item()
-
+            # Pooled (micro) curve — the pre-2026-08-22 statistic, demoted to
+            # *_micro so nothing that selects a checkpoint reads it.
+            f1_micro = 2 * tp / (2 * tp + fp + fn + 1e-8)  # (20,)
+            micro_idx = int(f1_micro.argmax())
             is_long = rname == "long"
+            self.log(f"val/f1_{rname}_micro", f1_micro[micro_idx].item(),
+                     prog_bar=False, sync_dist=False)
+            self.log(f"val/threshold_{rname}_micro",
+                     self._val_thresholds[micro_idx].item(),
+                     prog_bar=False, sync_dist=False)
+
+            # Canonical keys: CLUSTER-BALANCED, matching the headline estimand.
+            macro = self._val_cluster_macro(rname)
+            if macro is None:
+                log.error(
+                    "val/%s has no usable cluster ids — falling back to the pooled "
+                    "statistic. Check data.chain_clusters_file; threshold selection "
+                    "is NOT cluster-balanced for this run.", rname,
+                )
+                f1_curve = f1_micro.numpy()
+                pr_curve = (tp / (tp + fp + 1e-8)).numpy()
+                rc_curve = (tp / (tp + fn + 1e-8)).numpy()
+                n_clusters = 0
+            else:
+                f1_curve, pr_curve, rc_curve, n_clusters = macro
+
+            best_idx = int(np.argmax(f1_curve))
+            best_f1 = float(f1_curve[best_idx])
+            best_thresh = self._val_thresholds[best_idx].item()
+            prec = float(pr_curve[best_idx])
+            rec = float(rc_curve[best_idx])
+            if is_long:
+                self.log("val/n_clusters", float(n_clusters),
+                         prog_bar=False, sync_dist=False)
+                self.log("val/cluster_balanced", float(n_clusters > 0),
+                         prog_bar=False, sync_dist=False)
+
             self.log(f"val/f1_{rname}", best_f1, prog_bar=is_long, sync_dist=False)
             self.log(f"val/precision_{rname}", prec, prog_bar=False, sync_dist=False)
             self.log(f"val/recall_{rname}", rec, prog_bar=False, sync_dist=False)
@@ -739,8 +814,13 @@ class ContactLitModule(LightningModule):
             avg = float(np.mean(vals)) if vals else 0.0
             self.log(f"val/P@L_{rname}", avg, prog_bar=(rname == "long"), sync_dist=False)
 
-        # Set pred_threshold from long-range (headline metric)
-        if "long" in self._val_range_tp:
+        # Set pred_threshold from long-range (headline metric). Selected on the
+        # CLUSTER-BALANCED curve so the threshold carried into `trainer.test`
+        # maximises the quantity the paper reports, not a pair-pooled proxy.
+        macro_long = self._val_cluster_macro("long")
+        if macro_long is not None:
+            self.pred_threshold = self._val_thresholds[int(np.argmax(macro_long[0]))].item()
+        elif "long" in self._val_range_tp:
             tp_l = self._val_range_tp["long"].cpu()
             fp_l = self._val_range_fp["long"].cpu()
             fn_l = self._val_range_fn["long"].cpu()

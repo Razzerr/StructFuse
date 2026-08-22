@@ -328,6 +328,77 @@ def cluster_macro(rs, key):
     return float(np.mean(means)), len(means)
 
 
+def per_chain_range_counts(prob, contact, mask, thresholds):
+    """Per-chain TP/FP/FN/TN at every threshold for one already-masked range.
+
+    `prob`/`contact` are (B, L, L) and `mask` is (B, L, L), nonzero exactly where
+    a pair counts (range + validity + i<j already applied by the caller).
+    Returns `(tp, fp, fn, tn, kept)` where the counts are (B', T) tensors and
+    `kept` lists the batch rows that had at least one valid pair. Chains with
+    none are dropped, mirroring the test-side `n_valid_*_pairs == 0` rule that
+    excludes them from the macro rather than scoring them zero.
+
+    Summing the rows reproduces the pooled (micro) counts exactly, so one pass
+    feeds both the cluster-balanced canonical metrics and the `*_micro` keys.
+    """
+    tp_rows, fp_rows, fn_rows, tn_rows, kept = [], [], [], [], []
+    for b in range(prob.shape[0]):
+        sel = mask[b] > 0
+        if not bool(sel.any()):
+            continue
+        p_b = prob[b][sel]
+        t_b = contact[b][sel]
+        preds = (p_b.unsqueeze(0) >= thresholds.unsqueeze(1)).float()  # (T, n)
+        t_exp = t_b.unsqueeze(0).expand_as(preds)
+        tp_rows.append((preds * t_exp).sum(dim=1))
+        fp_rows.append((preds * (1 - t_exp)).sum(dim=1))
+        fn_rows.append(((1 - preds) * t_exp).sum(dim=1))
+        tn_rows.append(((1 - preds) * (1 - t_exp)).sum(dim=1))
+        kept.append(b)
+    if not kept:
+        return None, None, None, None, []
+    return (torch.stack(tp_rows), torch.stack(fp_rows),
+            torch.stack(fn_rows), torch.stack(tn_rows), kept)
+
+
+def cluster_macro_curves(cluster_ids, tp, fp, fn, eps: float = 1e-8):
+    """Cluster-balanced F1/precision/recall curves from per-chain counts.
+
+    `tp`/`fp`/`fn` are (n_chains, T) counts at T thresholds; `cluster_ids` is
+    length n_chains. Computes each chain's metric at every threshold, averages
+    within a cluster, then takes an UNWEIGHTED mean over clusters — the estimand
+    the headline test metrics use (Methods 4.11), so a validation threshold
+    chosen on these curves optimises what the paper reports.
+
+    Chains with an unknown cluster (-1) are EXCLUDED rather than pooled into one
+    pseudo-cluster. Returns (f1, precision, recall, n_clusters) with curves of
+    shape (T,), or None when no chain carries a usable cluster id.
+    """
+    cids = np.asarray(cluster_ids)
+    tp = np.asarray(tp, dtype=np.float64)
+    fp = np.asarray(fp, dtype=np.float64)
+    fn = np.asarray(fn, dtype=np.float64)
+
+    keep = cids >= 0
+    if not keep.any():
+        return None
+    cids, tp, fp, fn = cids[keep], tp[keep], fp[keep], fn[keep]
+
+    f1_chain = 2 * tp / (2 * tp + fp + fn + eps)
+    pr_chain = tp / (tp + fp + eps)
+    rc_chain = tp / (tp + fn + eps)
+
+    by_cluster = {}
+    for i, c in enumerate(cids):
+        by_cluster.setdefault(int(c), []).append(i)
+
+    groups = list(by_cluster.values())
+    f1_c = np.stack([f1_chain[idx].mean(axis=0) for idx in groups])
+    pr_c = np.stack([pr_chain[idx].mean(axis=0) for idx in groups])
+    rc_c = np.stack([rc_chain[idx].mean(axis=0) for idx in groups])
+    return f1_c.mean(0), pr_c.mean(0), rc_c.mean(0), len(groups)
+
+
 def log_macro_test_metrics(log_fn, rows, subset_names):
     """Log HEADLINE test metrics (+ per-subset) from per-sample rows. `log_fn` is
     a Lightning module's `self.log`. Canonical key names match ContactLitModule so

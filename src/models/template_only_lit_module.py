@@ -26,6 +26,8 @@ from src.models.utils.metrics import (
     range_metrics_at_threshold,
     unique_pair_mask,
     _create_range_mask,
+    per_chain_range_counts,
+    cluster_macro_curves,
 )
 from src.utils import pylogger
 
@@ -160,6 +162,12 @@ class TemplateOnlyLitModule(LightningModule):
 
         # ── Streaming validation metrics (mirrors ContactLitModule) ──
         self._val_thresholds = torch.linspace(0.05, 0.99, 20)
+        # Per-chain counts feeding the CLUSTER-BALANCED canonical val
+        # metrics (Methods 4.11); the pooled ones stay for `*_micro`.
+        self._val_chain_cids: Dict[str, List[int]] = {}
+        self._val_chain_tp: Dict[str, List] = {}
+        self._val_chain_fp: Dict[str, List] = {}
+        self._val_chain_fn: Dict[str, List] = {}
         self._val_range_tp: Dict[str, torch.Tensor] = {}
         self._val_range_fp: Dict[str, torch.Tensor] = {}
         self._val_range_fn: Dict[str, torch.Tensor] = {}
@@ -280,10 +288,19 @@ class TemplateOnlyLitModule(LightningModule):
             fn_dict=self._val_range_fn,
             tn_dict=self._val_range_tn,
             pL_dict=self._val_pL_range,
+            cluster_ids=batch.get("cluster_id"),
+            chain_cids=self._val_chain_cids,
+            chain_tp=self._val_chain_tp,
+            chain_fp=self._val_chain_fp,
+            chain_fn=self._val_chain_fn,
         )
         return loss
 
     def on_validation_epoch_start(self):
+        self._val_chain_cids = {}
+        self._val_chain_tp = {}
+        self._val_chain_fp = {}
+        self._val_chain_fn = {}
         self._val_range_tp = {}
         self._val_range_fp = {}
         self._val_range_fn = {}
@@ -300,13 +317,32 @@ class TemplateOnlyLitModule(LightningModule):
                                 self._val_range_fn, self._val_range_tn,
                                 self._val_pL_range)
 
-        # Set threshold from long-range best-F1
-        if "long" in self._val_range_tp:
+        # Threshold on the CLUSTER-BALANCED curve — the same rule the frontier
+        # uses, so this baseline's f1_long stays comparable in Table 1. Falls
+        # back to the pooled statistic only if cluster ids never arrived.
+        _macro = None
+        if "long" in self._val_chain_tp:
+            _macro = cluster_macro_curves(
+                self._val_chain_cids["long"],
+                np.concatenate(self._val_chain_tp["long"], axis=0),
+                np.concatenate(self._val_chain_fp["long"], axis=0),
+                np.concatenate(self._val_chain_fn["long"], axis=0),
+            )
+        if _macro is not None:
+            self.pred_threshold = self._val_thresholds[int(np.argmax(_macro[0]))].item()
+            self.log("val/n_clusters", float(_macro[3]), prog_bar=False, sync_dist=False)
+            self.log("val/cluster_balanced", 1.0, prog_bar=False, sync_dist=False)
+        elif "long" in self._val_range_tp:
+            log.error(
+                "No usable cluster ids in validation — threshold falls back to the "
+                "pooled statistic and is NOT comparable to the frontier."
+            )
             tp_l = self._val_range_tp["long"].cpu()
             fp_l = self._val_range_fp["long"].cpu()
             fn_l = self._val_range_fn["long"].cpu()
             f1_l = 2 * tp_l / (2 * tp_l + fp_l + fn_l + 1e-8)
             self.pred_threshold = self._val_thresholds[int(f1_l.argmax())].item()
+            self.log("val/cluster_balanced", 0.0, prog_bar=False, sync_dist=False)
         self.log("val/optimal_threshold", self.pred_threshold, prog_bar=True, sync_dist=False)
 
     # ── Test (streaming) ──────────────────────────────────────────────
@@ -422,6 +458,11 @@ class TemplateOnlyLitModule(LightningModule):
         fn_dict: Dict[str, torch.Tensor],
         tn_dict: Dict[str, torch.Tensor],
         pL_dict: Dict[str, List[float]],
+        cluster_ids=None,
+        chain_cids=None,
+        chain_tp=None,
+        chain_fp=None,
+        chain_fn=None,
     ):
         """Accumulate streaming TP/FP/FN/TN and P@L by range."""
         prob_sq = prob.detach()
@@ -440,12 +481,29 @@ class TemplateOnlyLitModule(LightningModule):
             if p_flat.numel() == 0:
                 continue
 
-            preds = (p_flat.unsqueeze(0) >= thresholds.unsqueeze(1)).float()
-            t_exp = t_flat.unsqueeze(0).expand_as(preds)
-            tp = (preds * t_exp).sum(dim=1)
-            fp = (preds * (1 - t_exp)).sum(dim=1)
-            fn = ((1 - preds) * t_exp).sum(dim=1)
-            tn = ((1 - preds) * (1 - t_exp)).sum(dim=1)
+            # Per-chain counts; the pooled totals below are these summed, so
+            # `*_micro` is unchanged while the canonical val metrics become
+            # cluster-balanced (Methods 4.11). The baselines must use the SAME
+            # threshold-selection rule as the frontier or their f1_long column
+            # in Table 1 is not comparable.
+            tp_c, fp_c, fn_c, tn_c, kept = per_chain_range_counts(
+                prob_sq, contact_d, combined, thresholds
+            )
+            if not kept:
+                continue
+            if chain_cids is not None:
+                chain_cids.setdefault(rname, []).extend(
+                    int(cluster_ids[b]) if cluster_ids is not None else -1
+                    for b in kept
+                )
+                chain_tp.setdefault(rname, []).append(tp_c.cpu().numpy())
+                chain_fp.setdefault(rname, []).append(fp_c.cpu().numpy())
+                chain_fn.setdefault(rname, []).append(fn_c.cpu().numpy())
+
+            tp = tp_c.sum(dim=0)
+            fp = fp_c.sum(dim=0)
+            fn = fn_c.sum(dim=0)
+            tn = tn_c.sum(dim=0)
 
             if rname not in tp_dict:
                 tp_dict[rname] = tp
