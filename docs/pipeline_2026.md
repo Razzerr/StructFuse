@@ -70,13 +70,30 @@ Split sizes (cutoff **2024-04-30** — release date of the first CASP16 target):
 |---|---:|---|
 | train | 70,304 | 167,756 chains |
 | val | 15,442 | from the evaluated post-cutoff pool |
-| test | 23,164 | incl. 146,386 cluster-promoted entries |
+| test | 23,164 | cluster-promoted count below is UNVERIFIED |
 | CASP16 | 42 | `9b0l` / `9sfa` absent from the snapshot |
 
 The train set is smaller than the 2025 generation (96,393) because the cutoff is
 frozen while 19 months of new depositions all land post-cutoff and drag their
 clusters across via cluster promotion. Deliberate: the date is principled, the
 set size is not.
+
+**Open, must be resolved before Methods.** An earlier draft of this table said
+test contained "146,386 cluster-promoted entries", which is impossible — the
+number exceeds test's own 23,164 entries. It is probably a chain count, or a
+count over a different pool, but neither reading has been checked. Resolve it
+against the artifact rather than by inference:
+
+```bash
+python - <<'EOF'
+import json, collections
+d = json.load(open("data/output_splits_2026/mmcif_final_splits.json"))
+print(type(d), list(d)[:6] if isinstance(d, dict) else len(d))
+EOF
+```
+
+Then report entries vs chains separately for every split and rewrite the table
+with the unit named in the column header.
 
 ### Leakage guards (three, independent)
 
@@ -133,6 +150,45 @@ R() {  # R <cpus> <mem> <time> "<command>"
 ```
 
 `--gpus=1` is required even for CPU-only jobs on `proxima`.
+
+### Step 0 — data generation (already done; recorded for reproducibility)
+
+These produced the artifacts marked done in the state table. They are listed
+because a reader reproducing the work needs them, and because one of them has a
+footgun.
+
+```bash
+# a) mmCIF snapshot -> per-chain NPZ, and the length cache
+python scripts/build_contacts.py      # see --help; writes data/processed_2026
+python scripts/build_npz_lengths.py   # writes npz_lengths.json
+
+# b) the ONLY place chain -> cluster is derived
+python scripts/resolve_chain_clusters.py \
+  --processed-dir data/processed_2026 \
+  --cluster-file  data/clusters_30_2026.txt \
+  --out-tsv       data/output_splits_2026/chain_clusters.tsv \
+  --out-no-cluster-ids data/output_splits_2026/no_cluster_ids.txt
+
+# c) splits.  --limit_files 0 IS MANDATORY - see the warning below
+python scripts/prepare_data_splits.py \
+  --input_dir  <mmcif snapshot dir> \
+  --output_dir data/output_splits_2026 \
+  --clusters_file data/clusters_30_2026.txt \
+  --exclude_entries_file data/output_splits_2026/no_cluster_entries.txt \
+  --cutoff_date 2024-04-30 \
+  --limit_files 0
+
+# d) val / test partition of the evaluated pool.  No CLI - edit the constants at
+#    the top of the file (SEED=42, VAL_FRACTION=0.4, CLUSTERS_FILE, OUT_DIR).
+python scripts/split_test_val.py
+```
+
+> **`prepare_data_splits.py --limit_files` defaults to 100, not to all.** Run
+> without the explicit `--limit_files 0` it reads one hundred mmCIF files and
+> writes a split that is structurally valid, passes the integrity gate, and is
+> completely wrong. There is no error and no warning. Check the entry counts in
+> the state table against the produced `mmcif_final_splits.json` before trusting
+> any split.
 
 ### Step 1 — embeddings (long pole)
 

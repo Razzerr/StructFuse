@@ -333,9 +333,12 @@ def log_macro_test_metrics(log_fn, rows, subset_names):
     a Lightning module's `self.log`. Canonical key names match ContactLitModule so
     every module (frontier + B1/B4) reports identically.
 
-    Canonical `test/*` keys are CLUSTER-BALANCED (Methods 4.11); the older
-    per-chain macro is kept alongside as `test/*_chainmacro` so the two are
-    comparable and nothing silently changes meaning under an existing key.
+    Canonical `test/*` keys are CLUSTER-BALANCED (Methods 4.11). This CHANGED the
+    meaning of existing keys: `test/P@L_long` and friends were per-chain macro
+    before 2026-08-21 and are cluster-balanced after it. The old quantity is kept
+    alongside as `test/*_chainmacro`, but under a NEW key — so any run fetched
+    across that boundary must be compared via `test/cluster_balanced` and the
+    audit manifest's `data_version`, never by key name alone.
 
     W&B keys use the no-slash convention (P@L2) via `_WANDB_KEY`; TSV columns keep
     the slash form. Each canonical key is written exactly once.
