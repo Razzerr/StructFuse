@@ -151,6 +151,26 @@ R() {  # R <cpus> <mem> <time> "<command>"
 
 `--gpus=1` is required even for CPU-only jobs on `proxima`.
 
+`R` runs **interactively** and dies with the terminal — a dropped SSH connection
+kills the job. Use it only for short gates where you want the answer immediately.
+For anything longer than ~15 minutes use the detached form:
+
+```bash
+B() {  # B <name> <cpus> <mem> <time> "<command>"
+  sbatch --partition=proxima --gpus=1 --job-name="$1" \
+         --cpus-per-task="$2" --mem="$3" --time="$4" \
+         --output="logs/slurm-$1-%j.out" --wrap "
+    eval \"\$(${MAMBA_BIN} shell hook --shell bash)\"
+    micromamba activate ${MAMBA_ENV}
+    export HF_HOME=\$PWD/models TORCH_HOME=\$PWD/models PROJECT_ROOT=\$PWD
+    export TRITON_CACHE_DIR=\$PWD/.triton_\${SLURM_JOB_ID}
+    $5"
+}
+```
+
+Which to use: `B` for embeddings, index builds, `verify_no_leak.py` and every
+training run; `R` for `verify_data_integrity.py`, `pytest`, and ad-hoc checks.
+
 ### Step 0 — data generation (already done; recorded for reproducibility)
 
 These produced the artifacts marked done in the state table. They are listed
