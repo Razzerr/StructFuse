@@ -130,8 +130,16 @@ R() {  # R <cpus> <mem> <time> "<command>"
 
 ### Step 1 — embeddings (long pole)
 
-Excludes the 13,513 unclustered chains, so ~1,023,831 remain. Resumable: it
-skips outputs that already exist, so a walltime kill is safe to re-issue.
+Excludes 13,514 chains — 13,513 unclustered plus `8tz6_B` from
+`corrupt_ids.txt` — so 1,023,830 of the 1,037,344 processed chains remain.
+Resumable: it skips outputs that already exist, so a walltime kill is safe to
+re-issue.
+
+Batches are bounded by `batch * L^2` (`--max_pair_elems`, default 4e6), not by
+sequence count: ESM2 materialises one attention map per layer-head over the full
+L x L grid, so a fixed `--batch_size` that is trivial at L=100 is 16 GB at
+L=1022. Both models completed under this bound (8M in 42 min for the tail after
+an earlier OOM, 650M in 13 h 56 m for the full set).
 
 ```bash
 R 8 64G 24:00:00 "python scripts/precompute_esm2_embeddings.py \
@@ -145,14 +153,14 @@ R 8 96G 48:00:00 "python scripts/precompute_esm2_embeddings.py \
   --model_name esm2_t33_650M_UR50D --batch_size 4"
 ```
 
-**Check:** the log must print `Excluded 13513 chains via skip lists` before it
+**Check:** the log must print `Excluded 13514 chains via skip lists` before it
 loads the model. If it prints `Excluded 0`, the resolver output is missing and
 the run must be killed — everything downstream inherits the contamination.
 
 Then confirm the file count:
 
 ```bash
-ls data/precomputed/esm_t33_650M_2026 | wc -l   # expect ~1,023,831
+ls data/precomputed/esm_t33_650M_2026 | wc -l   # expect 1,023,830
 ```
 
 ### Step 2 — indexes
