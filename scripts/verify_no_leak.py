@@ -13,6 +13,8 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+import time
 from typing import List, Optional, Set, Tuple
 
 import hydra
@@ -39,11 +41,29 @@ def _scan(
     n_hits_total = 0
     n_leaks = 0
     leaks: List[Tuple[str, str]] = []
-    for pid in pids[:max_queries]:
+    selected = pids[:max_queries]
+    total = len(selected)
+    # Progress every 5k queries. A full scan is ~168k FAISS queries per pass and
+    # runs for hours; without a heartbeat a stalled job is indistinguishable from
+    # a working one, which is how the earlier 12 h timeout ended up telling us
+    # nothing. stderr keeps it out of the stdout summary.
+    report_every = 5000
+    t0 = time.time()
+    for pid in selected:
         hits = faiss_index.topk_precomputed(
             pid, topk, filter_holdout=filter_holdout
         )
         n_queries += 1
+        if n_queries % report_every == 0 or n_queries == total:
+            elapsed = time.time() - t0
+            rate = n_queries / elapsed if elapsed > 0 else 0.0
+            eta_min = ((total - n_queries) / rate / 60) if rate > 0 else float("nan")
+            print(
+                f"  [{tag}] filter_holdout={filter_holdout}: "
+                f"{n_queries}/{total} queries, {n_leaks} leaked so far, "
+                f"{rate:.0f} q/s, ETA {eta_min:.0f} min",
+                file=sys.stderr, flush=True,
+            )
         for tpl_id, _sim in hits:
             n_hits_total += 1
             if _get_protein_id(tpl_id) in holdout_prot_ids:
