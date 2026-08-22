@@ -246,6 +246,24 @@ class ESM2OnlyLitModule(LightningModule):
         for rname, val in range_metrics.items():
             pL_dict.setdefault(rname, []).append(val)
 
+    def _val_cluster_macro_by_range(self):
+        """Cluster-balanced F1/precision/recall curves per range, or {} if none.
+
+        Thin adapter over `cluster_macro_curves` so the baselines and the
+        frontier share one aggregation implementation.
+        """
+        out = {}
+        for rname, tp_list in self._val_chain_tp.items():
+            curves = cluster_macro_curves(
+                self._val_chain_cids[rname],
+                np.concatenate(tp_list, axis=0),
+                np.concatenate(self._val_chain_fp[rname], axis=0),
+                np.concatenate(self._val_chain_fn[rname], axis=0),
+            )
+            if curves is not None:
+                out[rname] = curves
+        return out
+
     def _log_range_metrics(
         self,
         stage: str,
@@ -255,7 +273,16 @@ class ESM2OnlyLitModule(LightningModule):
         tn_dict: Dict[str, torch.Tensor],
         pL_dict: Dict[str, List[float]],
     ):
-        """Aggregate streaming stats into per-range metrics."""
+        """Aggregate streaming stats into per-range metrics.
+
+        Canonical `{stage}/f1_*`, `precision_*`, `recall_*` are CLUSTER-BALANCED
+        (Methods 4.11) — these are the keys the ModelCheckpoint and EarlyStopping
+        callbacks monitor (`val/f1_long`), so they must carry the same estimand
+        as the headline test metrics or this baseline selects its checkpoint on a
+        different objective than the frontier does. The pooled statistic is kept
+        under `*_micro` and drives nothing.
+        """
+        macro_by_range = self._val_cluster_macro_by_range()
         for rname in ("short", "medium", "long"):
             if rname not in tp_dict:
                 continue
@@ -265,17 +292,54 @@ class ESM2OnlyLitModule(LightningModule):
             tn = tn_dict[rname].cpu()
 
             f1 = 2 * tp / (2 * tp + fp + fn + 1e-8)
-            best_idx = int(f1.argmax())
-            best_f1 = f1[best_idx].item()
-            prec = (tp[best_idx] / (tp[best_idx] + fp[best_idx] + 1e-8)).item()
-            rec = (tp[best_idx] / (tp[best_idx] + fn[best_idx] + 1e-8)).item()
-
+            micro_idx = int(f1.argmax())
             is_long = rname == "long"
+            self.log(f"{stage}/f1_{rname}_micro", f1[micro_idx].item(),
+                     prog_bar=False, sync_dist=False)
+            self.log(f"{stage}/precision_{rname}_micro",
+                     (tp[micro_idx] / (tp[micro_idx] + fp[micro_idx] + 1e-8)).item(),
+                     prog_bar=False, sync_dist=False)
+            self.log(f"{stage}/recall_{rname}_micro",
+                     (tp[micro_idx] / (tp[micro_idx] + fn[micro_idx] + 1e-8)).item(),
+                     prog_bar=False, sync_dist=False)
+            self.log(f"{stage}/threshold_{rname}_micro",
+                     self._val_thresholds[micro_idx].item(),
+                     prog_bar=False, sync_dist=False)
+
+            macro = macro_by_range.get(rname)
+            if macro is None:
+                if is_long:
+                    log.error(
+                        f"{stage}/f1_{rname} has no usable cluster ids — falling "
+                        f"back to the pooled statistic. Checkpoint selection is "
+                        f"NOT cluster-balanced for this run."
+                    )
+                best_idx = micro_idx
+                best_f1 = f1[micro_idx].item()
+                prec = (tp[micro_idx] / (tp[micro_idx] + fp[micro_idx] + 1e-8)).item()
+                rec = (tp[micro_idx] / (tp[micro_idx] + fn[micro_idx] + 1e-8)).item()
+            else:
+                f1_c, pr_c, rc_c, n_clusters = macro
+                best_idx = int(np.argmax(f1_c))
+                best_f1 = float(f1_c[best_idx])
+                prec = float(pr_c[best_idx])
+                rec = float(rc_c[best_idx])
+                if is_long:
+                    self.log(f"{stage}/n_clusters", float(n_clusters),
+                             prog_bar=False, sync_dist=False)
+            if is_long:
+                self.log(f"{stage}/cluster_balanced", float(macro is not None),
+                         prog_bar=False, sync_dist=False)
+
             self.log(f"{stage}/f1_{rname}", best_f1, prog_bar=is_long, sync_dist=False)
             self.log(f"{stage}/precision_{rname}", prec, prog_bar=False, sync_dist=False)
             self.log(f"{stage}/recall_{rname}", rec, prog_bar=False, sync_dist=False)
+            self.log(f"{stage}/threshold_{rname}",
+                     self._val_thresholds[best_idx].item(),
+                     prog_bar=False, sync_dist=False)
 
-            # MCC
+            # MCC from the pooled counts, but reported AT the cluster-balanced
+            # threshold so it describes the operating point actually selected.
             mcc_num = tp * tn - fp * fn
             mcc_den = torch.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-8)
             mcc_all = mcc_num / mcc_den
@@ -341,21 +405,12 @@ class ESM2OnlyLitModule(LightningModule):
         # Threshold on the CLUSTER-BALANCED curve — the same rule the frontier
         # uses, so this baseline's f1_long stays comparable in Table 1. Falls
         # back to the pooled statistic only if cluster ids never arrived.
-        _macro = None
-        if "long" in self._val_chain_tp:
-            _macro = cluster_macro_curves(
-                self._val_chain_cids["long"],
-                np.concatenate(self._val_chain_tp["long"], axis=0),
-                np.concatenate(self._val_chain_fp["long"], axis=0),
-                np.concatenate(self._val_chain_fn["long"], axis=0),
-            )
+        _macro = self._val_cluster_macro_by_range().get("long")
         if _macro is not None:
             best_idx = int(np.argmax(_macro[0]))
             self.pred_threshold = self._val_thresholds[best_idx].item()
             self.log("val/optimal_threshold", self.pred_threshold, prog_bar=True, sync_dist=False)
             self.log("val/f1", float(_macro[0][best_idx]), prog_bar=True, sync_dist=False)
-            self.log("val/n_clusters", float(_macro[3]), prog_bar=False, sync_dist=False)
-            self.log("val/cluster_balanced", 1.0, prog_bar=False, sync_dist=False)
         elif "long" in self._val_range_tp:
             log.error(
                 "No usable cluster ids in validation — threshold falls back to the "
@@ -369,7 +424,6 @@ class ESM2OnlyLitModule(LightningModule):
             self.pred_threshold = self._val_thresholds[best_idx].item()
             self.log("val/optimal_threshold", self.pred_threshold, prog_bar=True, sync_dist=False)
             self.log("val/f1", f1_l[best_idx].item(), prog_bar=True, sync_dist=False)
-            self.log("val/cluster_balanced", 0.0, prog_bar=False, sync_dist=False)
 
     # ── Test ──────────────────────────────────────────────────────────
 

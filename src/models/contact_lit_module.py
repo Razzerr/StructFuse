@@ -762,9 +762,9 @@ class ContactLitModule(LightningModule):
             macro = self._val_cluster_macro(rname)
             if macro is None:
                 log.error(
-                    "val/%s has no usable cluster ids — falling back to the pooled "
-                    "statistic. Check data.chain_clusters_file; threshold selection "
-                    "is NOT cluster-balanced for this run.", rname,
+                    f"val/{rname} has no usable cluster ids — falling back to the "
+                    f"pooled statistic. Check data.chain_clusters_file; threshold "
+                    f"selection is NOT cluster-balanced for this run."
                 )
                 f1_curve = f1_micro.numpy()
                 pr_curve = (tp / (tp + fp + 1e-8)).numpy()
