@@ -207,7 +207,13 @@ def test_fusion_parity_configs_compose_with_expected_inputs_and_backbones():
             assert parity_8m.data.compute_dist_bins is True
             assert parity_8m.data.topk == 4
             assert parity_8m.model.esm_model == "esm2_t6_8M_UR50D"
-            assert parity_8m.data.index_dir == "data/index_t6"
+            # Paths are absolute and version-tagged via paths.data_version, so
+            # assert the WIRING (8M config -> 8M index of the active generation)
+            # rather than a literal that goes stale on every data rebuild.
+            assert parity_8m.data.index_dir == parity_8m.paths.index_t6
+            assert parity_8m.data.index_dir.endswith(
+                f"index_t6_{parity_8m.paths.data_version}"
+            )
 
             candidate_650m = compose(
                 config_name="train",
@@ -219,8 +225,14 @@ def test_fusion_parity_configs_compose_with_expected_inputs_and_backbones():
             assert candidate_650m.data.compute_dist_bins is True
             assert candidate_650m.data.topk == 4
             assert candidate_650m.model.esm_model == "esm2_t33_650M_UR50D"
-            assert candidate_650m.data.index_dir == "data/index_t33"
+            assert candidate_650m.data.index_dir == candidate_650m.paths.index_t33
+            assert candidate_650m.data.index_dir.endswith(
+                f"index_t33_{candidate_650m.paths.data_version}"
+            )
             assert (
                 candidate_650m.data.esm_embeddings_dir
-                == "data/precomputed/esm_t33_650M"
+                == candidate_650m.paths.esm_t33
+            )
+            assert candidate_650m.data.esm_embeddings_dir.endswith(
+                f"esm_t33_650M_{candidate_650m.paths.data_version}"
             )
