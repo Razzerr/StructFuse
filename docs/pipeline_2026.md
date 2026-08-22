@@ -116,15 +116,15 @@ with the unit named in the column header.
 | 0 | splits regenerated | **done** — every split and cluster invariant passes |
 | 1 | embeddings `esm_t6_8M_2026` | **done** — 1,023,830 chains |
 | 1 | embeddings `esm_t33_650M_2026` | **done** — 1,023,830 chains, 13 h 56 m |
-| 2 | `index_t6_2026`, `index_t33_2026` | **next** |
-| 3 | `verify_data_integrity.py --check-embeddings` | partial — split/cluster invariants pass, the index ones cannot run until step 2 |
+| 2 | `index_t6_2026`, `index_t33_2026` | **done** — 1,023,830 entries each, `excluded=0`, 34,328 clusters |
+| 3 | `verify_data_integrity.py --check-embeddings` | **next** — index invariants are now runnable |
 | 4 | `verify_no_leak.py` full scan | pending |
-| 4 | `pytest tests/phase0` on the server | pending |
+| 4 | `pytest tests/phase0` on the server | **done** — 98 passed |
 | 4b | evaluation-protocol sanity | pending — read off the first run's logs, not a separate job |
 | 5 | 8M gate: `frontier` k=4 + `no_templates`, paired | pending |
 | 6 | full matrix (8M panel; 650M x 3 seeds + B1/B2/B4) | pending — gated on step 5 |
 
-Step 2 is the only thing standing between the current state and the gates.
+Steps 3 and 4 (leak scan) are all that remain before the 8M gate.
 
 ---
 
