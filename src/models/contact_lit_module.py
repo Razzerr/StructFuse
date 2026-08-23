@@ -773,6 +773,18 @@ class ContactLitModule(LightningModule):
             else:
                 f1_curve, pr_curve, rc_curve, n_clusters = macro
 
+            if is_long and not getattr(self, "_val_contract_logged", False):
+                # One line in the RUN LOG, not only in W&B: `val/cluster_balanced`
+                # and `val/n_clusters` are logged with prog_bar=False, so they are
+                # invisible to anyone grepping the text log to confirm the
+                # validation contract is live.
+                self._val_contract_logged = True
+                log.info(
+                    f"Validation contract: cluster_balanced="
+                    f"{int(macro is not None)} n_clusters={n_clusters} "
+                    f"(canonical val/f1_* are cluster-balanced; pooled kept as "
+                    f"val/f1_*_micro)"
+                )
             best_idx = int(np.argmax(f1_curve))
             best_f1 = float(f1_curve[best_idx])
             best_thresh = self._val_thresholds[best_idx].item()

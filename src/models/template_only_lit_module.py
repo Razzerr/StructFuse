@@ -596,6 +596,18 @@ class TemplateOnlyLitModule(LightningModule):
                 self.log(f"{stage}/cluster_balanced", float(macro is not None),
                          prog_bar=False, sync_dist=False)
 
+            if is_long and stage == "val" and not getattr(
+                self, "_val_contract_logged", False
+            ):
+                # Same reason as the frontier: these markers go to W&B only.
+                self._val_contract_logged = True
+                log.info(
+                    f"Validation contract: cluster_balanced="
+                    f"{int(macro is not None)} "
+                    f"n_clusters={macro[3] if macro is not None else 0} "
+                    f"(canonical val/f1_* are cluster-balanced; pooled kept as "
+                    f"val/f1_*_micro)"
+                )
             self.log(f"{stage}/f1_{rname}", best_f1, prog_bar=is_long, sync_dist=False)
             self.log(f"{stage}/precision_{rname}", prec, prog_bar=False, sync_dist=False)
             self.log(f"{stage}/recall_{rname}", rec, prog_bar=False, sync_dist=False)

@@ -330,7 +330,11 @@ The first run on the rebuilt data must also show the validation contract is
 live (changed 2026-08-22 — canonical val metrics are cluster-balanced, matching
 the headline estimand):
 
-- `val/cluster_balanced = 1`. A `0` means no usable `cluster_id` reached
+- `Validation contract: cluster_balanced=1 n_clusters=4460` in the run log after
+  the first validation epoch. The `val/cluster_balanced` and `val/n_clusters`
+  metrics themselves go to W&B only (`prog_bar=False`), so grepping the text log
+  for those key names finds nothing — grep for `Validation contract:` instead.
+- `val/cluster_balanced = 1` in W&B. A `0` means no usable `cluster_id` reached
   validation: the module logged an error and fell back to the pooled statistic,
   and that run's threshold and checkpoint are NOT comparable to the others.
 - `val/n_clusters` close to **4,460**. The cap bounds chains *per* cluster, not
