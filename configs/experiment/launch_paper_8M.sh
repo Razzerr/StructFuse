@@ -2,6 +2,7 @@
 # Final 8M mechanism/ablation runs.
 #
 # Usage:
+#   ./configs/experiment/launch_paper_8M.sh --gate          # 2 jobs, run first
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -17,7 +18,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --smoke|--core|--supplementary|--all)
+        --gate|--smoke|--core|--supplementary|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -92,6 +93,15 @@ submit_core() {
     submit_training "baseline/esm2_only" "paper_8m_esm2_raw" "08:00:00"
 }
 
+# Paired validation gate for a rebuilt data generation: real retrieval vs no
+# templates, nothing else. Run this BEFORE --core so a broken rebuild costs two
+# jobs instead of eight. Reports the absolute shift against the previous
+# generation and the recomputed retrieval delta.
+submit_gate() {
+    submit_training "frontier_8M" "paper_8m_gate_frontier_k4"
+    submit_training "ablation/no_templates" "paper_8m_gate_no_templates"
+}
+
 submit_supplementary() {
     submit_training "ablation/standard_fusion" "paper_8m_standard_fusion"
     submit_training "ablation/trufor_fusion" "paper_8m_trufor_fusion"
@@ -103,6 +113,9 @@ submit_supplementary() {
 
 echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}, skip_frontier=${SKIP_FRONTIER}"
 case "${MODE}" in
+    gate)
+        submit_gate
+        ;;
     smoke)
         submit_smoke
         ;;
