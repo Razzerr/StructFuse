@@ -117,14 +117,22 @@ with the unit named in the column header.
 | 1 | embeddings `esm_t6_8M_2026` | **done** — 1,023,830 chains |
 | 1 | embeddings `esm_t33_650M_2026` | **done** — 1,023,830 chains, 13 h 56 m |
 | 2 | `index_t6_2026`, `index_t33_2026` | **done** — 1,023,830 entries each, `excluded=0`, 34,328 clusters |
-| 3 | `verify_data_integrity.py --check-embeddings` | **next** — index invariants are now runnable |
-| 4 | `verify_no_leak.py` full scan | pending |
+| 3 | `verify_data_integrity.py --check-embeddings` | **done** — 22/22, incl. cluster-level disjointness and ids/emb/faiss row parity |
+| 4 | `verify_no_leak.py` full scan | **done** — 0 leaks with the filter, 97,586 without (see below) |
 | 4 | `pytest tests/phase0` on the server | **done** — 98 passed |
 | 4b | evaluation-protocol sanity | pending — read off the first run's logs, not a separate job |
-| 5 | 8M gate: `frontier` k=4 + `no_templates`, paired | pending |
+| 5 | 8M gate: `frontier` k=4 + `no_templates`, paired | **next** |
 | 6 | full matrix (8M panel; 650M x 3 seeds + B1/B2/B4) | pending — gated on step 5 |
 
-Steps 3 and 4 (leak scan) are all that remain before the 8M gate.
+Every gate is green; the 8M gate is next.
+
+**Leak-scan result, 2026-08-22** (`index_t6_2026`, full scan, no `max_queries`):
+167,756 train queries retrieving 671,024 templates. With `filter_holdout=True`,
+**0** retrieved templates belong to a val/test protein. With the filter off,
+**97,586** do — 14.54 % of all hits. The second number is what makes the first
+meaningful: it proves the filter is load-bearing rather than facing an index that
+happens to contain no holdout chains. Quote both in Methods, never the zero
+alone.
 
 ---
 
