@@ -3,7 +3,14 @@
 early_stopping:
   _target_: lightning.pytorch.callbacks.EarlyStopping
   monitor: ??? # quantity to be monitored, must be specified !!!
-  min_delta: 0. # minimum change in the monitored quantity to qualify as an improvement
+  # 0.001 = the MEASURED epoch-to-epoch noise of val/f1_long on the plateau
+  # (sd 0.00098 on 6ppbumcl ep26-42, 0.00141 on wnu2h8io ep17-26). At the old
+  # value of 0 the patience counter reset on pure noise, so early stopping could
+  # not fire: 6ppbumcl was still running at epoch 43 having gained 0.27pp since
+  # epoch 26. Two costs beyond wasted GPU — paired runs ended up on very
+  # different horizons (43 vs 27 epochs), and the checkpoint was selected as the
+  # max over ~17 noisy plateau epochs, which biases val upward relative to test.
+  min_delta: 0.001 # minimum change in the monitored quantity to qualify as an improvement
   patience: 3 # number of checks with no improvement after which training will be stopped
   verbose: False # verbosity mode
   mode: "min" # "max" means higher metric value is better, can be also "min"
