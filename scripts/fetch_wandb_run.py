@@ -195,9 +195,91 @@ def render_test_summary(run: wandb.apis.public.Run, console: Console) -> None:
         console.print(t)
 
 
+def _epoch_frame(run: wandb.apis.public.Run, max_rows: int | None) -> pd.DataFrame:
+    """Epoch-aggregated history, test columns dropped. Shared by both renderers."""
+    rows = []
+    for row in run.scan_history(page_size=500):
+        rows.append(row)
+        if max_rows is not None and len(rows) >= max_rows:
+            break
+    if not rows:
+        return pd.DataFrame()
+    history = pd.DataFrame(rows)
+    history = history.drop(columns=[c for c in history.columns if c.startswith("test/")])
+    if "epoch" in history.columns:
+        history = history.groupby("epoch", sort=True).last().reset_index()
+    return history
+
+
+def render_selected_keys(
+    runs: list[wandb.apis.public.Run], patterns: list[str], max_rows: int | None,
+    console: Console,
+) -> None:
+    """Print only the columns matching `patterns`, so nothing gets truncated.
+
+    The default per-prefix tables render every logged key at once; once a run
+    carries ~40 val columns, rich abbreviates the headers (`cluster_bala…`,
+    `f1_long_m…`) and the numbers become unreadable. Selecting a handful of keys
+    keeps the table narrow enough to print in full. With several runs it also
+    emits a side-by-side last/best comparison, which is what a paired gate or an
+    ablation cell actually needs.
+    """
+    per_run: dict[str, pd.DataFrame] = {}
+    for run in runs:
+        history = _epoch_frame(run, max_rows)
+        if history.empty:
+            console.print(f"[dim]{run.id}: no metric history.[/dim]")
+            continue
+        cols = [
+            c for c in history.columns
+            if not c.startswith("_") and c != "epoch"
+            and any(pat in c for pat in patterns)
+        ]
+        if not cols:
+            console.print(
+                f"[dim]{run.id}: no column matches {patterns}. "
+                f"Available prefixes: "
+                f"{sorted({c.split('/')[0] for c in history.columns if not c.startswith('_')})}[/dim]"
+            )
+            continue
+        index_col = "epoch" if "epoch" in history.columns else "_step"
+        frame = history[[index_col] + sorted(cols)].dropna(how="all", subset=sorted(cols))
+        per_run[run.id] = frame
+        console.rule(f"[bold]{run.id} — {run.name} ({run.state})[/bold]")
+        _render_metric_table(frame, sorted(cols), index_col, run.id, run.id, console)
+
+    if len(per_run) < 2:
+        return
+
+    console.rule("[bold]Comparison — last / best epoch[/bold]")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("run")
+    table.add_column("epoch")
+    all_cols = sorted({c for f in per_run.values() for c in f.columns if c not in ("epoch", "_step")})
+    for col in all_cols:
+        table.add_column(col, justify="right")
+    for rid, frame in per_run.items():
+        idx = "epoch" if "epoch" in frame.columns else "_step"
+        last = frame.iloc[-1]
+        table.add_row(f"{rid} last", _fmt(last[idx]),
+                      *[_fmt(last.get(c)) for c in all_cols])
+    console.print(table)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch W&B run info and metrics.")
-    parser.add_argument("run_id", help="W&B run ID (e.g. abc123xy)")
+    parser.add_argument("run_id", nargs="+", help="One or more W&B run IDs (e.g. abc123xy)")
+    parser.add_argument(
+        "--keys",
+        default=None,
+        help="Comma-separated substrings; print ONLY matching metric columns, to stdout, "
+             "without rich truncating the headers. E.g. --keys f1_long,P@L_long,cluster_balanced. With several run ids, adds a side-by-side comparison.",
+    )
+    parser.add_argument(
+        "--width", type=int, default=200,
+        help="Console width for --keys output (default 200); a bare terminal is "
+             "usually 80, which truncates the headers again.",
+    )
     parser.add_argument(
         "--max-rows",
         type=int,
@@ -206,19 +288,30 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run = fetch_run(args.run_id)
+    runs = [fetch_run(rid) for rid in args.run_id]
 
-    # Render into a string via a file console
-    out_path = Path(".temp/experiments") / f"{args.run_id}.md"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.keys:
+        patterns = [k.strip() for k in args.keys.split(",") if k.strip()]
+        # Explicit width: a bare Console() inherits the terminal's, which is
+        # usually 80 and re-introduces the very truncation --keys exists to avoid.
+        render_selected_keys(
+            runs, patterns, args.max_rows,
+            Console(width=args.width, highlight=False, no_color=True),
+        )
+        return
 
-    with open(out_path, "w") as f:
-        file_console = Console(file=f, width=500, highlight=False, markup=True, no_color=True)
-        render_run_info(run, file_console)
-        build_metric_tables(run, max_rows=args.max_rows, console=file_console)
-        render_test_summary(run, file_console)
+    for run in runs:
+        # Render into a string via a file console
+        out_path = Path(".temp/experiments") / f"{run.id}.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saved in {out_path}")
+        with open(out_path, "w") as f:
+            file_console = Console(file=f, width=500, highlight=False, markup=True, no_color=True)
+            render_run_info(run, file_console)
+            build_metric_tables(run, max_rows=args.max_rows, console=file_console)
+            render_test_summary(run, file_console)
+
+        print(f"Saved in {out_path}")
 
 
 if __name__ == "__main__":
