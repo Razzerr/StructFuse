@@ -3,7 +3,13 @@
 defaults:
   - _self_
   - data: contact
-  - model: esm2_t33_650M
+  # MUST match configs/train.yaml. They diverged (train 8M / eval 650M) and every
+  # ablation/* config inherits this default rather than pinning a backbone, so
+  # `experiment=ablation/no_templates` built an 8M model under train.py and a
+  # 650M one under eval.py — the checkpoint then failed to load. Every 650M
+  # experiment pins `override /model` explicitly, so nothing depends on this
+  # being 650M. tests/phase0/test_train_eval_parity.py asserts the two agree.
+  - model: esm2_t6_8M
   - callbacks: default
   - logger: null # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
