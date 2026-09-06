@@ -363,6 +363,44 @@ B1/B2/B4).
 
 ---
 
+## 3b. Experiment plan — stages
+
+Data generation `2026`, cluster-balanced headline, C=8 eval cap, `min_delta=0.001`.
+Every stage gates the next. Run counts are cells, not jobs-with-retries.
+
+| # | stage | runs | GPU (measured 8M: ~15 min/epoch, ~27 epochs) | status |
+|---|---|---:|---|---|
+| **A** | Gate: frontier k=4 + no_templates, paired | 2 | done (10.7 h + 5.7 h) | **done** — Δ +16.93pp |
+| **B** | Gate statistics: `paired_significance.py --bootstrap cluster` | 0 | CPU minutes | **next** |
+| **C** | Cap sensitivity: eval-only at `max_chains_per_cluster=null`, re-aggregate C=4/8/16/full offline | 0 train, 2 eval | ~1 h | **next** (pre-registered 2026-08-22) |
+| **D** | 8M core panel + TruFor reference cell | 9 | ~60 h | blocked on B/C |
+| **E** | **DECISION: headline fusion stack** (grouped vs TruFor+dist) | 0 | — | blocked on D |
+| **F** | 8M supplementary panel, chosen stack only | 6 | ~40 h | blocked on E |
+| **G** | 650M: frontier x3 seeds + B1/B2/B4 | 6 | not measured on this generation | blocked on E |
+| **H** | Analyses: paired significance, identity audit, stratification | 0 | CPU | blocked on F/G |
+| **I** | Paper: re-cut every number, Tables 1-3, figures | 0 | — | blocked on H |
+
+### Stage D — cells (`launch_paper_8M.sh --core`, plus one TruFor cell)
+
+`frontier_8M` (re-run as `paper_8m_frontier_k4`; the gate run used `min_delta=0` and
+ran 44 epochs, so it must NOT be reused as the panel reference — every ablation
+would face a longer-trained reference), `tpl_contact_only`, `no_triangle`,
+`no_dist`, `no_templates`, `random_retrieval`, `bce_only`, `baseline/esm2_only`,
+plus `ablation/trufor_fusion_with_dist` from `launch_trufor_ablation_8M.sh`.
+
+The TruFor cell rides along with the core panel so stage E can be decided as soon
+as D lands, instead of paying for a second full panel to answer it.
+
+### Stage E — the decision, and why it is not already made
+
+On the 2025 generation TruFor+dist beat grouped in 8/9 matched 8M cells and 3/3
+650M seeds (+0.55pp). But **that margin is below the scale of the aggregation
+correction** — the 2026-08-21 decision recorded it as provisional precisely
+because it was measured with chain-level bootstrap. It must be re-established on
+the rebuilt data with cluster resampling before it can move the headline.
+
+Deciding first halves stages F and G: one stack, not two.
+
 ## 4. Open decisions
 
 - **Headline fusion stack.** TruFor+dist won 3/3 650M seeds (+0.55 pp,
