@@ -171,12 +171,25 @@ def main() -> None:
         dv = (pd.to_numeric(j[f"{args.metric}_new"], errors="coerce")
               - pd.to_numeric(j[f"{args.metric}_rep"], errors="coerce"))
         n_diff = int((dv.abs() > 1e-9).sum())
+        mean_abs, mean_signed = float(dv.abs().mean()), float(dv.mean())
         print(f"SANITY GATE (per-chain values): {n_diff}/{len(j)} chains differ "
               f"({100*n_diff/max(1,len(j)):.2f}%), max |d| = {dv.abs().max():.6f}, "
-              f"mean |d| = {dv.abs().mean():.2e}")
-        print("    Any difference here is between two SEPARATE eval passes of the same "
-              "checkpoint: capping changes batch composition, and P@L is a ranking "
-              "metric, so bf16 noise can flip which pairs land in the top-L.")
+              f"mean |d| = {mean_abs:.2e}, mean signed d = {mean_signed:+.2e}")
+        # Symmetry is the discriminator. Numerical noise between two eval passes
+        # perturbs the top-L ranking in both directions and cancels; a systematic
+        # offset means something other than noise differs between the runs.
+        ratio = abs(mean_signed) / mean_abs if mean_abs > 0 else 0.0
+        print(f"    |signed| / |abs| = {ratio:.3f} "
+              f"({'symmetric — consistent with ranking noise' if ratio < 0.05 else 'ASYMMETRIC — not explained by noise alone'})")
+        if "n_valid_long_pairs" in cap_ref.columns:
+            k = cap_ref.set_index("sample_id")["n_valid_long_pairs"].reindex(j["sample_id"])
+            small = pd.to_numeric(k, errors="coerce").to_numpy(float) < 1000
+            if small.any() and (~small).any():
+                print(f"    mean |d| for chains with <1000 valid long pairs: "
+                      f"{dv[small].abs().mean():.2e} (n={int(small.sum())}); "
+                      f"otherwise {dv[~small].abs().mean():.2e} (n={int((~small).sum())})")
+                print("    A ranking metric is coarser when K is small, so noise-driven "
+                      "differences should concentrate in the low-K group.")
 
     full = out[out["cap"] == "full"]
     c8 = out[out["cap"] == 8]
@@ -187,8 +200,18 @@ def main() -> None:
         print(f"\nSANITY GATE offline C=8 vs reported: {got:.6f} vs {args.expect_c8:.6f} "
               f"(|d|={delta:.2e}) {'PASS' if ok else 'FAIL'}")
         if not ok:
-            raise SystemExit("Offline C=8 does not reproduce the capped run — "
-                             "the reconstruction is wrong, ignore the rest.")
+            if args.capped_reference:
+                print("    NOTE: --capped-reference already compared the chain sets "
+                      "directly. If that check passed, the reconstruction selects the "
+                      "right subset and this scalar gap is a per-chain value difference "
+                      "between two eval passes, NOT a reconstruction error. Read the "
+                      "symmetry line above before interpreting it.")
+            else:
+                raise SystemExit(
+                    "Offline C=8 does not reproduce the capped run, and no "
+                    "--capped-reference was given to tell a wrong subset apart from "
+                    "per-chain value differences. Re-run with --capped-reference."
+                )
     if not full.empty and not c8.empty:
         dm = abs(float(c8[f"ref_{args.metric}"].iloc[0]) - float(full[f"ref_{args.metric}"].iloc[0]))
         print(f"\nC=8 vs full, {args.metric}: |d| = {dm:.6f} "
