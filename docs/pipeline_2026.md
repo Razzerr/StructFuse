@@ -159,6 +159,32 @@ R() {  # R <cpus> <mem> <time> "<command>"
 
 `--gpus=1` is required even for CPU-only jobs on `proxima`.
 
+### Resolving run artifacts
+
+Never paste checkpoint or TSV paths by hand — resolve them from the task name.
+Both helpers take the `task_name` the run was launched with and pick the newest
+matching artifact.
+
+```bash
+CKPT() {  # CKPT <task_name> -> newest real checkpoint (skips last.ckpt)
+  find logs/"$1" -name '*.ckpt' ! -name 'last.ckpt' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2-
+}
+TSV() {   # TSV <task_name> -> newest per_sample_metrics.tsv
+  find logs/"$1" -name per_sample_metrics.tsv -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2-
+}
+```
+
+Check what they resolve to before using them — an empty value means the task
+name is wrong or the run never reached the test phase:
+
+```bash
+for t in paper_8m_gate_frontier_k4 paper_8m_gate_no_templates; do
+  printf '%-32s ckpt=%s\n%-32s tsv =%s\n' "$t" "$(CKPT $t)" "" "$(TSV $t)"
+done
+```
+
 `R` runs **interactively** and dies with the terminal — a dropped SSH connection
 kills the job. Use it only for short gates where you want the answer immediately.
 For anything longer than ~15 minutes use the detached form:
