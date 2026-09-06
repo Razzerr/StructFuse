@@ -92,7 +92,12 @@ def main() -> None:
     ap.add_argument("--n-bootstrap", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--expect-c8", type=float, default=None,
-                    help="Assert offline C=8 reproduces this reference value (sanity gate).")
+                    help="Assert offline C=8 reproduces this scalar (weak gate).")
+    ap.add_argument("--capped-reference", default=None,
+                    help="per_sample TSV of the ordinary capped run. Stronger gate than "
+                         "--expect-c8: compares the CHAIN SET and the per-chain values "
+                         "separately, so a wrong subset is distinguished from bf16 "
+                         "ranking noise instead of collapsing into one scalar.")
     ap.add_argument("--tolerance", type=float, default=0.002,
                     help="Pre-registered acceptance threshold vs uncapped.")
     ap.add_argument("--out", default=".temp/cap_sensitivity.tsv")
@@ -120,11 +125,22 @@ def main() -> None:
                 c[["sample_id", args.metric]], on="sample_id", suffixes=("_r", "_c"))
             d = (pd.to_numeric(m[f"{args.metric}_r"], errors="coerce")
                  - pd.to_numeric(m[f"{args.metric}_c"], errors="coerce")).to_numpy(float)
-            lo, hi = cluster_bootstrap_ci(
-                d, pd.to_numeric(m["cluster_id"], errors="coerce").fillna(-1).to_numpy(int),
-                args.n_bootstrap, args.seed)
-            row.update({f"ctl_{args.metric}": cval, "paired_delta": float(np.nanmean(d)),
-                        "ci95_lo": lo, "ci95_hi": hi, "n_paired": len(m)})
+            mcids = pd.to_numeric(m["cluster_id"], errors="coerce").fillna(-1).to_numpy(int)
+            lo, hi = cluster_bootstrap_ci(d, mcids, args.n_bootstrap, args.seed)
+            # Point estimate must be the SAME estimand as the interval: mean of
+            # per-cluster mean deltas. Using the chain mean here made the CI look
+            # broken (at cap=full it read 0.307 against a CI of [0.161,0.172]) —
+            # the two simply measured different things. The chain mean is kept
+            # beside it because its growth with the cap is itself the redundancy
+            # story: bigger caps admit large near-duplicate clusters, where the
+            # retrieval gain is concentrated.
+            keep = np.isfinite(d) & (mcids >= 0)
+            per_cluster = pd.Series(d[keep]).groupby(mcids[keep]).mean()
+            row.update({f"ctl_{args.metric}": cval,
+                        "paired_delta": float(per_cluster.mean()),
+                        "paired_delta_chain": float(np.nanmean(d)),
+                        "ci95_lo": lo, "ci95_hi": hi,
+                        "n_paired": len(m), "n_paired_clusters": int(len(per_cluster))})
         rows.append(row)
 
     out = pd.DataFrame(rows)
@@ -132,6 +148,35 @@ def main() -> None:
     out.to_csv(args.out, sep="\t", index=False, float_format="%.6f")
     print(out.to_string(index=False))
     print(f"\nSaved {args.out}")
+
+    if args.capped_reference:
+        cap_ref = pd.read_csv(args.capped_reference, sep="\t")
+        mine = apply_cap(ref, 8)
+        set_a, set_b = set(mine["sample_id"]), set(cap_ref["sample_id"])
+        only_mine, only_theirs = set_a - set_b, set_b - set_a
+        print(f"\nSANITY GATE (chain set): reconstructed={len(set_a)} reported={len(set_b)} "
+              f"only-in-reconstruction={len(only_mine)} only-in-reported={len(only_theirs)}")
+        if only_mine or only_theirs:
+            for label, ss in (("reconstruction", only_mine), ("reported", only_theirs)):
+                if ss:
+                    print(f"    e.g. only in {label}: {sorted(ss)[:5]}")
+            raise SystemExit(
+                "Chain sets differ — the cap reconstruction does NOT select the subset the "
+                "model was evaluated on. Everything above is invalid."
+            )
+        print("    chain sets identical -> the cap reconstruction is correct.")
+
+        j = mine[["sample_id", args.metric]].merge(
+            cap_ref[["sample_id", args.metric]], on="sample_id", suffixes=("_new", "_rep"))
+        dv = (pd.to_numeric(j[f"{args.metric}_new"], errors="coerce")
+              - pd.to_numeric(j[f"{args.metric}_rep"], errors="coerce"))
+        n_diff = int((dv.abs() > 1e-9).sum())
+        print(f"SANITY GATE (per-chain values): {n_diff}/{len(j)} chains differ "
+              f"({100*n_diff/max(1,len(j)):.2f}%), max |d| = {dv.abs().max():.6f}, "
+              f"mean |d| = {dv.abs().mean():.2e}")
+        print("    Any difference here is between two SEPARATE eval passes of the same "
+              "checkpoint: capping changes batch composition, and P@L is a ranking "
+              "metric, so bf16 noise can flip which pairs land in the top-L.")
 
     full = out[out["cap"] == "full"]
     c8 = out[out["cap"] == 8]
