@@ -391,6 +391,16 @@ plus `ablation/trufor_fusion_with_dist` from `launch_trufor_ablation_8M.sh`.
 The TruFor cell rides along with the core panel so stage E can be decided as soon
 as D lands, instead of paying for a second full panel to answer it.
 
+### Stages B/C — keep the isolation
+
+B: bootstrap over CLUSTERS. C: the SAME selected checkpoints and thresholds, no
+re-validation — the only thing that varies is the eval cap. Reconstructing C=8
+from the uncapped TSVs must reproduce the ordinary capped result to numerical
+tolerance; that equality is the sanity gate, and if it fails the rest of C means
+nothing. Acceptance criterion stays as pre-registered: C=8 stands if P@L_long and
+the paired retrieval gain each differ from full by <= 0.002 with no qualitative
+change.
+
 ### Stage E — the decision, and why it is not already made
 
 On the 2025 generation TruFor+dist beat grouped in 8/9 matched 8M cells and 3/3
@@ -400,6 +410,36 @@ because it was measured with chain-level bootstrap. It must be re-established on
 the rebuilt data with cluster resampling before it can move the headline.
 
 Deciding first halves stages F and G: one stack, not two.
+
+**Selection rule, fixed before the results are seen:** choose on
+**cluster-balanced validation** (`val/f1_long`, the monitored key), and use test
+only for the final report. TruFor is not assumed to win, and the project does not
+depend on it winning — grouped remaining the headline is an equally acceptable
+outcome, and is the cheaper one, since the 650M grouped configs already exist.
+
+### Stage F — the ablation panel must match the chosen model
+
+This is the part the stage table above states too loosely. Stage D is mostly
+GROUPED ablations plus one full TruFor cell. If E selects TruFor, a
+"grouped minus triangle" number does NOT measure triangle's contribution inside
+TruFor — different fusion, different gradient path.
+
+`launch_paper_8M.sh --supplementary` hardcodes six grouped experiments and does
+not switch with the decision. Two things follow:
+
+1. Stage F's six cells have to be re-pointed at the chosen stack, and matched to
+   the claims actually going into the manuscript — not run wholesale in both
+   variants.
+2. **Two TruFor cells do not exist yet** and are needed if TruFor wins:
+   - `ablation/trufor_no_templates` — without it the retrieval kill-switch
+     (the headline +16.93pp) would be measured on the grouped stack while the
+     headline model is TruFor. This is the single most important control in
+     Section 2.3.
+   - `ablation/trufor_no_dist` — the `(-dist, +triangle)` cell, absent since the
+     2026-07-22 panel, which is why the distance x triangle interaction term has
+     never been computable on the TruFor stack.
+
+   Do not create them speculatively; create them if and when E selects TruFor.
 
 ## 4. Open decisions
 
