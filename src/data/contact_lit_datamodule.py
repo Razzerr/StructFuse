@@ -26,7 +26,9 @@ class ContactDataModule(LightningDataModule):
         split_dir (str): Directory to save/load split files (default: "data/splits")
         val_ratio (float): Fraction of training data to use for validation (default: 0.1)
         split_seed (int): Random seed for train/val splitting (default: 0)
-        batch_size (int): Batch size for dataloaders (default: 2)
+        batch_size (int): Batch size for the TRAIN dataloader (default: 2)
+        eval_batch_size (Optional[int]): Batch size for val/test. None = batch_size.
+            Set to 1 for a padding-free, composition-independent evaluation.
         num_workers (int): Number of dataloader workers (default: 4)
         pin_memory (bool): Pin memory in dataloaders (default: True)
         persistent_workers (bool): Keep workers alive between epochs (default: True)
@@ -50,6 +52,7 @@ class ContactDataModule(LightningDataModule):
         split_seed: int = 0,
         # dataloader settings
         batch_size: int = 2,
+        eval_batch_size: Optional[int] = None,
         num_workers: int = 4,
         pin_memory: bool = False,
         persistent_workers: bool = True, 
@@ -122,6 +125,14 @@ class ContactDataModule(LightningDataModule):
         self.split_seed = int(split_seed)
 
         self.batch_size = int(batch_size)
+        # Evaluation batch size is separate from the training one. The model is
+        # padding-dependent (InstanceNorm2d over the full L x L map, and axial
+        # attention called without attn_mask), so a chain's prediction depends on
+        # which other chains share its batch. `eval_batch_size=1` removes padding
+        # entirely and makes val/test independent of dataset composition — without
+        # touching the training batch or the effective batch after accumulation.
+        # None = fall back to batch_size (previous behaviour).
+        self.eval_batch_size = int(eval_batch_size) if eval_batch_size else self.batch_size
         self.num_workers = int(num_workers)
         self.pin_memory = bool(pin_memory)
         self.persistent_workers = bool(persistent_workers)
@@ -489,7 +500,8 @@ class ContactDataModule(LightningDataModule):
             if self.bucketed:
                 lengths = self.dset_val.cached_lengths
                 sampler = BucketBatchSampler(
-                    lengths, batch_size=self.batch_size, shuffle=False, seed=self.split_seed
+                    lengths, batch_size=self.eval_batch_size, shuffle=False,
+                    seed=self.split_seed,
                 )
                 return DataLoader(
                     self.dset_val,
@@ -498,7 +510,7 @@ class ContactDataModule(LightningDataModule):
                 )
             return DataLoader(
                 self.dset_val,
-                batch_size=self.batch_size,
+                batch_size=self.eval_batch_size,
                 shuffle=False,
                 **kwargs,
             )
@@ -518,7 +530,7 @@ class ContactDataModule(LightningDataModule):
     def test_dataloader(self):
         return DataLoader(
             self.dset_test,
-            batch_size=self.batch_size,
+            batch_size=self.eval_batch_size,
             shuffle=False,
             **self._dl_kwargs(collate_fn=self._collate_eval),
         )

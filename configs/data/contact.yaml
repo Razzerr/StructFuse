@@ -20,6 +20,14 @@ split_dir: ${paths.split_dir}
 split_seed: ${seed}
 
 batch_size: 12
+# Batch size for val/test only. null = same as batch_size (previous behaviour).
+# Set to 1 for a padding-free evaluation: the model is padding-dependent
+# (InstanceNorm2d over the full L x L map incl. padding, and axial attention
+# without attn_mask), so a chain's prediction otherwise depends on which chains
+# share its batch — which makes runs with different dataset composition
+# incomparable. Does NOT touch the training batch or the effective batch after
+# gradient accumulation.
+eval_batch_size: null
 num_workers: 8
 bucketed: true
 
