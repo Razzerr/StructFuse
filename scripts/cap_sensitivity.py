@@ -178,10 +178,16 @@ def main() -> None:
         # Symmetry is the discriminator. Numerical noise between two eval passes
         # perturbs the top-L ranking in both directions and cancels; a systematic
         # offset means something other than noise differs between the runs.
-        ratio = abs(mean_signed) / mean_abs if mean_abs > 0 else 0.0
-        print(f"    |signed| / |abs| = {ratio:.3f} "
-              f"({'symmetric — consistent with ranking noise' if ratio < 0.05 else 'ASYMMETRIC — not explained by noise alone'})")
-        if "n_valid_long_pairs" in cap_ref.columns:
+        if n_diff == 0:
+            print("    IDENTICAL — evaluation is independent of dataset composition "
+                  "under this policy. This is the outcome eval_batch_size=1 exists to "
+                  "produce; any non-zero count means padding still leaks in.")
+        else:
+            ratio = abs(mean_signed) / mean_abs if mean_abs > 0 else 0.0
+            # Descriptive only: a ranking metric can turn unbiased perturbations
+            # into biased errors, so symmetry cannot arbitrate noise vs defect.
+            print(f"    |signed| / |abs| = {ratio:.3f} (descriptive, not a test)")
+        if n_diff and "n_valid_long_pairs" in cap_ref.columns:
             k = cap_ref.set_index("sample_id")["n_valid_long_pairs"].reindex(j["sample_id"])
             small = pd.to_numeric(k, errors="coerce").to_numpy(float) < 1000
             if small.any() and (~small).any():
