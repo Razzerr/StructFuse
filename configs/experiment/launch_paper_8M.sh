@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./configs/experiment/launch_paper_8M.sh --gate          # 2 jobs, run first
+#   ./configs/experiment/launch_paper_8M.sh --final-eval    # bs=1 reported numbers, after --core
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -13,12 +14,15 @@
 set -euo pipefail
 
 DRY_RUN=false
+# Anything before this belongs to a previous data generation. Override with
+# --min-ckpt-date if the panel is ever re-run on another rebuild.
+MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-08-22}"
 SKIP_FRONTIER=false
 MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gate|--smoke|--core|--supplementary|--all)
+        --gate|--smoke|--core|--supplementary|--final-eval|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -29,6 +33,10 @@ while [[ $# -gt 0 ]]; do
         --dry-run)
             DRY_RUN=true
             shift
+            ;;
+        --min-ckpt-date)
+            MIN_CKPT_DATE="$2"
+            shift 2
             ;;
         --skip-frontier)
             SKIP_FRONTIER=true
@@ -61,6 +69,58 @@ submit_training() {
     local extra_args="${4:-}"
     local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py experiment=${experiment} test=true task_name=${job_name} ${extra_args} 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "${time_limit}" 16 "256G" >/dev/null
+}
+
+# Final reported numbers come from an eval-only pass at eval_batch_size=1: the
+# model is padding-dependent, so batching makes runs with different dataset
+# composition incomparable (measured: bs=1 is bit-identical across compositions,
+# bs=12 differs on 18.8% of chains). validate_before_test=true so the F1
+# threshold is calibrated under the policy it is applied in. Measured cost:
+# ~22 min test + ~13 min validate per cell.
+submit_final_eval() {
+    local experiment="$1"
+    local train_task="$2"
+    # logs/ still holds runs from the 2025 data generation, and "newest .ckpt"
+    # would silently pick one of those for any cell not yet re-run. Refuse
+    # anything older than the rebuild.
+    local ckpt
+    ckpt="$(find "${REPO_ROOT:-.}/logs/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
+            -newermt "${MIN_CKPT_DATE}" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)"
+    if [[ -z "${ckpt}" ]]; then
+        local stale
+        stale="$(find "${REPO_ROOT:-.}/logs/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
+                 2>/dev/null | head -1)"
+        if [[ -n "${stale}" ]]; then
+            echo "SKIP ${train_task}: only checkpoints older than ${MIN_CKPT_DATE} exist" \
+                 "(e.g. ${stale}) — that is a previous data generation, not this panel." >&2
+        else
+            echo "SKIP ${train_task}: no checkpoint found (run not finished?)" >&2
+        fi
+        return
+    fi
+    local job_name="${train_task}_bs1"
+    local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/eval.py \
+experiment=${experiment} task_name=${job_name} ckpt_path=${ckpt} \
+validate_before_test=true data.eval_batch_size=1 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "04:00:00" 16 "256G" >/dev/null
+}
+
+# Mirrors submit_core cell for cell; run after --core has finished.
+submit_final_evals() {
+    submit_final_eval "frontier_8M"                  "paper_8m_frontier_k4"
+    submit_final_eval "ablation/tpl_contact_only"    "paper_8m_stage1_tpl_contact"
+    submit_final_eval "ablation/no_triangle"         "paper_8m_stage2_no_triangle"
+    submit_final_eval "ablation/no_dist"             "paper_8m_no_dist"
+    submit_final_eval "ablation/no_templates"        "paper_8m_no_templates"
+    submit_final_eval "ablation/random_retrieval"    "paper_8m_random_retrieval"
+    submit_final_eval "ablation/bce_only"            "paper_8m_bce_only"
+    # B3 is attention-only: no trained weights, so no ckpt_path. It runs through
+    # train.py in the core panel and does the same here, just at bs=1.
+    local b3="paper_8m_esm2_raw_bs1"
+    submit_job "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py \
+experiment=baseline/esm2_only test=true task_name=${b3} data.eval_batch_size=1 \
+2>&1 | tee ${TEMP_DIR}/${b3}.log" "${b3}" "08:00:00" 16 "256G" >/dev/null
 }
 
 submit_smoke() {
@@ -115,6 +175,9 @@ echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN},
 case "${MODE}" in
     gate)
         submit_gate
+        ;;
+    final-eval)
+        submit_final_evals
         ;;
     smoke)
         submit_smoke

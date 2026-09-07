@@ -398,8 +398,8 @@ Every stage gates the next. Run counts are cells, not jobs-with-retries.
 |---|---|---:|---|---|
 | **A** | Gate: frontier k=4 + no_templates, paired | 2 | done (10.7 h + 5.7 h) | **done** — Δ +16.93pp |
 | **B** | Gate statistics: `paired_significance.py --bootstrap cluster` | 0 | CPU minutes | **next** |
-| **C** | Cap sensitivity: eval-only at `max_chains_per_cluster=null`, re-aggregate C=4/8/16/full offline | 0 train, 2 eval | ~1 h | **next** (pre-registered 2026-08-22) |
-| **D** | 8M core panel + TruFor reference cell | 9 | ~60 h | blocked on B/C |
+| **C** | Cap sensitivity | 0 train, 3 eval | done | **PASSED** — C=8 vs full: 0.00194 metric / 0.00193 delta, both inside 0.002 (~4% margin) |
+| **D** | 8M core panel + TruFor reference cell | 9 | ~60 h train + ~5 h bs=1 eval | **UNBLOCKED** |
 | **E** | **DECISION: headline fusion stack** (grouped vs TruFor+dist) | 0 | — | blocked on D |
 | **F** | 8M supplementary panel, chosen stack only | 6 | ~40 h | blocked on E |
 | **G** | 650M: frontier x3 seeds + B1/B2/B4 | 6 | not measured on this generation | blocked on E |
