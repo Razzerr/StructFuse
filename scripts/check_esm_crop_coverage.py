@@ -33,8 +33,18 @@ from pathlib import Path
 import numpy as np
 
 
+_HEADER_ERRORS: list[str] = []
+
+
 def cached_len(cache_dir: Path, stem: str) -> int | None:
-    """Rows of `rep` from the .npy header only — no array decompression."""
+    """Rows of `rep` from the .npy header only — no array decompression.
+
+    The header readers are versioned (`read_array_header_1_0` / `_2_0`); the
+    private `_read_array_header` helper does not exist across numpy versions. An
+    earlier version called it inside a bare `except Exception: return None`,
+    which would have reported EVERY chain as unreadable and silently excluded the
+    whole population. Parse failures are recorded instead of swallowed.
+    """
     path = cache_dir / f"{stem}.npz"
     if not path.exists():
         return None
@@ -42,10 +52,13 @@ def cached_len(cache_dir: Path, stem: str) -> int | None:
         with zipfile.ZipFile(path) as z:
             name = next(n for n in z.namelist() if n.startswith("rep"))
             with z.open(name) as f:
-                version = np.lib.format.read_magic(f)
-                shape, _, _ = np.lib.format._read_array_header(f, version)
+                major, minor = np.lib.format.read_magic(f)
+                reader = getattr(np.lib.format, f"read_array_header_{major}_{minor}")
+                shape, _, _ = reader(f)
         return int(shape[0])
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        if len(_HEADER_ERRORS) < 5:
+            _HEADER_ERRORS.append(f"{stem}: {type(exc).__name__}: {exc}")
         return None
 
 
@@ -117,6 +130,9 @@ def main() -> None:
     ap.add_argument("--lengths", default=None, help="Override npz_lengths.json path.")
     ap.add_argument("--crop", type=int, default=None, help="Override data.crop_size.")
     ap.add_argument("--esm-max-len", type=int, default=1022)
+    ap.add_argument("--read-all-cache-lengths", action="store_true",
+                    help="Read every chain's cache header instead of sampling short "
+                         "ones. Slower, but makes the result unconditional.")
     ap.add_argument("--verify-sample", type=int, default=2000,
                     help="Short chains whose cache length is read anyway, to test the "
                          "min(L, max_len) assumption instead of trusting it.")
@@ -174,8 +190,12 @@ def main() -> None:
     all_ids = sorted({i for v in sets.values() for i in v})
     long_set = {i for i in all_ids if lengths.get(i, 0) > args.esm_max_len}
     short_ids = [i for i in all_ids if i not in long_set]
-    sample = list(rng.choice(short_ids, size=min(args.verify_sample, len(short_ids)),
-                             replace=False)) if short_ids else []
+    if args.read_all_cache_lengths:
+        sample = short_ids
+    else:
+        sample = list(rng.choice(short_ids,
+                                 size=min(args.verify_sample, len(short_ids)),
+                                 replace=False)) if short_ids else []
 
     cov: dict[str, int] = {}
     unreadable: list[str] = []
@@ -205,15 +225,31 @@ def main() -> None:
     print(f"  ids absent from lengths : {n_missing_len}   "
           f"{'OK' if not n_missing_len else '<-- results are conditional'}")
 
-    def coverage_of(stem: str) -> int | None:
-        """Read coverage, or None when it could not be established.
+    unreadable_set = set(unreadable)
+    n_assumed = 0
 
-        A substituted min(L, max_len) would reinstate the assumption this audit
-        exists to test, and averaging it in would hide that. Chains without a
-        readable cache are EXCLUDED from every figure below and counted
-        separately, so the reported numbers rest only on measured coverage.
+    def coverage_of(stem: str) -> int | None:
+        """Coverage in residues, or None when it genuinely could not be established.
+
+        Three cases, and conflating them is what made an earlier version of this
+        audit unrepresentative:
+          * READ — the header was parsed; use it.
+          * UNREADABLE — file missing or corrupt. Coverage is unknown, so the
+            chain is EXCLUDED and the audit is flagged incomplete.
+          * NOT READ — a short chain outside the verification sample. Its coverage
+            is min(L, max_len) = L, so every crop is fully covered and its
+            exposure is exactly 0. Excluding these would drop only zeros and
+            leave a population deliberately enriched in long chains. The
+            assumption is not free: it is tested on `--verify-sample` short
+            chains, and any mismatch escalates to a full read above.
         """
-        return cov.get(stem)
+        nonlocal n_assumed
+        if stem in cov:
+            return cov[stem]
+        if stem in unreadable_set:
+            return None
+        n_assumed += 1
+        return min(lengths.get(stem, 0), args.esm_max_len)
 
     # --- TRAIN: random crop, one chain per cluster per epoch ---
     per_cluster: dict[int, list] = defaultdict(list)
@@ -251,8 +287,17 @@ def main() -> None:
               f"({100*n_any/max(1,len(hits)):.3f}%)  mean uncovered={frac:.5f}"
               f"{'' if not skipped else f'   [{skipped} skipped: coverage unknown]'}")
 
+    if n_assumed:
+        print(f"\n{n_assumed} chain-lookups used coverage = min(L, max_len) without "
+              f"reading the file. All are chains at or under max_len, whose exposure is "
+              f"0 by construction; the assumption was tested on {len(sample)} sampled "
+              f"short chains. Pass --read-all-cache-lengths to remove it entirely.")
+    if _HEADER_ERRORS:
+        print("\nheader parse failures (first few):")
+        for e in _HEADER_ERRORS:
+            print(f"  {e}")
     if unreadable:
-        print(f"\n{len(unreadable)} chains have no readable cache and were EXCLUDED from "
+        print(f"\n{len(unreadable)} chains have NO READABLE cache and were EXCLUDED from "
               f"every figure above. Treat the results as non-conclusive until that is 0.")
     print("\nMasking these positions in the loss would not be a fix: they still enter "
           "InstanceNorm2d statistics and axial attention, which runs without attn_mask.")
