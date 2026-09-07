@@ -6,6 +6,7 @@
 #   - ablation/trufor_fusion: TruFor without distance bins
 #
 # Usage:
+#   ./configs/experiment/launch_trufor_ablation_8M.sh --fusion-decision  # 1 job, for stage E
 #   ./configs/experiment/launch_trufor_ablation_8M.sh --smoke
 #   ./configs/experiment/launch_trufor_ablation_8M.sh --retrieval
 #   ./configs/experiment/launch_trufor_ablation_8M.sh --k-sweep
@@ -22,7 +23,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --smoke|--retrieval|--k-sweep|--architecture|--all)
+        --fusion-decision|--smoke|--retrieval|--k-sweep|--architecture|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -65,6 +66,14 @@ submit_training() {
     local extra_args="${4:-}"
     local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py experiment=${experiment} test=true task_name=${job_name} ${extra_args} 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "${time_limit}" 16 "256G" >/dev/null
+}
+
+# Stage E needs exactly one cell: TruFor+dist at k=4, to pair against the grouped
+# panel's paper_8m_frontier_k4. One variable (fusion strategy), everything else
+# matched. Running the whole TruFor panel before the decision would pay for a
+# second full panel to answer a question one run settles.
+submit_fusion_decision_cell() {
+    submit_training "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
 }
 
 submit_reference_runs() {
@@ -112,6 +121,9 @@ elif [[ "${INCLUDE_REFERENCES}" == "false" && "${MODE}" == "all" ]]; then
 fi
 
 case "${MODE}" in
+    fusion-decision)
+        submit_fusion_decision_cell
+        ;;
     smoke)
         submit_smoke
         ;;
