@@ -79,119 +79,172 @@ def centre_crop_exposure(length: int, crop: int, cov: int) -> tuple[bool, float]
     return f > 0, f
 
 
-def load_ids(path: Path) -> list[str]:
-    return [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+def build_dataset(split_file: Path, cfg, cap: int | None):
+    """Chain list exactly as production builds it.
+
+    Split files hold PDB ENTRY ids (`1abc`); lengths, cache and clusters are keyed
+    by CHAIN (`1abc_A`). ContactDataset does that expansion — plus min_len, the
+    skip lists, subset exclusion, and the evaluation cap with its CASP16 exemption.
+    Reimplementing any of it here is how the first version of this audit came to
+    compare entries against chains and silently match nothing.
+    """
+    from src.data.components.dataset import ContactDataset
+
+    kwargs = dict(
+        root=cfg["data_root"],
+        min_len=cfg["min_len"],
+        splits_json_path=cfg["splits_json_path"],
+        skip_ids_files=cfg["skip_ids_files"],
+    )
+    if cap is not None:
+        kwargs.update(
+            max_chains_per_cluster=cap,
+            chain_clusters_file=cfg["chain_clusters_file"],
+            cap_exempt_subsets=cfg["cap_exempt_subsets"],
+        )
+    return ContactDataset(split_file, **kwargs)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--lengths", default="data/processed_2026/npz_lengths.json")
-    ap.add_argument("--split-dir", default="data/output_splits_2026")
-    ap.add_argument("--cache-dir", default="data/precomputed/esm_t6_8M_2026")
-    ap.add_argument("--clusters", default="data/output_splits_2026/chain_clusters.tsv")
-    ap.add_argument("--crop", type=int, default=384)
+    ap.add_argument("--experiment", default="frontier_8M",
+                    help="Hydra experiment, so paths/min_len/skip-lists/cap match production.")
+    ap.add_argument("--cache-dir", default=None,
+                    help="Override data.esm_embeddings_dir (e.g. the 650M cache).")
+    ap.add_argument("--lengths", default=None, help="Override npz_lengths.json path.")
+    ap.add_argument("--crop", type=int, default=None, help="Override data.crop_size.")
     ap.add_argument("--esm-max-len", type=int, default=1022)
-    ap.add_argument("--cap", type=int, default=8)
     ap.add_argument("--verify-sample", type=int, default=2000,
-                    help="Short chains whose cache length is read anyway, to test "
-                         "the min(L, max_len) assumption instead of trusting it.")
+                    help="Short chains whose cache length is read anyway, to test the "
+                         "min(L, max_len) assumption instead of trusting it.")
     args = ap.parse_args()
 
-    lengths = {k: int(v) for k, v in json.loads(Path(args.lengths).read_text()).items()}
-    cache = Path(args.cache_dir)
-    split_dir = Path(args.split_dir)
+    import rootutils
+    rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
 
+    with initialize_config_dir(version_base="1.3",
+                               config_dir=str(Path.cwd() / "configs")):
+        cfg_all = compose(config_name="train", overrides=[f"experiment={args.experiment}"])
+    d = OmegaConf.to_container(cfg_all.data, resolve=True)
+
+    crop = args.crop or int(d["crop_size"])
+    cap = int(d["max_chains_per_cluster"]) if d.get("max_chains_per_cluster") else None
+    cache = Path(args.cache_dir or d["esm_embeddings_dir"])
+    split_dir = Path(d["split_dir"])
+    lengths_path = Path(args.lengths or (Path(d["data_root"]) / "npz_lengths.json"))
+    lengths = {k: int(v) for k, v in json.loads(lengths_path.read_text()).items()}
+
+    cfg = {k: d[k] for k in ("data_root", "min_len", "splits_json_path",
+                             "skip_ids_files", "chain_clusters_file",
+                             "cap_exempt_subsets")}
     chain2cluster: dict[str, int] = {}
-    cl_path = Path(args.clusters)
+    cl_path = Path(cfg["chain_clusters_file"])
     if cl_path.exists():
         for i, line in enumerate(cl_path.read_text().splitlines()):
-            if i == 0 or not line.strip():
-                continue
-            f = line.split("\t")
-            chain2cluster[f[0]] = int(f[1])
+            if i and line.strip():
+                f = line.split("\t")
+                chain2cluster[f[0]] = int(f[1])
 
-    splits = {}
-    for name, fn in (("train", "all_train_ids.txt"), ("val", "val_holdout_ids.txt"),
-                     ("test", "test_ids.txt")):
-        p = split_dir / fn
-        if p.exists():
-            splits[name] = load_ids(p)
+    print(f"experiment={args.experiment}  crop={crop}  esm_max_len={args.esm_max_len}  "
+          f"cap=C{cap}\ncache={cache}\n")
+
+    # Chain lists straight from production, so entry->chain expansion, min_len,
+    # skip lists, subset exclusion and the CASP16 cap exemption are not re-derived.
+    sets = {
+        "train": build_dataset(split_dir / "all_train_ids.txt", cfg, None).ids,
+        "val_full": build_dataset(split_dir / "val_holdout_ids.txt", cfg, None).ids,
+        "test_full": build_dataset(split_dir / "test_ids.txt", cfg, None).ids,
+    }
+    if cap:
+        sets[f"val_C{cap}"] = build_dataset(split_dir / "val_holdout_ids.txt", cfg, cap).ids
+        sets[f"test_C{cap}"] = build_dataset(split_dir / "test_ids.txt", cfg, cap).ids
 
     rng = np.random.default_rng(0)
-    print(f"crop={args.crop}  esm_max_len={args.esm_max_len}  cap=C{args.cap}\n")
+    all_ids = sorted({i for v in sets.values() for i in v})
+    long_set = {i for i in all_ids if lengths.get(i, 0) > args.esm_max_len}
+    short_ids = [i for i in all_ids if i not in long_set]
+    sample = list(rng.choice(short_ids, size=min(args.verify_sample, len(short_ids)),
+                             replace=False)) if short_ids else []
 
-    # --- assumption check: is the cached length really min(L, max_len)? ---
-    all_ids = sorted({i for ids in splits.values() for i in ids})
-    long_ids = [i for i in all_ids if lengths.get(i, 0) > args.esm_max_len]
-    sample = list(rng.choice([i for i in all_ids if i not in set(long_ids)],
-                             size=min(args.verify_sample, len(all_ids)), replace=False))
     cov: dict[str, int] = {}
-    mismatch = missing_cache = 0
-    for stem in long_ids + sample:
-        c = cached_len(cache, stem)
-        if c is None:
-            missing_cache += 1
-            continue
-        cov[stem] = c
-        if c != min(lengths.get(stem, 0), args.esm_max_len):
-            mismatch += 1
-    print(f"cache lengths read: {len(cov)}  (all {len(long_ids)} chains > max_len "
-          f"+ {len(sample)} sampled short)")
-    print(f"  missing cache files : {missing_cache}   {'OK' if not missing_cache else '<-- INVESTIGATE'}")
-    print(f"  != min(L, max_len)  : {mismatch}   {'OK' if not mismatch else '<-- assumption broken'}")
+    unreadable: list[str] = []
 
-    missing_len = sum(1 for ids in splits.values() for i in ids if i not in lengths)
-    print(f"  ids absent from lengths: {missing_len}   "
-          f"{'OK' if not missing_len else '<-- results are conditional'}\n")
+    def read_into(stems) -> int:
+        bad = 0
+        for stem in stems:
+            c = cached_len(cache, stem)
+            if c is None:
+                unreadable.append(stem)
+                continue
+            cov[stem] = c
+            bad += c != min(lengths.get(stem, 0), args.esm_max_len)
+        return bad
+
+    mismatch = read_into(sorted(long_set) + sample)
+    print(f"cache lengths READ for {len(cov)} chains "
+          f"(all {len(long_set)} over max_len + {len(sample)} sampled short)")
+    if mismatch:
+        print(f"  sample mismatch -> escalating to a full read")
+        mismatch += read_into([i for i in all_ids if i not in cov])
+    print(f"  != min(L, max_len)      : {mismatch}   "
+          f"{'OK' if not mismatch else '<-- lengths are NOT min(L, max_len)'}")
+    print(f"  unreadable/missing cache: {len(unreadable)}   "
+          f"{'OK' if not unreadable else '<-- AUDIT INCOMPLETE'}")
+    n_missing_len = sum(1 for i in all_ids if i not in lengths)
+    print(f"  ids absent from lengths : {n_missing_len}   "
+          f"{'OK' if not n_missing_len else '<-- results are conditional'}")
+
+    assumed: set[str] = set()
 
     def coverage_of(stem: str) -> int:
-        return cov.get(stem, min(lengths.get(stem, 0), args.esm_max_len))
+        """Read length where available; otherwise fall back and COUNT it.
 
-    # --- TRAIN: random crop, aggregated per cluster ---
-    if "train" in splits:
-        per_cluster: dict[int, list[tuple[float, float, float]]] = defaultdict(list)
-        n_nc = 0
-        for stem in splits["train"]:
-            L = lengths.get(stem)
-            if L is None:
-                continue
-            cid = chain2cluster.get(stem, -1)
-            if cid < 0:
-                n_nc += 1
-                continue
-            per_cluster[cid].append(random_crop_exposure(L, args.crop, coverage_of(stem)))
-        if per_cluster:
-            means = np.array([np.mean(v, axis=0) for v in per_cluster.values()])
-            m = means.mean(axis=0)
-            print(f"TRAIN (random crop, one chain per cluster per epoch)")
-            print(f"  clusters={len(per_cluster)}  chains={len(splits['train'])}"
-                  f"  unclustered_skipped={n_nc}")
-            print(f"  P(crop has uncovered positions) = {m[0]:.5f}")
-            print(f"  mean uncovered fraction of crop = {m[1]:.5f}")
-            print(f"  P(crop entirely uncovered)      = {m[2]:.5f}\n")
+        Substituting min(L, max_len) for an unreadable file would quietly
+        reinstate the assumption this audit exists to test, so those chains are
+        tallied and reported rather than blending into the averages unremarked.
+        """
+        if stem in cov:
+            return cov[stem]
+        assumed.add(stem)
+        return min(lengths.get(stem, 0), args.esm_max_len)
 
-    # --- VAL/TEST: centre crop, capped and full ---
-    for name in ("val", "test"):
-        if name not in splits:
+    # --- TRAIN: random crop, one chain per cluster per epoch ---
+    per_cluster: dict[int, list] = defaultdict(list)
+    n_nc = 0
+    for stem in sets["train"]:
+        L = lengths.get(stem)
+        if L is None:
             continue
-        ids = splits[name]
-        capped, seen = [], defaultdict(int)
-        for stem in sorted(ids):
-            cid = chain2cluster.get(stem, -1)
-            if cid < 0:
-                continue
-            if seen[cid] < args.cap:
-                seen[cid] += 1
-                capped.append(stem)
-        for label, subset in ((f"C={args.cap}", capped), ("full", ids)):
-            hits = [centre_crop_exposure(lengths[s], args.crop, coverage_of(s))
-                    for s in subset if s in lengths]
-            n_any = sum(h for h, _ in hits)
-            frac = float(np.mean([f for _, f in hits])) if hits else 0.0
-            print(f"{name.upper()} centre crop, {label}: chains={len(hits)}  "
-                  f"affected={n_any} ({100*n_any/max(1,len(hits)):.3f}%)  "
-                  f"mean uncovered fraction={frac:.5f}")
+        cid = chain2cluster.get(stem, -1)
+        if cid < 0:
+            n_nc += 1
+            continue
+        per_cluster[cid].append(random_crop_exposure(L, crop, coverage_of(stem)))
+    if per_cluster:
+        m = np.array([np.mean(v, axis=0) for v in per_cluster.values()]).mean(axis=0)
+        print(f"\nTRAIN — random crop, averaged within cluster then over clusters")
+        print(f"  chains={len(sets['train'])}  clusters={len(per_cluster)}  "
+              f"unclustered_skipped={n_nc}")
+        print(f"  P(crop has uncovered positions) = {m[0]:.5f}")
+        print(f"  mean uncovered fraction of crop = {m[1]:.5f}")
+        print(f"  P(crop entirely uncovered)      = {m[2]:.5f}")
+
+    # --- VAL/TEST: the centre crop actually used at evaluation ---
+    print(f"\nVAL/TEST — centre crop (as evaluated)")
+    for name in sorted(k for k in sets if k != "train"):
+        hits = [centre_crop_exposure(lengths[s], crop, coverage_of(s))
+                for s in sets[name] if s in lengths]
+        n_any = sum(h for h, _ in hits)
+        frac = float(np.mean([f for _, f in hits])) if hits else 0.0
+        print(f"  {name:<12} chains={len(hits):>7}  affected={n_any:>5} "
+              f"({100*n_any/max(1,len(hits)):.3f}%)  mean uncovered={frac:.5f}")
+
+    if assumed:
+        print(f"\n{len(assumed)} chains used an ASSUMED coverage of min(L, max_len); "
+              f"their contribution above is not established.")
     print("\nMasking these positions in the loss would not be a fix: they still enter "
           "InstanceNorm2d statistics and axial attention, which runs without attn_mask.")
 
