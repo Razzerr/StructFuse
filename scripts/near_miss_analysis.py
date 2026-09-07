@@ -122,13 +122,16 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
     rows = []
+    # ContactLitModule has no forward(); predictions come from _step, which
+    # assembles the ESM/template inputs itself. This is the same path
+    # validation_step and test_step use, so the probabilities here are exactly
+    # the ones the reported metrics are computed from.
     with torch.no_grad():
         for batch in loader:
-            batch = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in batch.items()}
-            logits = model(batch)
-            prob = torch.sigmoid(logits).squeeze().float().cpu().numpy()
-            contact = batch["contact"].squeeze().cpu().numpy()
-            mask = batch["long_mask"].squeeze().cpu().numpy()
+            _, viz = model._step(batch, stage="test", return_visualization=True)
+            prob = viz["prob"].detach().squeeze().float().cpu().numpy()
+            contact = viz["contact"].detach().squeeze().cpu().numpy()
+            mask = viz["valid_mask"].detach().squeeze().cpu().numpy()
             k = int(batch["seq_len"][0].item())
             r = analyse_chain(prob, contact, mask, k, rng)
             if r:
