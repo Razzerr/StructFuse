@@ -197,10 +197,22 @@ def test_pair_mask_equals_outer_of_the_residue_mask_with_padding():
         assert pm.sum() > 0, "fixture is degenerate"
         for i in missing:
             assert pm[i].sum() == 0 and pm[:, i].sum() == 0, i
-        assert pm[120:, :].sum() == 0 and pm[:, 120:].sum() == 0, "padding must be masked"
 
         sep = np.abs(np.arange(n)[:, None] - np.arange(n)[None, :])
         assert np.array_equal(lm, pm * (sep >= 6))
+
+        # p1 IS the longest chain, so it has no padding and pm[120:] is an empty
+        # slice — asserting on it proves nothing. The padded rows live on the
+        # SHORT chain, at 80..n.
+        srow = list(b["pid"]).index("short")
+        spm, slm = b["pair_mask"][srow].numpy(), b["long_mask"][srow].numpy()
+        s_expect = np.zeros((n, n), dtype=np.float32)
+        s_expect[:80, :80] = 1.0
+        np.fill_diagonal(s_expect, 0.0)
+        assert np.array_equal(spm, s_expect), "short chain: pair_mask wrong outside 80x80"
+        assert spm[80:, :].sum() == 0 and spm[:, 80:].sum() == 0, "padding must be masked"
+        assert np.array_equal(slm, spm * (sep >= 6))
+        assert n > 80, "fixture must actually pad the short chain"
 
 
 def _run_all():

@@ -9,6 +9,12 @@ the expected query indices, so nothing is checked against the production mapping
 that is itself under test. Insertions and deletions are covered because those are
 where an off-by-one hides: with a pure 1:1 alignment a shifted implementation and
 a correct one can agree.
+
+SCOPE — this is not verification of the whole prior path. Covered: the transfer
+of contacts and distances given a mapping. NOT covered: `needleman_wunsch`
+deriving that mapping from two sequences, the crop origin inside
+`PriorBuilder.build_one`, and the `use_blosum=True` branch. Say "the transfer is
+index-correct", not "the prior is verified".
 """
 import sys
 import types
