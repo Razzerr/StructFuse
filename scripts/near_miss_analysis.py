@@ -120,6 +120,17 @@ def main() -> None:
 
     dm = hydra.utils.instantiate(cfg.data)
     dm.setup("test" if args.split == "test" else "validate")
+
+    # Subset the DATASET, not the loop. Skipping inside the loop still pays for
+    # the forward pass and, worse, for template retrieval in the collate — with
+    # --stride 87 that is 34,800 full evaluations to keep 400 samples.
+    from torch.utils.data import Subset
+    attr = "dset_test" if args.split == "test" else "dset_val"
+    full = getattr(dm, attr)
+    idx = list(range(0, len(full), max(1, args.stride)))[: args.n_chains]
+    setattr(dm, attr, Subset(full, idx))
+    dm.bucketed = False  # Subset has no cached_lengths; bs=1 makes bucketing moot
+    print(f"sampling {len(idx)} of {len(full)} chains (stride {args.stride})")
     loader = dm.test_dataloader() if args.split == "test" else dm.val_dataloader()
 
     model = hydra.utils.instantiate(cfg.model)
@@ -129,7 +140,6 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
     rows = []
-    seen = 0
     # ContactLitModule has no forward(); predictions come from _step, which
     # assembles the ESM/template inputs itself. This is the same path
     # validation_step and test_step use, so the probabilities here are exactly
@@ -148,9 +158,6 @@ def main() -> None:
                 sep = np.abs(np.arange(n)[:, None] - np.arange(n)[None, :])
                 mask = mask * (sep >= 24)
             k = int(batch["seq_len"][0].item())
-            seen += 1
-            if (seen - 1) % args.stride:
-                continue
             r = analyse_chain(prob, contact, mask, k, rng)
             if r:
                 r["sample_id"] = batch["pid"][0]
