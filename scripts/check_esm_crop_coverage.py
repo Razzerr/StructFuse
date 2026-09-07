@@ -236,12 +236,13 @@ def main() -> None:
           * READ — the header was parsed; use it.
           * UNREADABLE — file missing or corrupt. Coverage is unknown, so the
             chain is EXCLUDED and the audit is flagged incomplete.
-          * NOT READ — a short chain outside the verification sample. Its coverage
-            is min(L, max_len) = L, so every crop is fully covered and its
-            exposure is exactly 0. Excluding these would drop only zeros and
-            leave a population deliberately enriched in long chains. The
-            assumption is not free: it is tested on `--verify-sample` short
-            chains, and any mismatch escalates to a full read above.
+          * NOT READ — a short chain outside the verification sample, assumed to
+            have coverage min(L, max_len) = L and therefore zero exposure.
+            Excluding these would drop only zeros and leave a population
+            deliberately enriched in long chains. But the zero follows from the
+            chain's length AND a complete cache file; the sample tests that
+            pairing, it does not prove it per file. Use
+            --read-all-cache-lengths for a result that assumes nothing.
         """
         nonlocal n_assumed
         if stem in cov:
@@ -290,7 +291,7 @@ def main() -> None:
     if n_assumed:
         print(f"\n{n_assumed} chain-lookups used coverage = min(L, max_len) without "
               f"reading the file. All are chains at or under max_len, whose exposure is "
-              f"0 by construction; the assumption was tested on {len(sample)} sampled "
+              f"0 given a complete cache file; that pairing was tested on {len(sample)} sampled "
               f"short chains. Pass --read-all-cache-lengths to remove it entirely.")
     if _HEADER_ERRORS:
         print("\nheader parse failures (first few):")
