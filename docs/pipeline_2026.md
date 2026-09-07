@@ -427,6 +427,36 @@ nothing. Acceptance criterion stays as pre-registered: C=8 stands if P@L_long an
 the paired retrieval gain each differ from full by <= 0.002 with no qualitative
 change.
 
+### Evaluation policy (settled 2026-09-07)
+
+The model is padding-dependent: `PairFeatures` normalises with `InstanceNorm2d`
+over the whole L x L map (padding included, in `eval()` too) and axial attention
+calls SDPA without `attn_mask`. A chain's prediction therefore depends on which
+chains share its batch, which makes runs over different dataset compositions
+incomparable. Measured, not assumed: at `eval_batch_size=1` two passes over
+different compositions are **bit-identical** (0 of 34,959 chains differ).
+
+**Policy: report from a dedicated eval-only pass at `data.eval_batch_size=1`.**
+
+- **Training is unchanged.** `data.batch_size` still drives the train loader and
+  the effective batch after accumulation.
+- **In-training validation stays at the training batch size.** Its composition is
+  identical in every run (`val_ids` fixed, `rotate_val=false`, cap fixed), so
+  checkpoint selection is already comparable run to run, and `bs=1` every epoch
+  would be far more expensive than it is worth.
+- **Final numbers come from one eval-only pass per cell** with
+  `validate_before_test=true data.eval_batch_size=1`, so the F1 threshold is
+  calibrated under the same policy it is applied in. `P@L` and `AUC-PR` are
+  threshold-free and unaffected by that detail.
+- The architectural sensitivity itself remains, and gets one Methods sentence:
+  batching changes predictions, so evaluation is performed one chain at a time.
+
+Fixing the model instead (masked normalisation + `attn_mask`) is the more correct
+change but alters the architecture, forces a full retrain and loses the
+FlashAttention-2 path. It is not justified by the measured effect: removing
+padding *raises* both models (+1.02pp frontier, +1.44pp no-templates) and moves
+the retrieval delta by −0.42pp, with every conclusion intact.
+
 ### Stage E — the decision, and why it is not already made
 
 On the 2025 generation TruFor+dist beat grouped in 8/9 matched 8M cells and 3/3
