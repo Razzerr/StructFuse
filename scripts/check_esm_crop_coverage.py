@@ -79,7 +79,7 @@ def centre_crop_exposure(length: int, crop: int, cov: int) -> tuple[bool, float]
     return f > 0, f
 
 
-def build_dataset(split_file: Path, cfg, cap: int | None):
+def build_dataset(split_file: Path, cfg, cap: int | None, exclude_subsets=None):
     """Chain list exactly as production builds it.
 
     Split files hold PDB ENTRY ids (`1abc`); lengths, cache and clusters are keyed
@@ -91,10 +91,12 @@ def build_dataset(split_file: Path, cfg, cap: int | None):
     from src.data.components.dataset import ContactDataset
 
     kwargs = dict(
-        root=cfg["data_root"],
+        # to_container() yields str; ContactDataset does `root / f"{stem}.npz"`
+        root=Path(cfg["data_root"]),
         min_len=cfg["min_len"],
         splits_json_path=cfg["splits_json_path"],
         skip_ids_files=cfg["skip_ids_files"],
+        exclude_subsets=exclude_subsets,
     )
     if cap is not None:
         kwargs.update(
@@ -153,14 +155,20 @@ def main() -> None:
 
     # Chain lists straight from production, so entry->chain expansion, min_len,
     # skip lists, subset exclusion and the CASP16 cap exemption are not re-derived.
+    # Production reads train from split_dir/all_train_ids.txt but val/test from the
+    # CONFIGURED data.val_ids / data.test_ids, and applies test_exclude_subsets to
+    # both — mirror that rather than hardcoding filenames.
+    excl = d.get("test_exclude_subsets") or None
+    val_p = Path(d["val_ids"]) if d.get("val_ids") else split_dir / "val_holdout_ids.txt"
+    test_p = Path(d["test_ids"]) if d.get("test_ids") else split_dir / "test_ids.txt"
     sets = {
         "train": build_dataset(split_dir / "all_train_ids.txt", cfg, None).ids,
-        "val_full": build_dataset(split_dir / "val_holdout_ids.txt", cfg, None).ids,
-        "test_full": build_dataset(split_dir / "test_ids.txt", cfg, None).ids,
+        "val_full": build_dataset(val_p, cfg, None, excl).ids,
+        "test_full": build_dataset(test_p, cfg, None, excl).ids,
     }
     if cap:
-        sets[f"val_C{cap}"] = build_dataset(split_dir / "val_holdout_ids.txt", cfg, cap).ids
-        sets[f"test_C{cap}"] = build_dataset(split_dir / "test_ids.txt", cfg, cap).ids
+        sets[f"val_C{cap}"] = build_dataset(val_p, cfg, cap, excl).ids
+        sets[f"test_C{cap}"] = build_dataset(test_p, cfg, cap, excl).ids
 
     rng = np.random.default_rng(0)
     all_ids = sorted({i for v in sets.values() for i in v})
@@ -197,37 +205,36 @@ def main() -> None:
     print(f"  ids absent from lengths : {n_missing_len}   "
           f"{'OK' if not n_missing_len else '<-- results are conditional'}")
 
-    assumed: set[str] = set()
+    def coverage_of(stem: str) -> int | None:
+        """Read coverage, or None when it could not be established.
 
-    def coverage_of(stem: str) -> int:
-        """Read length where available; otherwise fall back and COUNT it.
-
-        Substituting min(L, max_len) for an unreadable file would quietly
-        reinstate the assumption this audit exists to test, so those chains are
-        tallied and reported rather than blending into the averages unremarked.
+        A substituted min(L, max_len) would reinstate the assumption this audit
+        exists to test, and averaging it in would hide that. Chains without a
+        readable cache are EXCLUDED from every figure below and counted
+        separately, so the reported numbers rest only on measured coverage.
         """
-        if stem in cov:
-            return cov[stem]
-        assumed.add(stem)
-        return min(lengths.get(stem, 0), args.esm_max_len)
+        return cov.get(stem)
 
     # --- TRAIN: random crop, one chain per cluster per epoch ---
     per_cluster: dict[int, list] = defaultdict(list)
     n_nc = 0
+    n_unknown_train = 0
     for stem in sets["train"]:
         L = lengths.get(stem)
-        if L is None:
+        c = coverage_of(stem)
+        if L is None or c is None:
+            n_unknown_train += c is None
             continue
         cid = chain2cluster.get(stem, -1)
         if cid < 0:
             n_nc += 1
             continue
-        per_cluster[cid].append(random_crop_exposure(L, crop, coverage_of(stem)))
+        per_cluster[cid].append(random_crop_exposure(L, crop, c))
     if per_cluster:
         m = np.array([np.mean(v, axis=0) for v in per_cluster.values()]).mean(axis=0)
         print(f"\nTRAIN — random crop, averaged within cluster then over clusters")
         print(f"  chains={len(sets['train'])}  clusters={len(per_cluster)}  "
-              f"unclustered_skipped={n_nc}")
+              f"unclustered_skipped={n_nc}  coverage_unknown_skipped={n_unknown_train}")
         print(f"  P(crop has uncovered positions) = {m[0]:.5f}")
         print(f"  mean uncovered fraction of crop = {m[1]:.5f}")
         print(f"  P(crop entirely uncovered)      = {m[2]:.5f}")
@@ -235,16 +242,18 @@ def main() -> None:
     # --- VAL/TEST: the centre crop actually used at evaluation ---
     print(f"\nVAL/TEST — centre crop (as evaluated)")
     for name in sorted(k for k in sets if k != "train"):
-        hits = [centre_crop_exposure(lengths[s], crop, coverage_of(s))
-                for s in sets[name] if s in lengths]
+        pairs = [(s, coverage_of(s)) for s in sets[name] if s in lengths]
+        skipped = sum(c is None for _, c in pairs)
+        hits = [centre_crop_exposure(lengths[s], crop, c) for s, c in pairs if c is not None]
         n_any = sum(h for h, _ in hits)
         frac = float(np.mean([f for _, f in hits])) if hits else 0.0
         print(f"  {name:<12} chains={len(hits):>7}  affected={n_any:>5} "
-              f"({100*n_any/max(1,len(hits)):.3f}%)  mean uncovered={frac:.5f}")
+              f"({100*n_any/max(1,len(hits)):.3f}%)  mean uncovered={frac:.5f}"
+              f"{'' if not skipped else f'   [{skipped} skipped: coverage unknown]'}")
 
-    if assumed:
-        print(f"\n{len(assumed)} chains used an ASSUMED coverage of min(L, max_len); "
-              f"their contribution above is not established.")
+    if unreadable:
+        print(f"\n{len(unreadable)} chains have no readable cache and were EXCLUDED from "
+              f"every figure above. Treat the results as non-conclusive until that is 0.")
     print("\nMasking these positions in the loss would not be a fix: they still enter "
           "InstanceNorm2d statistics and axial attention, which runs without attn_mask.")
 
