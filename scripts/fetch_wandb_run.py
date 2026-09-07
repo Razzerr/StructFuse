@@ -266,9 +266,59 @@ def render_selected_keys(
     console.print(table)
 
 
+def list_recent_runs(limit: int, state: str | None, name_filter: str | None,
+                     console: Console) -> None:
+    """List recent runs so a run id never has to be copied out of the browser.
+
+    Ordered newest-first. `state` filters server-side (finished / running /
+    failed / crashed); `name_filter` is a case-insensitive substring match on the
+    task name, which is how our runs are actually identified (`paper_8m_*`).
+    """
+    import os
+    entity = os.environ.get("WANDB_ENTITY", "ryzzr")
+    project = os.environ.get("WANDB_PROJECT", "StructFuse")
+    api = wandb.Api(timeout=120)
+    filters = {"state": state} if state else None
+    runs = api.runs(f"{entity}/{project}", filters=filters,
+                    order="-created_at", per_page=min(limit * 3, 200))
+
+    table = Table(show_header=True, header_style="bold", box=box.SIMPLE)
+    for col, just in (("id", "left"), ("task_name", "left"), ("state", "left"),
+                      ("created", "left"), ("epochs", "right"),
+                      ("test/P@L_long", "right"), ("tags", "left")):
+        table.add_column(col, justify=just)
+
+    shown = 0
+    for run in runs:
+        task = run.config.get("task_name") or run.display_name or run.name
+        if name_filter and name_filter.lower() not in str(task).lower():
+            continue
+        sm = run.summary_metrics or {}
+        table.add_row(
+            run.id, str(task), run.state, str(run.created_at)[:16],
+            _fmt(sm.get("epoch")), _fmt(sm.get("test/P@L_long")),
+            ",".join(run.tags[:3]),
+        )
+        shown += 1
+        if shown >= limit:
+            break
+    console.print(table)
+    if shown == 0:
+        console.print("[dim]No run matched. Try a wider --recent or drop --name.[/dim]")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch W&B run info and metrics.")
-    parser.add_argument("run_id", nargs="+", help="One or more W&B run IDs (e.g. abc123xy)")
+    parser.add_argument("run_id", nargs="*",
+                        help="One or more W&B run IDs. Omit with --recent to list instead.")
+    parser.add_argument("--recent", type=int, nargs="?", const=15, default=None,
+                        help="List the N most recent runs (default 15) instead of fetching. "
+                             "Saves copying run ids out of the browser.")
+    parser.add_argument("--state", default=None,
+                        choices=["finished", "running", "failed", "crashed"],
+                        help="Filter --recent by run state.")
+    parser.add_argument("--name", default=None,
+                        help="Filter --recent by task-name substring, e.g. paper_8m.")
     parser.add_argument(
         "--keys",
         default=None,
@@ -287,6 +337,13 @@ def main() -> None:
         help="Maximum number of raw history rows to fetch before epoch-aggregation (default: unlimited)",
     )
     args = parser.parse_args()
+
+    if args.recent is not None:
+        list_recent_runs(args.recent, args.state, args.name,
+                         Console(width=args.width, highlight=False, no_color=True))
+        return
+    if not args.run_id:
+        raise SystemExit("Give a run id, or --recent to list what is available.")
 
     runs = [fetch_run(rid) for rid in args.run_id]
 
