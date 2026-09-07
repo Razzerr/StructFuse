@@ -646,6 +646,7 @@ def collate_padded(
     include_diagonal: bool = False,  # usually set diagonal to 0 in pair masks
     prior_builder: Optional[PriorBuilder] = None,
     esm_embeddings_dir: Optional[Path] = None,
+    esm_max_len: int = 1022,
     filter_holdout: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -683,13 +684,33 @@ def collate_padded(
         L = item["L"]
         crop_slice = slice(0, L)
 
+        # The cached ESM rep is truncated at esm_max_len, so a crop drawn from the
+        # full length can start past the end of the cache. Restrict the RANDOM
+        # (training) draw to the covered prefix.
+        #
+        # Only the random draw. Clamping L before a CENTRE crop would move
+        # evaluation windows that are already fully covered: at L=1200 the centre
+        # crop would shift from [408:792] to [319:703]. Measured coverage of the
+        # centre crop is 100% on every split, so there is nothing to fix there.
+        L_crop = L
+        if (
+            esm_embeddings_dir is not None
+            and crop_mode.lower() == "random"
+            and esm_max_len
+        ):
+            L_crop = min(L, esm_max_len)
+
         if (
             crop_mode.lower() in ("random", "center")
             and crop_size
             and crop_size > 0
-            and crop_size < L
+            and crop_size < L_crop
         ):
-            crop_slice = _choose_crop(L, crop_size, rng, crop_mode.lower())
+            crop_slice = _choose_crop(L_crop, crop_size, rng, crop_mode.lower())
+        elif crop_size and 0 < crop_size <= L_crop < L:
+            # long chain, cache-limited: take the covered prefix rather than a
+            # window the features do not reach
+            crop_slice = slice(0, L_crop)
 
         crop_start, crop_end = crop_slice.start, crop_slice.stop
         cropped.append(
@@ -853,6 +874,23 @@ def collate_padded(
             # crop window if the sequence was truncated during precomputation)
             rep_crop = rep_full[cb[0]:cb[1]].astype(np.float32)
             cont_crop = cont_full[cb[0]:cb[1], cb[0]:cb[1]].astype(np.float32)
+
+            # Fail loudly. Zero-filling the shortfall pairs valid contact labels
+            # with absent features, and those zeros are not inert: they enter the
+            # InstanceNorm2d statistics in PairFeatures and are attended to by the
+            # axial attention, which runs without attn_mask. A counter would not
+            # stop training from continuing on wrong data.
+            want = cb[1] - cb[0]
+            if rep_crop.shape[0] != want or cont_crop.shape != (want, want):
+                raise ValueError(
+                    f"ESM cache does not cover the crop for {pid}: "
+                    f"crop=[{cb[0]}:{cb[1]}] (len {want}), "
+                    f"rep_full={rep_full.shape}, contacts_full={cont_full.shape}, "
+                    f"rep_crop={rep_crop.shape}, contacts_crop={cont_crop.shape}. "
+                    f"The cache is truncated at esm_max_len; the training crop is "
+                    f"clamped to the covered prefix, so this means the two are out "
+                    f"of sync (wrong cache dir, or a stale precompute)."
+                )
 
             L_use = min(rep_crop.shape[0], Lmax)
             h_esm[b, :L_use, :] = torch.from_numpy(rep_crop[:L_use])

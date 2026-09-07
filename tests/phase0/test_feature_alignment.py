@@ -71,10 +71,12 @@ def _write_cache(dirpath: Path, pid: str, length: int, axis: str = "row") -> Non
     np.savez(dirpath / f"{pid}.npz", rep=rep, contacts=np.ascontiguousarray(contacts))
 
 
-def _collate(items, cache_dir, crop_size, crop_mode="center", seed=0):
+def _collate(items, cache_dir, crop_size, crop_mode="center", seed=0,
+             esm_max_len=1022):
     return collate_padded(
         items, crop_size=crop_size, crop_mode=crop_mode,
         min_seq_sep=6, seed=seed, esm_embeddings_dir=cache_dir,
+        esm_max_len=esm_max_len,
     )
 
 
@@ -145,29 +147,46 @@ def test_multiple_chains_in_one_batch_are_not_swapped():
                 pid, float(code[0]), _chain_code(pid))
 
 
-def test_crop_beyond_the_cached_embedding_is_silently_zero_filled():
-    """Documents a REAL defect, not desired behaviour.
-
-    precompute truncates at 1022 tokens, so a longer chain has a shorter cached
-    rep than its contact map. `collate_padded` crops both with bounds taken from
-    the full chain length, so the uncovered rows of h_esm stay zero while the
-    labels for those positions are intact — valid labels paired with no features,
-    with no warning. Change this test when the behaviour is fixed.
-    """
+def test_random_training_crop_is_clamped_to_the_cached_prefix():
+    """Long chain, short cache: the training draw must stay inside coverage."""
+    cov = 150
     with tempfile.TemporaryDirectory() as td:
         cache = Path(td)
-        _write_cache(cache, "p1", 150)          # cache shorter than the chain
-        b = _collate([_item("p1", 400)], cache, crop_size=200,
-                     crop_mode="center", seed=0)
+        _write_cache(cache, "p1", cov)
+        for seed in range(8):
+            b = _collate([_item("p1", 400)], cache, crop_size=100,
+                         crop_mode="random", seed=seed, esm_max_len=cov)
+            start, end = b["crop_bounds"][0].tolist()
+            assert end <= cov, (seed, start, end)
+            got = b["h_esm"][0, : end - start, 0].numpy()
+            assert np.array_equal(got, np.arange(start, end, dtype=np.float32)), seed
+            assert np.all(b["h_esm"][0, : end - start, 0].numpy() != 0) or start == 0
+
+
+def test_centre_crop_is_NOT_clamped():
+    """Evaluation windows are fully covered already; moving them would be a
+    regression, not a fix. At L=1200 the centre crop must stay at [408:792]."""
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td)
+        _write_cache(cache, "p1", 1022)
+        b = _collate([_item("p1", 1200)], cache, crop_size=384, crop_mode="center")
         start, end = b["crop_bounds"][0].tolist()
-        covered = max(0, min(end, 150) - start)
-        h = b["h_esm"][0, :, 0].numpy()
-        assert covered < (end - start), "fixture must actually overrun the cache"
-        assert np.array_equal(h[:covered], np.arange(start, start + covered, dtype=np.float32))
-        assert np.all(h[covered : end - start] == 0.0), "uncovered rows should be zeros"
-        # ...while the labels for exactly those positions are present and valid:
-        uncovered_label = float(b["contact"][0, end - start - 1, 0])
-        assert uncovered_label == float((end - 1) * 1000 + start), uncovered_label
+        assert (start, end) == (408, 792), (start, end)
+
+
+def test_cache_shortfall_raises_instead_of_zero_filling():
+    """A counter would not stop training on wrong data, so this must raise."""
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td)
+        _write_cache(cache, "p1", 150)
+        try:
+            # centre crop is deliberately not clamped, so this overruns
+            _collate([_item("p1", 400)], cache, crop_size=300, crop_mode="center")
+        except ValueError as exc:
+            msg = str(exc)
+            assert "p1" in msg and "crop=" in msg and "rep_full=" in msg, msg
+        else:
+            raise AssertionError("silent zero-fill: no exception raised")
 
 
 def test_pair_mask_equals_outer_of_the_residue_mask_with_padding():
