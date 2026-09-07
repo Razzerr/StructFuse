@@ -96,6 +96,13 @@ def main() -> None:
     ap.add_argument("--n-chains", type=int, default=400)
     ap.add_argument("--split", default="test", choices=["test", "val"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--range", default="long", choices=["long", "all"],
+                    help="'long' restricts to |i-j|>=24, matching the headline metric. "
+                         "'all' keeps every pair with sep>=min_seq_sep, which is much "
+                         "easier and not comparable to test/P@L_long.")
+    ap.add_argument("--stride", type=int, default=1,
+                    help="Take every Nth chain. The loader is sorted, so --stride 1 "
+                         "samples the alphabetical head rather than the test set.")
     ap.add_argument("--out", default=".temp/near_miss.tsv")
     args = ap.parse_args()
 
@@ -122,6 +129,7 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
     rows = []
+    seen = 0
     # ContactLitModule has no forward(); predictions come from _step, which
     # assembles the ESM/template inputs itself. This is the same path
     # validation_step and test_step use, so the probabilities here are exactly
@@ -132,10 +140,26 @@ def main() -> None:
             prob = viz["prob"].detach().squeeze().float().cpu().numpy()
             contact = viz["contact"].detach().squeeze().cpu().numpy()
             mask = viz["valid_mask"].detach().squeeze().cpu().numpy()
+            if args.range == "long":
+                # valid_mask only enforces sep>=min_seq_sep (6). The headline
+                # metric is long-range, so restrict here or the numbers are not
+                # comparable with test/P@L_long.
+                n = mask.shape[0]
+                sep = np.abs(np.arange(n)[:, None] - np.arange(n)[None, :])
+                mask = mask * (sep >= 24)
             k = int(batch["seq_len"][0].item())
+            seen += 1
+            if (seen - 1) % args.stride:
+                continue
             r = analyse_chain(prob, contact, mask, k, rng)
             if r:
                 r["sample_id"] = batch["pid"][0]
+                # Template quality, so displacement can be tested against the
+                # alignment hypothesis: an NW shift shows up as worse
+                # displacement when the best template is more distant.
+                for key in ("best_tpl_sim", "n_templates_retrieved"):
+                    if key in batch:
+                        r[key] = float(batch[key][0])
                 rows.append(r)
             if len(rows) >= args.n_chains:
                 break
