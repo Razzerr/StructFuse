@@ -4,6 +4,7 @@
 # Usage:
 #   ./configs/experiment/launch_paper_8M.sh --gate          # 2 jobs, run first
 #   ./configs/experiment/launch_paper_8M.sh --final-eval    # bs=1 reported numbers, after --core
+#   ./configs/experiment/launch_paper_8M.sh --trufor-controls  # 2 jobs, headline controls
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -22,7 +23,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gate|--smoke|--core|--supplementary|--final-eval|--all)
+        --gate|--smoke|--core|--trufor-controls|--supplementary|--final-eval|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -120,6 +121,8 @@ submit_final_evals() {
     # against. Running it separately by hand is how cap_full_no_templates ended up
     # mixing protocols; the stage-E comparison would inherit that.
     submit_final_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
+    submit_final_eval "ablation/trufor_no_templates"  "paper_8m_trufor_no_templates"
+    submit_final_eval "ablation/trufor_no_dist"       "paper_8m_trufor_no_dist"
     # B3 is attention-only: no trained weights, so no ckpt_path. It runs through
     # train.py in the core panel and does the same here, just at bs=1.
     local b3="paper_8m_esm2_raw_bs1"
@@ -167,6 +170,20 @@ submit_gate() {
     submit_training "ablation/no_templates" "paper_8m_gate_no_templates"
 }
 
+# The two controls the headline stack needs after Stage E selected TruFor+dist:
+# a retrieval kill-switch and the (-dist,+triangle) cell, both on TruFor. The
+# grouped panel stays as its own mechanism analysis and is NOT an ablation of
+# TruFor; nothing here re-runs it.
+submit_trufor_controls() {
+    submit_training "ablation/trufor_no_templates" "paper_8m_trufor_no_templates"
+    submit_training "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
+}
+
+# NOTE: --supplementary is a MIXED bag, not a grouped panel and not a TruFor one:
+# standard-concat fusion, the historical dist-less TruFor (A2, confounded), a
+# dilated head and the k-sweep. After Stage E it is not a ready panel for the
+# selected stack. Running it would only support claims — K-robustness, head
+# comparison — that the manuscript has to actually make, on TruFor.
 submit_supplementary() {
     submit_training "ablation/standard_fusion" "paper_8m_standard_fusion"
     submit_training "ablation/trufor_fusion" "paper_8m_trufor_fusion"
@@ -180,6 +197,9 @@ echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN},
 case "${MODE}" in
     gate)
         submit_gate
+        ;;
+    trufor-controls)
+        submit_trufor_controls
         ;;
     final-eval)
         submit_final_evals
