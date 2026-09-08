@@ -1,4 +1,5 @@
 import functools
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from src.models.components.fusion_strategies import (
     get_fusion_strategy,
     GroupedFeatureFusion,
+    TruForFusion,
 )
 from src.models.components.triangle import TriangleMultiplicativeUpdate
 
@@ -335,15 +337,40 @@ class Pair2DHead(nn.Module):
             feature_groups=fusion_feature_groups,
             tpl_dist_channels=tpl_dist_channels,
         )
+        self._frozen_template_bns: List[nn.Module] = []
         if not self.use_template_features:
-            if not isinstance(self.fusion, GroupedFeatureFusion):
+            if isinstance(self.fusion, GroupedFeatureFusion):
+                # Keep the checkpoint architecture compatible with the frontier,
+                # but exclude absent-modality encoders from optimization and EMA.
+                self.fusion.encoders.requires_grad_(False)
+            elif isinstance(self.fusion, TruForFusion):
+                # TruFor fuses two streams by cross-attention, so dropping the
+                # template stream would change the fusion itself and answer a
+                # different question. Keep the architecture and its parameters,
+                # and feed constant zeros (see forward).
+                #
+                # That is only safe once the template encoder's BatchNorm is
+                # pinned. A BN fed constant zeros collapses its running variance
+                # (~1e-16 was measured on 2026-06-12) and then reports one thing
+                # in train mode and another in eval; that invalidated the
+                # b0cfw0w8 / kwm8qq4p controls. Fix the statistics at
+                # mean 0 / var 1 and keep those modules in eval mode forever, so
+                # normalisation is the identity and never updates. Affine
+                # weights, convolutions and cross-attention stay trainable —
+                # parameterisation is preserved, only the statistics are frozen.
+                for m in self.fusion.template_encoder.modules():
+                    if isinstance(m, nn.modules.batchnorm._BatchNorm):
+                        with torch.no_grad():
+                            m.running_mean.zero_()
+                            m.running_var.fill_(1.0)
+                            m.num_batches_tracked.zero_()
+                        m.eval()
+                        self._frozen_template_bns.append(m)
+            else:
                 raise ValueError(
                     "use_template_features=False is supported only with "
-                    "fusion_strategy='grouped'"
+                    "fusion_strategy in {'grouped', 'trufor'}"
                 )
-            # Keep the checkpoint architecture compatible with the frontier,
-            # but exclude absent-modality encoders from optimization and EMA.
-            self.fusion.encoders.requires_grad_(False)
         
         # Input channels depend on fusion strategy output
         in_ch = self.fusion.out_channels
@@ -416,6 +443,18 @@ class Pair2DHead(nn.Module):
         import math
         nn.init.constant_(self.out.bias, -math.log((1 - 0.05) / 0.05))
 
+    def train(self, mode: bool = True):
+        """Keep the empty-modality BatchNorm in eval mode across train()/eval().
+
+        A single .eval() at construction is not enough: Lightning calls
+        model.train() at the start of every training epoch, which would restart
+        the running-statistics updates this control exists to prevent.
+        """
+        super().train(mode)
+        for m in self._frozen_template_bns:
+            m.eval()
+        return self
+
     def forward(
         self,
         pair_feat,
@@ -450,6 +489,21 @@ class Pair2DHead(nn.Module):
                     feats["tpl_dist"] = tpl_dist_bins
             x = self.fusion(pair_feat, esm_contacts, rel, **feats)
         else:
+            if not self.use_template_features:
+                # Ignore whatever was passed and substitute constant zeros, so no
+                # retrieval information can reach the model even if a caller
+                # supplies real tensors. The distance bins must be MATERIALISED
+                # here: with the prior builder disabled, collate_padded emits no
+                # `tpl_dist_bins` at all, yet the encoder's input width is fixed
+                # at 2 + tpl_dist_channels.
+                b, _, h, w = pair_feat.shape
+                z = functools.partial(
+                    torch.zeros, dtype=pair_feat.dtype, device=pair_feat.device
+                )
+                prior = z((b, 1, h, w))
+                count = z((b, 1, h, w))
+                n_dist = getattr(self.fusion, "tpl_dist_channels", 0)
+                tpl_dist_bins = z((b, n_dist, h, w)) if n_dist else None
             x = self.fusion(
                 pair_feat,
                 prior,

@@ -1,0 +1,17 @@
+# @package _global_
+# TruFor+dist minus the distance bins, triangle kept: the (-dist, +triangle) cell.
+#
+# Without it the distance x triangle interaction is not computable on the headline
+# stack — the 2026-07-22 TruFor panel lacked exactly this cell, and the -0.41pp
+# interaction currently on record describes GROUPED, not TruFor.
+
+task_name: "ablation_trufor_no_dist"
+tags: ["ablation", "no-dist", "triangle-on", "trufor", "8M"]
+seed: 42
+
+data:
+  compute_dist_bins: false
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: false

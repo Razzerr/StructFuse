@@ -1,0 +1,32 @@
+# @package _global_
+# RETRIEVAL KILL-SWITCH for the TruFor+dist headline stack (Stage E, 2026-09-08).
+#
+# Same architecture as the headline, no retrieval information. TruFor fuses two
+# streams by cross-attention, so removing the template stream would change the
+# fusion itself and answer a different question; the stream and its parameters
+# stay, and Pair2DHead forces its inputs to constant zeros.
+#
+# `use_tpl_dist_bins` stays TRUE on purpose: it keeps the encoder's input width
+# at 2 + 9 channels, matching the headline. The distance bins are materialised as
+# zeros in the forward, because collate_padded emits none once the prior builder
+# is off.
+#
+# The empty modality's BatchNorm is pinned at mean 0 / var 1 and never updates
+# (see Pair2DHead.train). Without that, constant-zero input collapses the running
+# variance and train/eval diverge — the defect that invalidated b0cfw0w8 and
+# kwm8qq4p. This is a model-side change, not only a change of inputs, and must be
+# stated as such in Methods.
+
+task_name: "ablation_trufor_no_templates"
+tags: ["ablation", "no-templates", "trufor", "8M", "kill-switch"]
+seed: 42
+
+data:
+  topk: 0
+  compute_dist_bins: false
+
+model:
+  topk: 0
+  fusion_strategy: "trufor"
+  use_template_features: false
+  use_tpl_dist_bins: true
