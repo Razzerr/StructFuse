@@ -102,7 +102,7 @@ submit_final_eval() {
     local job_name="${train_task}_bs1"
     local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/eval.py \
 experiment=${experiment} task_name=${job_name} ckpt_path=${ckpt} \
-validate_before_test=true data.eval_batch_size=1 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+validate_before_test=true data.eval_batch_size=1 logger=wandb 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "04:00:00" 16 "256G" >/dev/null
 }
 

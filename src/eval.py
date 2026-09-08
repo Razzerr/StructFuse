@@ -111,6 +111,22 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     metric_dict = trainer.callback_metrics
 
+    # Persist the metrics. configs/eval.yaml sets `logger: null`, so an eval-only
+    # pass logged nothing anywhere — yet these are the REPORTED numbers, and the
+    # val/* threshold-calibration metrics exist in no other artifact (the
+    # per-sample TSV covers test only). Recovering them from a tee'd progress bar
+    # is not a reproducibility story.
+    out = Path(cfg.paths.output_dir) / "eval_metrics.json"
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            k: (v.item() if hasattr(v, "item") else v) for k, v in metric_dict.items()
+        }
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        log.info(f"Wrote {len(payload)} metrics to {out}")
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"Could not write {out}: {exc}")
+
     return metric_dict, object_dict
 
 
