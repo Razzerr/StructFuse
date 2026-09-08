@@ -115,6 +115,11 @@ submit_final_evals() {
     submit_final_eval "ablation/no_templates"        "paper_8m_no_templates"
     submit_final_eval "ablation/random_retrieval"    "paper_8m_random_retrieval"
     submit_final_eval "ablation/bce_only"            "paper_8m_bce_only"
+    # Submitted by launch_trufor_ablation_8M.sh --fusion-decision, but its reported
+    # numbers must come from the SAME bs=1 pass as everything it is compared
+    # against. Running it separately by hand is how cap_full_no_templates ended up
+    # mixing protocols; the stage-E comparison would inherit that.
+    submit_final_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
     # B3 is attention-only: no trained weights, so no ckpt_path. It runs through
     # train.py in the core panel and does the same here, just at bs=1.
     local b3="paper_8m_esm2_raw_bs1"
