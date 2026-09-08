@@ -4,7 +4,8 @@
 # Usage:
 #   ./configs/experiment/launch_paper_8M.sh --gate          # 2 jobs, run first
 #   ./configs/experiment/launch_paper_8M.sh --final-eval    # bs=1 reported numbers, after --core
-#   ./configs/experiment/launch_paper_8M.sh --trufor-controls  # 2 jobs, headline controls
+#   ./configs/experiment/launch_paper_8M.sh --trufor-controls        # 2 jobs, headline controls
+#   ./configs/experiment/launch_paper_8M.sh --final-eval-controls    # their bs=1 pass, those 2 only
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -23,7 +24,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gate|--smoke|--core|--trufor-controls|--supplementary|--final-eval|--all)
+        --gate|--smoke|--core|--trufor-controls|--supplementary|--final-eval|--final-eval-controls|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -121,14 +122,20 @@ submit_final_evals() {
     # against. Running it separately by hand is how cap_full_no_templates ended up
     # mixing protocols; the stage-E comparison would inherit that.
     submit_final_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
-    submit_final_eval "ablation/trufor_no_templates"  "paper_8m_trufor_no_templates"
-    submit_final_eval "ablation/trufor_no_dist"       "paper_8m_trufor_no_dist"
     # B3 is attention-only: no trained weights, so no ckpt_path. It runs through
     # train.py in the core panel and does the same here, just at bs=1.
     local b3="paper_8m_esm2_raw_bs1"
     submit_job "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py \
 experiment=baseline/esm2_only test=true task_name=${b3} data.eval_batch_size=1 \
 2>&1 | tee ${TEMP_DIR}/${b3}.log" "${b3}" "08:00:00" 16 "256G" >/dev/null
+}
+
+# bs=1 pass for the two Stage-E controls only. The nine finished cells already
+# have theirs; re-evaluating them would burn ~5 GPU-hours to reproduce numbers
+# that are deterministic and already recorded.
+submit_final_eval_controls() {
+    submit_final_eval "ablation/trufor_no_templates" "paper_8m_trufor_no_templates"
+    submit_final_eval "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
 }
 
 submit_smoke() {
@@ -203,6 +210,9 @@ case "${MODE}" in
         ;;
     final-eval)
         submit_final_evals
+        ;;
+    final-eval-controls)
+        submit_final_eval_controls
         ;;
     smoke)
         submit_smoke

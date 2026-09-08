@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import hydra
@@ -78,12 +80,19 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if cfg.get("validate_before_test", True):
         log.info("Validating checkpoint for threshold calibration before testing!")
-        trainer.validate(
+        val_out = trainer.validate(
             model=model,
             datamodule=datamodule,
             ckpt_path=cfg.ckpt_path,
             weights_only=False,
         )
+        # Snapshot now: trainer.callback_metrics is rebuilt by the test loop, so
+        # reading val/* after testing loses exactly the threshold-calibration
+        # metrics that Stage E is decided on.
+        val_metrics = dict(val_out[0]) if val_out else {}
+        val_metrics.update({
+            k: v for k, v in trainer.callback_metrics.items() if str(k).startswith("val/")
+        })
         log.info("Testing the in-memory validated checkpoint!")
         trainer.test(
             model=model,
@@ -92,6 +101,7 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             weights_only=False,
         )
     else:
+        val_metrics = {}
         log.info("Starting testing without validation calibration!")
         trainer.test(
             model=model,
@@ -119,9 +129,10 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     out = Path(cfg.paths.output_dir) / "eval_metrics.json"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            k: (v.item() if hasattr(v, "item") else v) for k, v in metric_dict.items()
-        }
+        def _plain(d):
+            return {k: (v.item() if hasattr(v, "item") else v) for k, v in d.items()}
+
+        payload = {**_plain(val_metrics), **_plain(metric_dict)}
         out.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
         log.info(f"Wrote {len(payload)} metrics to {out}")
     except Exception as exc:  # noqa: BLE001
