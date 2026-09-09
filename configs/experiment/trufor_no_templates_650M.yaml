@@ -1,0 +1,47 @@
+# @package _global_
+# RETRIEVAL KILL-SWITCH matched to the 650M headline stack (Stage G, 2026-09-09).
+#
+# Partner of `trufor_fusion_with_dist_650M.yaml`: identical in every respect
+# except that no retrieval information reaches the model. Replaces
+# `baseline/esm2_650m_trained` (B2) as the control for this panel — B2 inherits
+# the default GROUPED fusion, so pairing it with a TruFor headline would confound
+# "templates removed" with "fusion swapped".
+#
+# `use_tpl_dist_bins` stays TRUE on purpose, exactly as in the 8M sibling
+# `ablation/trufor_no_templates.yaml`: it keeps the template encoder's input at
+# 2 + 9 channels, matching the headline. The bins are materialised as zeros in
+# Pair2DHead.forward because collate_padded emits none once the prior builder is
+# off.
+#
+# TruFor fuses two streams by cross-attention, so DELETING the template stream
+# would change the fusion itself and answer a different question. The stream and
+# its parameters stay; its inputs are forced to constant zeros and its BatchNorm
+# is pinned at mean 0 / var 1 and never updates (see Pair2DHead.train). Without
+# the pin, constant-zero input collapses the running variance and train/eval
+# diverge — the defect that invalidated b0cfw0w8 and kwm8qq4p. This is a
+# model-side change, not only a change of inputs, and Methods must say so.
+#
+# NOTE the asymmetry with the grouped no-template control, which OMITS and
+# FREEZES its encoders instead. The two controls are not interchangeable and a
+# grouped-vs-TruFor no-template difference is not a clean fusion comparison.
+
+defaults:
+  - override /model: esm2_t33_650M
+
+task_name: "trufor_no_templates_650M"
+tags: ["control", "no-templates", "trufor", "tpl-dist", "650M", "kill-switch"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true    # keep encoder input width at 2 + 9, zeros in forward
+  use_checkpoint: true       # mirror trufor_fusion_with_dist_650M.yaml
+  topk: 0                    # passive, kept consistent with data.topk for the audit log
+  use_template_features: false
+
+data:
+  batch_size: 8
+  index_dir: ${paths.index_t33}          # unused at topk=0; pinned for audit symmetry
+  esm_embeddings_dir: ${paths.esm_t33}
+  topk: 0                    # real switch — PriorBuilder skips FAISS entirely
+  compute_dist_bins: false   # no templates → no distance features to compute

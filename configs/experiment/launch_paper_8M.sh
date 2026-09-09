@@ -86,13 +86,18 @@ submit_final_eval() {
     # would silently pick one of those for any cell not yet re-run. Refuse
     # anything older than the rebuild.
     local ckpt
-    ckpt="$(find "${REPO_ROOT:-.}/logs/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
+    # `|| true`: with `set -e -o pipefail` a missing log dir makes find exit
+    # non-zero, which killed the whole launcher instead of reaching the SKIP
+    # branch below. LOGS_DIR is absolute; ${REPO_ROOT} was never defined in
+    # _launch_common.sh, so the old ${REPO_ROOT:-.} silently meant "./logs" and
+    # only worked when invoked from the repo root.
+    ckpt="$(find "${LOGS_DIR}/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
             -newermt "${MIN_CKPT_DATE}" -printf '%T@ %p\n' 2>/dev/null \
-            | sort -rn | head -1 | cut -d' ' -f2-)"
+            | sort -rn | head -1 | cut -d' ' -f2- || true)"
     if [[ -z "${ckpt}" ]]; then
         local stale
-        stale="$(find "${REPO_ROOT:-.}/logs/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
-                 2>/dev/null | head -1)"
+        stale="$(find "${LOGS_DIR}/${train_task}" -name '*.ckpt' ! -name 'last.ckpt' \
+                 2>/dev/null | head -1 || true)"
         if [[ -n "${stale}" ]]; then
             echo "SKIP ${train_task}: only checkpoints older than ${MIN_CKPT_DATE} exist" \
                  "(e.g. ${stale}) — that is a previous data generation, not this panel." >&2

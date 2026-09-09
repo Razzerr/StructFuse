@@ -28,6 +28,7 @@ EXPERIMENTS = [
     "frontier_8M",
     "frontier",
     "trufor_fusion_with_dist_650M",
+    "trufor_no_templates_650M",
     "baseline/esm2_650m_trained",
 ]
 
@@ -67,7 +68,8 @@ def test_unpinned_ablations_get_the_8m_backbone_under_both():
 
 
 def test_pinned_650m_experiments_are_unaffected_by_the_default():
-    for exp in ("frontier", "trufor_fusion_with_dist_650M", "baseline/esm2_650m_trained"):
+    for exp in ("frontier", "trufor_fusion_with_dist_650M",
+                "trufor_no_templates_650M", "baseline/esm2_650m_trained"):
         for cfg_name in ("train", "eval"):
             cfg = _compose(cfg_name, exp)
             assert cfg.model.esm_model == "esm2_t33_650M_UR50D", (
@@ -98,6 +100,39 @@ def _run_all():
             print(f"FAIL {fn.__name__}: {exc}")
     print(f"{len(fns) - failed}/{len(fns)} passed")
     return 1 if failed else 0
+
+def test_650m_no_template_control_is_matched_to_the_headline():
+    """The Stage-G control must differ from the headline ONLY in retrieval.
+
+    A control that also drifts in fusion, backbone, batch size or index path
+    stops measuring "templates removed" and starts measuring a mixture — the
+    exact confound that made `baseline/esm2_650m_trained` (grouped) unusable as
+    a control for a TruFor headline.
+    """
+    head = _compose("train", "trufor_fusion_with_dist_650M")
+    ctrl = _compose("train", "trufor_no_templates_650M")
+
+    must_match_model = ("esm_model", "d_esm", "depth", "d_pair", "head_type",
+                        "fusion_strategy", "use_tpl_dist_bins", "use_checkpoint")
+    for key in must_match_model:
+        assert head.model.get(key) == ctrl.model.get(key), (
+            f"model.{key} differs between the 650M headline and its control: "
+            f"{head.model.get(key)!r} vs {ctrl.model.get(key)!r}"
+        )
+    for key in ("batch_size", "index_dir", "esm_embeddings_dir", "crop_size", "min_seq_sep"):
+        assert head.data.get(key) == ctrl.data.get(key), (
+            f"data.{key} differs between the 650M headline and its control: "
+            f"{head.data.get(key)!r} vs {ctrl.data.get(key)!r}"
+        )
+
+    # ...and it must actually switch retrieval off, on both sides of the boundary.
+    assert head.data.topk > 0 and ctrl.data.topk == 0
+    assert head.model.use_template_features is True
+    assert ctrl.model.use_template_features is False
+    assert ctrl.data.compute_dist_bins is False
+    # Width parity: the encoder still sees 2 + 9 channels, zeros materialised in
+    # the forward. Flipping this to False would silently change the architecture.
+    assert ctrl.model.use_tpl_dist_bins is True
 
 
 if __name__ == "__main__":
