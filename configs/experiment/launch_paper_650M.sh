@@ -16,7 +16,7 @@
 # Usage:
 #   ./configs/experiment/launch_paper_650M.sh --headline-s42     # run FIRST, then verify
 #   ./configs/experiment/launch_paper_650M.sh --remaining-seeds
-#   ./configs/experiment/launch_paper_650M.sh --baselines
+#   ./configs/experiment/launch_paper_650M.sh --baselines      # template-only; B1 is in --final-eval
 #   ./configs/experiment/launch_paper_650M.sh --final-eval       # bs=1 reported numbers
 #   ./configs/experiment/launch_paper_650M.sh --all              # every training, no final-eval
 # Add --dry-run to inspect commands without submitting.
@@ -122,9 +122,14 @@ submit_remaining_seeds() {
     submit_training "trufor_fusion_with_dist_650M" "paper_650m_trufor_s1337" "72:00:00" "seed=1337"
 }
 
+# ONLY template-only. B1 (raw ESM2-650M attention) has no trained weights — it is
+# an evaluation, not a training — so running it here at the default batch and
+# again in --final-eval at bs=1 would be the same measurement twice, and only the
+# bs=1 one is reportable. B1 therefore lives exclusively in --final-eval.
+# (launch_paper_8M.sh has the same duplication and did pay for it: `paper_8m_esm2_raw`
+# and `paper_8m_esm2_raw_bs1` are both in W&B. Left alone — that panel is closed.)
 submit_baselines() {
-    submit_training "baseline/esm2_650m_only" "paper_650m_esm2_raw"     "16:00:00"
-    submit_training "baseline/template_only"  "paper_650m_template_only" "36:00:00"
+    submit_training "baseline/template_only" "paper_650m_template_only" "36:00:00"
 }
 
 submit_final_evals() {
