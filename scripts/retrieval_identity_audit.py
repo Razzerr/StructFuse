@@ -4,7 +4,16 @@
 This script is intentionally data-side and model-free. It replays FAISS
 retrieval with the same admissibility filters used at validation/test time,
 loads the query/template NPZ sequences, computes global-alignment sequence
-identity, and aggregates the results by retrieval-score bin.
+identity, and aggregates the results by retrieval-score bin and by
+sequence-identity bin.
+
+Aggregation unit (2026-09-11): ``--bootstrap cluster`` (default) averages every
+bin per query sequence cluster first, then unweighted over clusters, and
+bootstraps clusters — the same estimator as the headline metrics and
+``paired_significance.py``. Per-chain values are kept beside it as ``*_chain``
+columns. ``--bootstrap chain`` reproduces the pre-2026 per-chain summaries and
+is not valid for new claims. The cluster comes from the reference TSV's
+``cluster_id`` (what the headline metric used) and falls back to the index.
 
 Run it on the server that has `data/processed` and `data/index_t33_2026` or
 `data/index_t6`; those files are not part of the lightweight local paper
@@ -40,6 +49,17 @@ SIM_BINS: tuple[tuple[str, float, float], ...] = (
     ("0.99-0.995", 0.99, 0.995),
     ("0.995-0.999", 0.995, 0.999),
     ("sim>=0.999", 0.999, math.inf),
+)
+
+IDENTITY_BINS: tuple[tuple[str, float, float], ...] = (
+    ("id<0.20", -math.inf, 0.20),
+    ("0.20-0.30", 0.20, 0.30),
+    ("0.30-0.40", 0.30, 0.40),
+    ("0.40-0.50", 0.40, 0.50),
+    ("0.50-0.70", 0.50, 0.70),
+    ("0.70-0.90", 0.70, 0.90),
+    ("0.90-0.99", 0.90, 0.99),
+    ("id>=0.99", 0.99, math.inf),
 )
 
 METRIC_COLUMNS = (
@@ -253,6 +273,7 @@ def bin_label(score: float) -> str:
 
 
 def bootstrap_ci(values: np.ndarray, n_resamples: int, seed: int) -> tuple[float, float]:
+    """Percentile CI of the mean of ``values`` — one entry per resampling unit."""
     values = values[np.isfinite(values)]
     if len(values) < 2 or n_resamples <= 0:
         return float("nan"), float("nan")
@@ -287,6 +308,73 @@ def frac_ge(values: Iterable[float], threshold: float) -> float:
     return float((arr >= threshold).mean()) if len(arr) else float("nan")
 
 
+def frac_lt(values: Iterable[float], threshold: float) -> float:
+    arr = np.array(list(values), dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    return float((arr < threshold).mean()) if len(arr) else float("nan")
+
+
+def cluster_of(row: dict[str, object]) -> int:
+    """Query cluster used for aggregation. Prefers the reference TSV's
+    ``cluster_id`` (the id the headline metric aggregated over); falls back to
+    the index-derived ``query_cluster_id``. -1 means unknown."""
+    cid = parse_float(row.get("ref_cluster_id"))
+    if math.isfinite(cid) and cid >= 0:
+        return int(cid)
+    raw = str(row.get("query_cluster_id", "")).strip()
+    if raw and ";" not in raw:
+        try:
+            return int(raw)
+        except ValueError:
+            return -1
+    return -1
+
+
+def cluster_means(rows: list[dict[str, object]], column: str) -> np.ndarray:
+    """Per-cluster mean of ``column`` over ``rows``; rows with unknown cluster or
+    non-finite value are dropped. Returns one value per cluster."""
+    acc: dict[int, list[float]] = {}
+    for row in rows:
+        cid = cluster_of(row)
+        if cid < 0:
+            continue
+        val = parse_float(row.get(column))
+        if not math.isfinite(val):
+            continue
+        acc.setdefault(cid, []).append(val)
+    return np.array([float(np.mean(v)) for v in acc.values()], dtype=np.float64)
+
+
+def cluster_frac(rows: list[dict[str, object]], column: str, threshold: float, below: bool = False) -> float:
+    """Cluster-balanced fraction: per-cluster fraction of chains meeting the
+    threshold, then unweighted mean over clusters."""
+    acc: dict[int, list[float]] = {}
+    for row in rows:
+        cid = cluster_of(row)
+        if cid < 0:
+            continue
+        val = parse_float(row.get(column))
+        if not math.isfinite(val):
+            continue
+        acc.setdefault(cid, []).append(float(val < threshold) if below else float(val >= threshold))
+    if not acc:
+        return float("nan")
+    return float(np.mean([np.mean(v) for v in acc.values()]))
+
+
+def n_clusters(rows: list[dict[str, object]]) -> int:
+    return len({cluster_of(r) for r in rows if cluster_of(r) >= 0})
+
+
+def identity_bin_label(identity: float) -> str:
+    if not math.isfinite(identity):
+        return "missing"
+    for label, low, high in IDENTITY_BINS:
+        if identity >= low and identity < high:
+            return label
+    return "missing"
+
+
 def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -311,54 +399,163 @@ def formatted_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return [{k: format_value(v) for k, v in row.items()} for row in rows]
 
 
-def summarize(rows: list[dict[str, object]], n_bootstrap: int, seed: int) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    by_bin: dict[str, list[dict[str, object]]] = {label: [] for label, _, _ in SIM_BINS}
-    by_bin["missing"] = []
-    for row in rows:
-        by_bin.setdefault(str(row["score_bin"]), []).append(row)
+def _identity_stats(group: list[dict[str, object]], unit: str, prefix: str) -> dict[str, object]:
+    """Identity / coverage summaries for one bin. Chain-level distribution
+    statistics plus the cluster-balanced mean and fractions."""
+    col_al = f"{prefix}_seq_identity_aligned"
+    col_ql = f"{prefix}_seq_identity_query_len"
+    col_cov = f"{prefix}_query_coverage"
+    ident = [parse_float(r.get(col_al)) for r in group]
+    out: dict[str, object] = {
+        f"mean_{col_al}_chain": mean_or_nan(ident),
+        f"median_{col_al}_chain": quantile_or_nan(ident, 0.5),
+        f"p25_{col_al}_chain": quantile_or_nan(ident, 0.25),
+        f"p75_{col_al}_chain": quantile_or_nan(ident, 0.75),
+        f"frac_{prefix}_identity_ge_30pct_chain": frac_ge(ident, 0.30),
+        f"frac_{prefix}_identity_ge_50pct_chain": frac_ge(ident, 0.50),
+        f"frac_{prefix}_identity_ge_90pct_chain": frac_ge(ident, 0.90),
+        f"frac_{prefix}_identity_ge_99pct_chain": frac_ge(ident, 0.99),
+        f"frac_{prefix}_identity_lt_30pct_chain": frac_lt(ident, 0.30),
+        f"mean_{col_ql}_chain": mean_or_nan(parse_float(r.get(col_ql)) for r in group),
+        f"mean_{col_cov}_chain": mean_or_nan(parse_float(r.get(col_cov)) for r in group),
+    }
+    if unit == "cluster":
+        cm = cluster_means(group, col_al)
+        out.update(
+            {
+                f"mean_{col_al}": float(cm.mean()) if len(cm) else float("nan"),
+                f"median_{col_al}": float(np.median(cm)) if len(cm) else float("nan"),
+                f"frac_{prefix}_identity_ge_30pct": cluster_frac(group, col_al, 0.30),
+                f"frac_{prefix}_identity_ge_50pct": cluster_frac(group, col_al, 0.50),
+                f"frac_{prefix}_identity_ge_90pct": cluster_frac(group, col_al, 0.90),
+                f"frac_{prefix}_identity_ge_99pct": cluster_frac(group, col_al, 0.99),
+                f"frac_{prefix}_identity_lt_30pct": cluster_frac(group, col_al, 0.30, below=True),
+                f"mean_{col_ql}": mean_or_nan(cluster_means(group, col_ql)),
+                f"mean_{col_cov}": mean_or_nan(cluster_means(group, col_cov)),
+            }
+        )
+    else:
+        for k in list(out):
+            if k.endswith("_chain"):
+                out[k[: -len("_chain")]] = out[k]
+    return out
 
-    for idx, (label, _, _) in enumerate((*SIM_BINS, ("missing", 0.0, 0.0))):
+
+def _metric_stats(
+    group: list[dict[str, object]], unit: str, n_bootstrap: int, seed: int
+) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for m_idx, metric in enumerate(METRIC_COLUMNS):
+        ref_col = f"reference_{metric}"
+        ctrl_col = f"control_{metric}"
+        delta_col = f"delta_{metric}"
+        chain_delta = finite_values(group, delta_col)
+        out[f"n_{delta_col}_chain"] = int(len(chain_delta))
+        out[f"mean_{delta_col}_chain"] = float(chain_delta.mean()) if len(chain_delta) else float("nan")
+        if unit == "cluster":
+            ref_vals = cluster_means(group, ref_col)
+            ctrl_vals = cluster_means(group, ctrl_col)
+            delta_vals = cluster_means(group, delta_col)
+            out[f"n_clusters_{delta_col}"] = int(len(delta_vals))
+        else:
+            ref_vals = finite_values(group, ref_col)
+            ctrl_vals = finite_values(group, ctrl_col)
+            delta_vals = chain_delta
+        out[f"mean_{ref_col}"] = float(ref_vals.mean()) if len(ref_vals) else float("nan")
+        out[f"mean_{ctrl_col}"] = float(ctrl_vals.mean()) if len(ctrl_vals) else float("nan")
+        out[f"mean_{delta_col}"] = float(delta_vals.mean()) if len(delta_vals) else float("nan")
+        ci_low, ci_high = bootstrap_ci(delta_vals, n_bootstrap, seed + 1009 * (m_idx + 1))
+        out[f"ci95_lo_{delta_col}"] = ci_low
+        out[f"ci95_hi_{delta_col}"] = ci_high
+    return out
+
+
+def summarize_by(
+    rows: list[dict[str, object]],
+    bin_column: str,
+    bin_labels: Iterable[str],
+    identity_prefixes: Iterable[str],
+    unit: str,
+    n_bootstrap: int,
+    seed: int,
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    by_bin: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        by_bin.setdefault(str(row.get(bin_column, "missing")), []).append(row)
+    for idx, label in enumerate((*bin_labels, "missing")):
         group = by_bin.get(label, [])
         if not group:
             continue
-        crop_identity = [parse_float(r.get("crop_seq_identity_aligned")) for r in group]
-        crop_query_identity = [parse_float(r.get("crop_seq_identity_query_len")) for r in group]
-        crop_query_coverage = [parse_float(r.get("crop_query_coverage")) for r in group]
-        full_identity = [parse_float(r.get("full_seq_identity_aligned")) for r in group]
         row: dict[str, object] = {
-            "score_bin": label,
+            bin_column: label,
+            "unit": unit,
             "n": len(group),
+            "n_clusters": n_clusters(group) if unit == "cluster" else len(group),
             "n_with_template": sum(int(r.get("n_hits", 0)) > 0 for r in group),
-            "mean_best_score": mean_or_nan(parse_float(r.get("score_for_bin")) for r in group),
-            "mean_crop_seq_identity_aligned": mean_or_nan(crop_identity),
-            "median_crop_seq_identity_aligned": quantile_or_nan(crop_identity, 0.5),
-            "p25_crop_seq_identity_aligned": quantile_or_nan(crop_identity, 0.25),
-            "p75_crop_seq_identity_aligned": quantile_or_nan(crop_identity, 0.75),
-            "frac_crop_identity_ge_30pct": frac_ge(crop_identity, 0.30),
-            "frac_crop_identity_ge_50pct": frac_ge(crop_identity, 0.50),
-            "frac_crop_identity_ge_90pct": frac_ge(crop_identity, 0.90),
-            "mean_crop_seq_identity_query_len": mean_or_nan(crop_query_identity),
-            "mean_crop_query_coverage": mean_or_nan(crop_query_coverage),
-            "mean_full_seq_identity_aligned": mean_or_nan(full_identity),
+            "mean_best_score_chain": mean_or_nan(parse_float(r.get("score_for_bin")) for r in group),
         }
-        for metric in METRIC_COLUMNS:
-            ref_col = f"reference_{metric}"
-            ctrl_col = f"control_{metric}"
-            delta_col = f"delta_{metric}"
-            ref_vals = finite_values(group, ref_col)
-            ctrl_vals = finite_values(group, ctrl_col)
-            delta_vals = finite_values(group, delta_col)
-            row[f"mean_{ref_col}"] = float(ref_vals.mean()) if len(ref_vals) else float("nan")
-            row[f"n_{ref_col}"] = int(len(ref_vals))
-            row[f"mean_{ctrl_col}"] = float(ctrl_vals.mean()) if len(ctrl_vals) else float("nan")
-            row[f"n_{ctrl_col}"] = int(len(ctrl_vals))
-            row[f"mean_{delta_col}"] = float(delta_vals.mean()) if len(delta_vals) else float("nan")
-            row[f"n_{delta_col}"] = int(len(delta_vals))
-            ci_low, ci_high = bootstrap_ci(delta_vals, n_bootstrap, seed + 1009 * (idx + 1))
-            row[f"ci95_lo_{delta_col}"] = ci_low
-            row[f"ci95_hi_{delta_col}"] = ci_high
+        if unit == "cluster":
+            row["mean_best_score"] = mean_or_nan(cluster_means(group, "score_for_bin"))
+        else:
+            row["mean_best_score"] = row["mean_best_score_chain"]
+        for prefix in identity_prefixes:
+            row.update(_identity_stats(group, unit, prefix))
+        row.update(_metric_stats(group, unit, n_bootstrap, seed + 7919 * (idx + 1)))
         out.append(row)
+    return out
+
+
+def summarize(rows: list[dict[str, object]], n_bootstrap: int, seed: int, unit: str = "cluster") -> list[dict[str, object]]:
+    """Per retrieval-score bin (kept for backward compatibility of the output name)."""
+    prefixes = [p for p in ("crop", "full") if any(f"{p}_seq_identity_aligned" in r for r in rows)]
+    return summarize_by(rows, "score_bin", [l for l, _, _ in SIM_BINS], prefixes, unit, n_bootstrap, seed)
+
+
+def global_summary(rows: list[dict[str, object]], unit: str, n_bootstrap: int, seed: int) -> list[dict[str, object]]:
+    """One row over all queries: the whole-test redundancy and gain figures."""
+    prefixes = [p for p in ("crop", "full") if any(f"{p}_seq_identity_aligned" in r for r in rows)]
+    row: dict[str, object] = {
+        "scope": "all",
+        "unit": unit,
+        "n": len(rows),
+        "n_clusters": n_clusters(rows),
+        "n_with_template": sum(int(r.get("n_hits", 0)) > 0 for r in rows),
+        "n_unknown_query_cluster": sum(cluster_of(r) < 0 for r in rows),
+        "frac_best_template_same_cluster_as_query": mean_or_nan(
+            float(str(r.get("best_template_cluster_id", "")) != "" and cluster_of(r) >= 0
+                  and parse_float(r.get("best_template_cluster_id")) == cluster_of(r))
+            for r in rows if int(r.get("n_hits", 0)) > 0
+        ),
+        "n_best_template_unknown_cluster": sum(
+            parse_float(r.get("best_template_cluster_id")) == -1 for r in rows if int(r.get("n_hits", 0)) > 0
+        ),
+        "mean_best_score_chain": mean_or_nan(parse_float(r.get("score_for_bin")) for r in rows),
+        "mean_best_score": mean_or_nan(cluster_means(rows, "score_for_bin")) if unit == "cluster"
+        else mean_or_nan(parse_float(r.get("score_for_bin")) for r in rows),
+    }
+    for prefix in prefixes:
+        row.update(_identity_stats(rows, unit, prefix))
+    row.update(_metric_stats(rows, unit, n_bootstrap, seed))
+    out = [row]
+    casp = [r for r in rows if str(r.get("subset", "")) == "casp16"]
+    if casp:
+        crow: dict[str, object] = {
+            "scope": "casp16", "unit": unit, "n": len(casp), "n_clusters": n_clusters(casp),
+            "n_with_template": sum(int(r.get("n_hits", 0)) > 0 for r in casp),
+            "n_unknown_query_cluster": sum(cluster_of(r) < 0 for r in casp),
+            "frac_best_template_same_cluster_as_query": float("nan"),
+            "n_best_template_unknown_cluster": sum(
+                parse_float(r.get("best_template_cluster_id")) == -1 for r in casp if int(r.get("n_hits", 0)) > 0
+            ),
+            "mean_best_score_chain": mean_or_nan(parse_float(r.get("score_for_bin")) for r in casp),
+            "mean_best_score": mean_or_nan(cluster_means(casp, "score_for_bin")) if unit == "cluster"
+            else mean_or_nan(parse_float(r.get("score_for_bin")) for r in casp),
+        }
+        for prefix in prefixes:
+            crow.update(_identity_stats(casp, unit, prefix))
+        crow.update(_metric_stats(casp, unit, n_bootstrap, seed + 31))
+        out.append(crow)
     return out
 
 
@@ -386,18 +583,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--per-sample-tsv",
         default=(
-            "logs/paper_650m_trufor_fusion_dist_s42/runs/"
-            "2026-07-07_09-10-24/per_sample_metrics.tsv"
+            "logs/paper_650m_trufor_s42_bs1/runs/"
+            "2026-09-11_08-45-58/per_sample_metrics.tsv"
         ),
-        help="Reference run TSV. Used to restrict to evaluated proteins and carry metrics.",
+        help="Reference run TSV (bs=1 final evaluation). Restricts the audit to the "
+        "evaluated (C=8-capped) proteins and carries their metrics and cluster ids.",
     )
     parser.add_argument(
         "--control-per-sample-tsv",
         default=(
-            "logs/paper_650m_trained_no_templates_fixed/runs/"
-            "2026-06-12_17-06-05/per_sample_metrics.tsv"
+            "logs/paper_650m_trufor_no_templates_s42_bs1/runs/"
+            "2026-09-11_08-47-11/per_sample_metrics.tsv"
         ),
-        help="Optional paired control TSV, usually trained no-template.",
+        help="Paired control TSV (bs=1), the matched no-template model.",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        choices=("cluster", "chain"),
+        default="cluster",
+        help="Aggregation and resampling unit for every summary. 'cluster' (default) "
+        "averages per query sequence cluster first; 'chain' reproduces the pre-2026 "
+        "per-chain summaries and is not valid for new claims.",
     )
     parser.add_argument("--out-dir", default="")
     parser.add_argument(
@@ -425,9 +631,37 @@ def main() -> None:
     control_path = path_from_root(args.control_per_sample_tsv) if args.control_per_sample_tsv else None
 
     reference_rows = read_per_sample(per_sample_path)
-    control_rows = read_per_sample(control_path) if control_path and control_path.exists() else {}
     if per_sample_path and not reference_rows:
         raise ValueError(f"No rows loaded from {per_sample_path}")
+
+    # Input contract — the audit must not complete on incomplete inputs.
+    # (1) A named control must exist; a missing file used to degrade silently
+    #     to an empty dict and NaN deltas. Pass --control-per-sample-tsv "" for a
+    #     descriptive audit without a control.
+    # (2) Reference and control must cover the same chains: no silent narrowing
+    #     to the intersection.
+    control_rows: dict[str, dict[str, str]] = {}
+    if control_path is not None:
+        if not control_path.exists():
+            raise FileNotFoundError(
+                f"--control-per-sample-tsv {rel(control_path)} does not exist. "
+                "Pass an empty string to run without a paired control."
+            )
+        control_rows = read_per_sample(control_path)
+        if not control_rows:
+            raise ValueError(f"No rows loaded from {control_path}")
+        if reference_rows:
+            ref_ids, ctl_ids = set(reference_rows), set(control_rows)
+            if ref_ids != ctl_ids:
+                only_ref = sorted(ref_ids - ctl_ids)
+                only_ctl = sorted(ctl_ids - ref_ids)
+                raise ValueError(
+                    "Reference and control populations differ: "
+                    f"{len(ref_ids)} vs {len(ctl_ids)} chains; "
+                    f"{len(only_ref)} only in reference (e.g. {only_ref[:5]}), "
+                    f"{len(only_ctl)} only in control (e.g. {only_ctl[:5]}). "
+                    "The audit does not narrow to the intersection."
+                )
 
     required = [index_dir / "faiss.index", index_dir / "ids.json"]
     if not reference_rows and not id_list.exists():
@@ -447,7 +681,16 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     score_mismatches: list[dict[str, object]] = []
     if reference_rows:
-        query_ids = [pid for pid in reference_rows if pid in id_to_npz]
+        # (3) Every reference chain must be in the index; dropping absentees
+        #     here used to hide a mismatched --index-dir behind a smaller n.
+        absent = [pid for pid in reference_rows if pid not in id_to_npz]
+        if absent:
+            raise KeyError(
+                f"{len(absent)} of {len(reference_rows)} reference chains are absent from "
+                f"{rel(index_dir)}/ids.json (e.g. {absent[:5]}). Check that --index-dir is the "
+                "index the reference run retrieved from; the audit does not drop them."
+            )
+        query_ids = list(reference_rows)
     else:
         raw_ids = {line.strip() for line in id_list.read_text().splitlines() if line.strip()}
         query_ids = [pid for pid in faiss_index.row2id if pid.split("_")[0] in raw_ids]
@@ -483,6 +726,7 @@ def main() -> None:
             "query_cluster_id": ";".join(
                 str(cid) for cid in sorted(faiss_index.clusters_for_chain(pid))
             ),
+            "ref_cluster_id": ref.get("cluster_id", ""),
             "query_len": len(full_seq),
             "crop_start": crop_start,
             "crop_end": crop_end,
@@ -497,6 +741,8 @@ def main() -> None:
             "score_abs_diff": float("nan"),
             "score_for_bin": logged_score if math.isfinite(logged_score) else best_score,
             "score_bin": "missing",
+            "crop_identity_bin": "missing",
+            "full_identity_bin": "missing",
         }
 
         if hits:
@@ -535,9 +781,11 @@ def main() -> None:
             if args.identity_scope in ("crop", "both"):
                 ident = alignment_identity(crop_seq, tpl_seq)
                 row.update({f"crop_{k}": v for k, v in ident.items()})
+                row["crop_identity_bin"] = identity_bin_label(parse_float(row.get("crop_seq_identity_aligned")))
             if args.identity_scope in ("full", "both"):
                 ident = alignment_identity(full_seq, tpl_seq)
                 row.update({f"full_{k}": v for k, v in ident.items()})
+                row["full_identity_bin"] = identity_bin_label(parse_float(row.get("full_seq_identity_aligned")))
 
         for metric in METRIC_COLUMNS:
             ref_val = parse_float(ref.get(metric))
@@ -562,10 +810,28 @@ def main() -> None:
 
     per_sample_out = out_dir / "per_sample_best_template_identity.tsv"
     summary_out = out_dir / "identity_by_retrieval_score_bin.tsv"
+    crop_bin_out = out_dir / "gain_by_crop_identity_bin.tsv"
+    full_bin_out = out_dir / "gain_by_full_identity_bin.tsv"
+    global_out = out_dir / "global_summary.tsv"
     manifest_out = out_dir / "manifest.json"
     write_tsv(per_sample_out, formatted_rows(rows))
-    summary_rows = summarize(rows, args.n_bootstrap, args.seed)
+    unit = args.bootstrap
+    n_unknown = sum(cluster_of(r) < 0 for r in rows)
+    if unit == "cluster" and n_unknown:
+        print(f"[audit] {n_unknown} queries have no known cluster and are excluded from cluster-balanced summaries", flush=True)
+    prefixes = [p for p in ("crop", "full") if p == "crop" and args.identity_scope in ("crop", "both")
+                or p == "full" and args.identity_scope in ("full", "both")]
+    summary_rows = summarize(rows, args.n_bootstrap, args.seed, unit)
     write_tsv(summary_out, formatted_rows(summary_rows))
+    id_labels = [l for l, _, _ in IDENTITY_BINS]
+    written_bins = {}
+    if "crop" in prefixes:
+        write_tsv(crop_bin_out, formatted_rows(summarize_by(rows, "crop_identity_bin", id_labels, prefixes, unit, args.n_bootstrap, args.seed + 101)))
+        written_bins["gain_by_crop_identity_bin"] = rel(crop_bin_out)
+    if "full" in prefixes:
+        write_tsv(full_bin_out, formatted_rows(summarize_by(rows, "full_identity_bin", id_labels, prefixes, unit, args.n_bootstrap, args.seed + 202)))
+        written_bins["gain_by_full_identity_bin"] = rel(full_bin_out)
+    write_tsv(global_out, formatted_rows(global_summary(rows, unit, args.n_bootstrap, args.seed + 303)))
 
     manifest = {
         "label": args.label,
@@ -594,6 +860,15 @@ def main() -> None:
         "outputs": {
             "per_sample": rel(per_sample_out),
             "summary_by_score_bin": rel(summary_out),
+            "global_summary": rel(global_out),
+            **written_bins,
+        },
+        "aggregation_unit": unit,
+        "populations": {
+            "reference_chains": len(reference_rows),
+            "control_chains": len(control_rows),
+            "audited_chains": len(rows),
+            "unknown_query_cluster": n_unknown,
         },
         "notes": [
             "Retrieval is replayed with filter_holdout=False, matching validation/test inference.",
@@ -601,12 +876,19 @@ def main() -> None:
             "Retrieval score is FAISS inner product/cosine similarity between normalized mean-pooled ESM2 embeddings.",
             "Default sequence identity is computed between the center-cropped query sequence and the best full-length template sequence, matching the contact-evaluation crop.",
             "seq_identity_aligned uses matches divided by aligned residue pairs; seq_identity_query_len uses matches divided by query length.",
+            "Summaries are per query sequence cluster first (mean within cluster), then unweighted over clusters; *_chain columns are the per-chain values. A cluster contributes to every bin one of its chains falls in.",
+            "Identity is computed for the single top-1 template by retrieval score, not for the most sequence-similar of the K templates; a closer homologue may sit at rank 2-4. Sufficient for best-template stratification; not sufficient for a claim that the model gains without any close homologue among its templates. Read high identity together with alignment coverage.",
+            "n_clusters in a bin is the number of families represented in that bin; bins are a per-chain attribute of the reference run and are not a partition of families, so n_clusters sums to more than the family count across bins.",
+            "The audit is restricted to the chains in the reference TSV, i.e. the C=8-capped evaluation set including the cap-exempt CASP16 chains.",
         ],
     }
     manifest_out.write_text(json.dumps(manifest, indent=2) + "\n")
 
     print(f"Wrote {rel(per_sample_out)}", flush=True)
     print(f"Wrote {rel(summary_out)}", flush=True)
+    for name, path in written_bins.items():
+        print(f"Wrote {path}", flush=True)
+    print(f"Wrote {rel(global_out)}", flush=True)
     print(f"Wrote {rel(manifest_out)}", flush=True)
 
 

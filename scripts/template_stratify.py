@@ -6,6 +6,15 @@ defined only from the reference (StructFuse) run's ``best_tpl_sim`` or
 reference bins. This avoids the invalid comparison where a no-template control
 is assigned to bins using its own zero-valued retrieval metadata.
 
+Aggregation unit (2026-09-11): ``--bootstrap cluster`` (default) averages each
+bin per sequence cluster first (chains of one cluster that fall in the bin),
+then unweighted over clusters, and bootstraps clusters. This is the same
+estimator as ``paired_significance.py`` and the headline metrics; per-chain
+means are kept beside it as ``*_chain`` columns. ``--bootstrap chain`` restores
+the pre-2026 per-chain behaviour and is not valid for new claims. The bin is a
+per-chain attribute of the reference run, so one cluster may contribute to
+several bins.
+
 Usage:
     python scripts/template_stratify.py \
         --inputs frontier=frontier.tsv no_templates=no_templates.tsv \
@@ -70,6 +79,7 @@ def _parse_inputs(specs: Iterable[str]) -> list[tuple[str, Path]]:
 
 
 def _bootstrap_ci(delta: np.ndarray, n_resamples: int) -> tuple[float, float]:
+    """Percentile CI of the mean of ``delta`` — one entry per resampling unit."""
     if n_resamples <= 0 or len(delta) < 2:
         return (float("nan"), float("nan"))
     rng = np.random.default_rng(seed=0)
@@ -82,6 +92,28 @@ def _bootstrap_ci(delta: np.ndarray, n_resamples: int) -> tuple[float, float]:
         float(np.percentile(means, 2.5)),
         float(np.percentile(means, 97.5)),
     )
+
+
+def _require_cluster_ids(df: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Cluster mode refuses rather than degrades: no ``cluster_id`` or an unknown
+    (-1) cluster cannot be pooled into a pseudo-cluster."""
+    if "cluster_id" not in df.columns:
+        raise SystemExit(
+            f"{path} has no 'cluster_id' column; pre-2026-08-21 TSV. "
+            "Use --bootstrap chain to reproduce the old per-chain numbers."
+        )
+    cid = pd.to_numeric(df["cluster_id"], errors="coerce")
+    bad = ~np.isfinite(cid) | (cid < 0)
+    if bad.any():
+        print(f"[template_stratify] {path}: dropping {int(bad.sum())} rows with unknown cluster_id")
+    out = df.loc[~bad].copy()
+    out["cluster_id"] = cid[~bad].astype(int)
+    return out
+
+
+def _cluster_means(group: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Per-cluster means of ``cols`` over the chains of ``group`` (one bin)."""
+    return group.groupby("cluster_id", sort=False)[cols].mean()
 
 
 def _load(
@@ -127,6 +159,7 @@ def _aggregate_single(
     by: str,
     label: str,
     metrics: tuple[str, ...],
+    unit: str,
 ) -> pd.DataFrame:
     rows = []
     for bin_val, group in df.groupby(by, observed=True, sort=False):
@@ -134,16 +167,28 @@ def _aggregate_single(
             "stratifier": by,
             "bin": str(bin_val),
             "model": label,
+            "unit": unit,
             "n_chains": int(len(group)),
         }
+        if unit == "cluster":
+            row["n_clusters"] = int(group["cluster_id"].nunique())
         for metric in metrics:
             if metric not in group.columns:
                 continue
-            vals = pd.to_numeric(group[metric], errors="coerce").to_numpy(dtype=float)
-            vals = vals[np.isfinite(vals)]
-            row[f"n_{metric}"] = int(len(vals))
-            row[f"mean_{metric}"] = float(vals.mean()) if len(vals) else float("nan")
-            row[f"std_{metric}"] = float(vals.std(ddof=0)) if len(vals) else float("nan")
+            g = group[[c for c in ("cluster_id",) if c in group.columns] + [metric]].copy()
+            g[metric] = pd.to_numeric(g[metric], errors="coerce")
+            g = g[np.isfinite(g[metric])]
+            chain_vals = g[metric].to_numpy(dtype=float)
+            row[f"n_{metric}"] = int(len(chain_vals))
+            row[f"mean_{metric}_chain"] = float(chain_vals.mean()) if len(chain_vals) else float("nan")
+            if unit == "cluster":
+                cm = _cluster_means(g, [metric])[metric].to_numpy(dtype=float)
+                row[f"n_clusters_{metric}"] = int(len(cm))
+                row[f"mean_{metric}"] = float(cm.mean()) if len(cm) else float("nan")
+                row[f"std_{metric}"] = float(cm.std(ddof=0)) if len(cm) else float("nan")
+            else:
+                row[f"mean_{metric}"] = row[f"mean_{metric}_chain"]
+                row[f"std_{metric}"] = float(chain_vals.std(ddof=0)) if len(chain_vals) else float("nan")
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -155,6 +200,7 @@ def _aggregate_paired(
     control_label: str,
     metrics: tuple[str, ...],
     n_bootstrap: int,
+    unit: str,
 ) -> pd.DataFrame:
     rows = []
     for bin_val, group in merged.groupby(by, observed=True, sort=False):
@@ -163,21 +209,37 @@ def _aggregate_paired(
             "bin": str(bin_val),
             "reference": reference_label,
             "control": control_label,
+            "unit": unit,
             "n_pairs": int(len(group)),
         }
+        if unit == "cluster":
+            row["n_clusters"] = int(group["cluster_id"].nunique())
         for metric in metrics:
             ref_col = f"{metric}__reference"
             ctrl_col = f"{metric}__control"
             if ref_col not in group.columns or ctrl_col not in group.columns:
                 continue
-            ref = pd.to_numeric(group[ref_col], errors="coerce").to_numpy(dtype=float)
-            ctrl = pd.to_numeric(group[ctrl_col], errors="coerce").to_numpy(dtype=float)
-            finite = np.isfinite(ref) & np.isfinite(ctrl)
-            ref = ref[finite]
-            ctrl = ctrl[finite]
-            delta = ref - ctrl
+            g = group[[c for c in ("cluster_id",) if c in group.columns] + [ref_col, ctrl_col]].copy()
+            g[ref_col] = pd.to_numeric(g[ref_col], errors="coerce")
+            g[ctrl_col] = pd.to_numeric(g[ctrl_col], errors="coerce")
+            g = g[np.isfinite(g[ref_col]) & np.isfinite(g[ctrl_col])]
+            g["delta"] = g[ref_col] - g[ctrl_col]
+            chain_delta = g["delta"].to_numpy(dtype=float)
+            row[f"n_{metric}"] = int(len(chain_delta))
+            row[f"mean_delta_{metric}_chain"] = (
+                float(chain_delta.mean()) if len(chain_delta) else float("nan")
+            )
+            if unit == "cluster":
+                cm = _cluster_means(g, [ref_col, ctrl_col, "delta"])
+                ref = cm[ref_col].to_numpy(dtype=float)
+                ctrl = cm[ctrl_col].to_numpy(dtype=float)
+                delta = cm["delta"].to_numpy(dtype=float)
+                row[f"n_clusters_{metric}"] = int(len(delta))
+            else:
+                ref = g[ref_col].to_numpy(dtype=float)
+                ctrl = g[ctrl_col].to_numpy(dtype=float)
+                delta = chain_delta
             ci_lo, ci_hi = _bootstrap_ci(delta, n_bootstrap)
-            row[f"n_{metric}"] = int(len(delta))
             row[f"mean_{metric}__reference"] = (
                 float(ref.mean()) if len(ref) else float("nan")
             )
@@ -203,6 +265,7 @@ def _paired_frame(
 ) -> pd.DataFrame:
     reference_columns = [
         "sample_id",
+        *(["cluster_id"] if "cluster_id" in reference.columns else []),
         "sim_bin",
         "k_bin",
         *[metric for metric in metrics if metric in reference.columns],
@@ -252,8 +315,17 @@ def main() -> None:
         default=0,
         help="Bootstrap resamples for per-bin mean-delta CIs. Default 0 disables CIs.",
     )
+    parser.add_argument(
+        "--bootstrap",
+        choices=("cluster", "chain"),
+        default="cluster",
+        help="Aggregation and resampling unit. 'cluster' (default) averages each bin "
+        "per sequence cluster first and resamples clusters; 'chain' reproduces the "
+        "pre-2026 per-chain numbers and is not valid for new claims.",
+    )
     parser.add_argument("--out", required=True, type=Path, help="Output TSV path")
     args = parser.parse_args()
+    unit = args.bootstrap
 
     sim_bins, sim_labels = SIM_BIN_PRESETS[args.sim_bin_preset]
     metrics = tuple(args.metrics)
@@ -272,13 +344,15 @@ def main() -> None:
         sim_bins=sim_bins,
         sim_labels=sim_labels,
     )
+    if unit == "cluster":
+        reference = _require_cluster_ids(reference, paths[reference_label])
     controls = [(label, path) for label, path in parsed if label != reference_label]
 
     if not controls:
         out_df = pd.concat(
             [
-                _aggregate_single(reference, "sim_bin", reference_label, metrics),
-                _aggregate_single(reference, "k_bin", reference_label, metrics),
+                _aggregate_single(reference, "sim_bin", reference_label, metrics, unit),
+                _aggregate_single(reference, "k_bin", reference_label, metrics, unit),
             ],
             ignore_index=True,
         )
@@ -306,6 +380,7 @@ def main() -> None:
                         control_label,
                         metrics,
                         args.n_bootstrap,
+                        unit,
                     ),
                     _aggregate_paired(
                         merged,
@@ -314,6 +389,7 @@ def main() -> None:
                         control_label,
                         metrics,
                         args.n_bootstrap,
+                        unit,
                     ),
                 ]
             )
@@ -326,10 +402,10 @@ def main() -> None:
     if not sim_rows.empty:
         columns = [
             column for column in sim_rows.columns
-            if column in ("bin", "control", "n_pairs", "n_chains")
-            or "P@L_long" in column
+            if column in ("bin", "control", "unit", "n_pairs", "n_chains", "n_clusters")
+            or ("P@L_long" in column and "P@L_long_chain" not in column)
         ]
-        print("\nP@L_long stratified by reference best_tpl_sim:")
+        print(f"\nP@L_long stratified by reference best_tpl_sim (unit={unit}):")
         print(sim_rows[columns].to_string(index=False))
 
 

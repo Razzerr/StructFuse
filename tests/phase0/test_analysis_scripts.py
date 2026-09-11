@@ -156,6 +156,7 @@ def test_paired_stratification_uses_reference_bins_and_control_needs_no_retrieva
             "control",
             DEFAULT_METRICS,
             n_bootstrap=200,  # assertions below check means/counts, not CI width
+            unit="chain",  # fixture has no cluster_id; bin semantics are what is tested
         )
 
         high = result[result["bin"] == "sim>0.7"].iloc[0]
