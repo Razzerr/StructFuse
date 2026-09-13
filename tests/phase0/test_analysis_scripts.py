@@ -1,10 +1,10 @@
 """Phase 0 regressions for paper-analysis scripts."""
 
+import math
 import os
 import sys
 import tempfile
 import types
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -20,7 +20,7 @@ if "rootutils" not in sys.modules:
     rootutils.setup_root = lambda *args, **kwargs: None
     sys.modules["rootutils"] = rootutils
 
-from scripts.template_coverage import TRAIN_SAMPLE_SPLIT, _accumulate  # noqa: E402
+from scripts.template_coverage import TRAIN_SAMPLE_SPLIT, _per_chain_rows  # noqa: E402
 from scripts.ceiling import _flatten_valid_pairs, _per_range_metrics  # noqa: E402
 from scripts.feature_correlation import _extract_pair_scalars  # noqa: E402
 from scripts.paired_significance import _paired_frame as _significance_paired_frame  # noqa: E402
@@ -174,27 +174,40 @@ def test_coverage_default_skips_train_and_train_label_is_explicit():
 
 
 def test_coverage_counts_only_usable_pair_mask_positions():
+    """Prior mass outside `pair_mask` is not coverage: only the pairs the model
+    is actually scored on count, and each unique pair (j>i) counts once."""
+    pair_mask = torch.tensor([[
+        [0, 1, 0],
+        [1, 0, 0],
+        [0, 0, 0],
+    ]], dtype=torch.float32)
     batch = {
-        "contact": torch.zeros(1, 3, 3),
-        "pair_mask": torch.tensor([[
-            [0, 1, 0],
+        "pid": ["1abc_A"],
+        "subset": ["gold"],
+        "cluster_id": torch.tensor([7]),
+        "seq_len": torch.tensor([3]),
+        "pair_mask": pair_mask,
+        # long_mask = pair_mask AND |i-j| >= min_seq_sep; with min_seq_sep=1
+        # here it is the scored set. No |i-j| >= 24 pair exists on 3 residues.
+        "long_mask": pair_mask.clone(),
+        # (0,1)/(1,0) is the only usable pair; the nonzeros at (0,2) and the
+        # diagonal (2,2) sit outside pair_mask and must not count.
+        "prior": torch.tensor([
+            [0, 1, 1],
             [1, 0, 0],
-            [0, 0, 0],
-        ]], dtype=torch.float32),
-        # Two symmetric nonzeros are usable; two outside pair_mask must not count.
-        "prior": torch.tensor([[[[
-            0, 1, 1,
-            1, 0, 0,
-            0, 0, 1,
-        ]]]], dtype=torch.float32).reshape(1, 1, 3, 3),
+            [0, 0, 1],
+        ], dtype=torch.float32).reshape(1, 1, 3, 3),
+        "count": torch.zeros(1, 1, 3, 3),
         "n_templates_retrieved": torch.tensor([1]),
         "best_tpl_sim": torch.tensor([0.7]),
-        "subset": ["gold"],
     }
-    acc = defaultdict(lambda: defaultdict(float))
-    _accumulate(batch, acc)
-    assert acc["gold"]["n_with_prior"] == 1.0
-    assert abs(acc["gold"]["sum_nz_frac"] - 1.0) < 1e-12
+    row = _per_chain_rows(batch, "test")[0]
+    assert row["n_valid_pairs"] == 1
+    assert row["has_prior"] == 1
+    assert abs(row["prior_nz_frac"] - 1.0) < 1e-12
+    # No long-range pair to score: NaN, not a coverage failure.
+    assert row["n_valid_long_pairs"] == 0
+    assert math.isnan(row["prior_nz_frac_long"])
 
 
 def _run_all():

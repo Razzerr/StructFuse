@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +67,7 @@ def _bootstrap_ci(
     n_resamples: int,
     alpha: float = 0.05,
     clusters: np.ndarray | None = None,
+    seed: int = 0,
 ) -> tuple[float, float]:
     """Percentile bootstrap CI for the mean delta.
 
@@ -78,7 +80,7 @@ def _bootstrap_ci(
     n = len(units)
     if n < 2:
         return (float("nan"), float("nan"))
-    rng = np.random.default_rng(seed=0)  # deterministic across reruns
+    rng = np.random.default_rng(seed=seed)  # deterministic across reruns
     means = np.empty(n_resamples, dtype=np.float64)
     for i in range(n_resamples):
         idx = rng.integers(0, n, size=n)
@@ -168,6 +170,97 @@ def _paired_frame(
     return merged
 
 
+def paired_metric_rows(
+    treatment: pd.DataFrame,
+    control: pd.DataFrame,
+    *,
+    treatment_source: Path | str = "treatment",
+    control_source: Path | str = "control",
+    metrics: Sequence[str] = METRICS,
+    n_bootstrap: int = N_BOOTSTRAP,
+    unit: str = "cluster",
+    seed: int = 0,
+) -> list[dict[str, object]]:
+    """Paired statistics for every (subset, metric) of one treatment/control pair.
+
+    In `unit="cluster"` the point estimates, the bootstrap CI and the Wilcoxon
+    input are ALL per-cluster means — one observation per sequence family. The
+    `*_chain` columns keep the per-chain quantity beside them so the effect of
+    re-weighting is visible rather than asserted.
+
+    This is the one implementation; `main()` and the paper figure generators in
+    `paper/results_2_*/generate_artifacts.py` all call it, so a figure CI and a
+    table CI cannot drift apart. Values are returned UNROUNDED — rounding is a
+    presentation choice for the caller.
+    """
+    if unit not in ("cluster", "chain"):
+        raise ValueError(f"unit must be 'cluster' or 'chain', got {unit!r}")
+    merged = _paired_frame(treatment, control, treatment_source, control_source)
+    if unit == "cluster" and "cluster_id" not in merged.columns:
+        raise ValueError(
+            f"Cluster resampling requested but neither {treatment_source} nor "
+            f"{control_source} carries a 'cluster_id' column. Re-run the "
+            "evaluation with data.chain_clusters_file set, or ask for "
+            "unit='chain' explicitly to reproduce a pre-2026 number."
+        )
+
+    rows: list[dict[str, object]] = []
+    for subset_name, sub in _per_subset_groups(merged).items():
+        for metric in metrics:
+            tcol, ccol = f"{metric}_t", f"{metric}_c"
+            if tcol not in sub.columns or ccol not in sub.columns:
+                continue
+            t_vals = pd.to_numeric(sub[tcol], errors="coerce").to_numpy(dtype=float)
+            c_vals = pd.to_numeric(sub[ccol], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(t_vals) & np.isfinite(c_vals)
+            if mask.sum() < 2:
+                continue
+            delta = t_vals[mask] - c_vals[mask]
+            t_kept, c_kept = t_vals[mask], c_vals[mask]
+
+            clusters = None
+            if unit == "cluster":
+                cid = pd.to_numeric(sub["cluster_id"], errors="coerce").to_numpy()[mask]
+                # -1 marks an unknown cluster; such a chain is not an
+                # independent unit and must not join a pseudo-cluster of its own.
+                known = np.isfinite(cid) & (cid >= 0)
+                if known.sum() < 2:
+                    continue
+                delta, clusters = delta[known], cid[known].astype(int)
+                t_kept, c_kept = t_kept[known], c_kept[known]
+                units = _cluster_means(delta, clusters)
+                mean_delta = float(units.mean())
+                mean_t = float(_cluster_means(t_kept, clusters).mean())
+                mean_c = float(_cluster_means(c_kept, clusters).mean())
+                n_pairs, n_clusters = int(known.sum()), int(len(units))
+            else:
+                mean_delta = float(delta.mean())
+                mean_t = float(t_kept.mean())
+                mean_c = float(c_kept.mean())
+                n_pairs, n_clusters = int(mask.sum()), -1
+
+            ci_lo, ci_hi = _bootstrap_ci(delta, n_bootstrap, clusters=clusters, seed=seed)
+            rows.append({
+                "subset": subset_name,
+                "metric": metric,
+                "n": n_pairs,
+                "n_clusters": n_clusters,
+                "unit": unit,
+                "mean_treatment": mean_t,
+                "mean_control": mean_c,
+                "mean_delta": mean_delta,
+                "mean_treatment_chain": float(t_kept.mean()),
+                "mean_control_chain": float(c_kept.mean()),
+                # Per-chain means over the SAME retained rows, so the only
+                # difference from the cluster columns is the weighting.
+                "mean_delta_chain": float(delta.mean()),
+                "ci95_lo": ci_lo,
+                "ci95_hi": ci_hi,
+                "wilcoxon_p": _wilcoxon_p(delta, clusters=clusters),
+            })
+    return rows
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--treatment", required=True, type=Path, help="per_sample_metrics.tsv for the treatment run (e.g. frontier)")
@@ -187,69 +280,23 @@ def main() -> None:
     b = pd.read_csv(args.control, sep="\t")
 
     try:
-        merged = _paired_frame(a, b, args.treatment, args.control)
+        rows = paired_metric_rows(
+            a,
+            b,
+            treatment_source=args.treatment,
+            control_source=args.control,
+            n_bootstrap=args.n_bootstrap,
+            unit=args.bootstrap,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    if args.bootstrap == "cluster" and "cluster_id" not in merged.columns:
-        raise SystemExit(
-            "Cluster resampling requested but neither TSV carries a 'cluster_id' "
-            "column. Re-run the evaluation with data.chain_clusters_file set, or "
-            "pass --bootstrap chain explicitly to reproduce a pre-2026 number."
-        )
-
-    rows = []
-    for subset_name, sub in _per_subset_groups(merged).items():
-        for metric in METRICS:
-            tcol, ccol = f"{metric}_t", f"{metric}_c"
-            if tcol not in sub.columns or ccol not in sub.columns:
-                continue
-            t_vals = pd.to_numeric(sub[tcol], errors="coerce").to_numpy()
-            c_vals = pd.to_numeric(sub[ccol], errors="coerce").to_numpy()
-            mask = np.isfinite(t_vals) & np.isfinite(c_vals)
-            if mask.sum() < 2:
-                continue
-            delta = t_vals[mask] - c_vals[mask]
-
-            clusters = None
-            if args.bootstrap == "cluster":
-                cid = sub["cluster_id"].to_numpy()[mask]
-                # -1 marks an unknown cluster; such a chain is not an
-                # independent unit and must not join a pseudo-cluster of its own.
-                known = cid >= 0
-                if known.sum() < 2:
-                    continue
-                delta, clusters = delta[known], cid[known]
-                t_kept, c_kept = t_vals[mask][known], c_vals[mask][known]
-                units = _cluster_means(delta, clusters)
-                mean_delta = float(units.mean())
-                mean_t = float(_cluster_means(t_kept, clusters).mean())
-                mean_c = float(_cluster_means(c_kept, clusters).mean())
-                n_pairs, n_clusters = int(known.sum()), int(len(units))
-            else:
-                mean_delta = float(delta.mean())
-                mean_t = float(t_vals[mask].mean())
-                mean_c = float(c_vals[mask].mean())
-                n_pairs, n_clusters = int(mask.sum()), -1
-
-            ci_lo, ci_hi = _bootstrap_ci(delta, args.n_bootstrap, clusters=clusters)
-            p_val = _wilcoxon_p(delta, clusters=clusters)
-            rows.append({
-                "subset": subset_name,
-                "metric": metric,
-                "n": n_pairs,
-                "n_clusters": n_clusters,
-                "unit": args.bootstrap,
-                "mean_treatment": round(mean_t, 4),
-                "mean_control": round(mean_c, 4),
-                "mean_delta": round(mean_delta, 4),
-                # The old per-chain mean, so the effect of re-weighting is visible
-                # rather than merely asserted.
-                "mean_delta_chain": round(float(delta.mean()), 4),
-                "ci95_lo": round(ci_lo, 4),
-                "ci95_hi": round(ci_hi, 4),
-                "wilcoxon_p": p_val,
-            })
+    # Rounding is presentation only; `paired_metric_rows` returns full precision.
+    for row in rows:
+        for key in ("mean_treatment", "mean_control", "mean_delta",
+                    "mean_treatment_chain", "mean_control_chain",
+                    "mean_delta_chain", "ci95_lo", "ci95_hi"):
+            row[key] = round(float(row[key]), 4)
 
     out = pd.DataFrame(rows)
     args.out.parent.mkdir(parents=True, exist_ok=True)
