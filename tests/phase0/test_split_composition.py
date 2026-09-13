@@ -92,6 +92,46 @@ def test_archived_counter_is_reconciled_not_trusted():
         assert "MISMATCH" in stdout, "a wrong archived counter must be reported"
 
 
+def test_evaluated_pool_identity_is_checked_not_assumed():
+    """split_test_val.py drops promoted entries outright, so
+    split-level test − promoted must equal val + test id files. The fixture has
+    3 test entries, 3 promoted, 2 evaluated — deliberately inconsistent, so the
+    check must say MISMATCH rather than stay silent."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        _, stdout = _run(tmp, _fixture(tmp))
+        assert "Evaluated pool:" in stdout and "MISMATCH" in stdout
+    # now make it consistent: 3 test entries, 1 promoted, 2 evaluated
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d); sd = _fixture(tmp)
+        meta = json.loads((sd / "mmcif_final_splits.json").read_text())
+        for pid in ("3eee", "3fff"):
+            meta[pid].pop("cluster_promoted", None)
+        (sd / "mmcif_final_splits.json").write_text(json.dumps(meta))
+        # keep the archived counter consistent too, or its own check fires
+        (sd / "cluster_split_stats.txt").write_text(json.dumps({
+            "promoted_train_to_test": 1, "clusters_with_test": 2, "clusters_train_only": 1}))
+        (sd / "val_holdout_ids.txt").write_text("3fff\n")   # 3 − 1 = 2 = 1 val + 1 test
+        (sd / "test_ids.txt").write_text("3ddd\n")
+        _, stdout = _run(tmp, sd)
+        assert "Evaluated pool:" in stdout and "MATCH" in stdout and "MISMATCH" not in stdout
+
+
+def test_missing_entries_are_explained_by_the_curation_rule_not_asserted():
+    """1,960 entries absent from the splits JSON are the unclustered-entry drop
+    (prepare_data_splits.py:344), not a parsing failure. Verify, do not claim."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d); sd = _fixture(tmp)
+        (sd / "no_cluster_entries.txt").write_text("9zzz\n9yyy\n")
+        rows, stdout = _run(tmp, sd)
+        assert rows[("pdb_entry", "dropped: no chain with a cluster (no_cluster_entries)")]["total"] == "2"
+        assert "as drop_unclustered_entries intends" in stdout
+        # an entry that is listed but still present means the drop did not apply
+        (sd / "no_cluster_entries.txt").write_text("9zzz\n1aaa\n")
+        _, stdout = _run(tmp, sd)
+        assert "ARE present, so the drop did not" in stdout
+
+
 def test_holdout_union_is_what_the_filter_blocks():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)

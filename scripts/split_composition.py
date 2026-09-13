@@ -98,6 +98,9 @@ def main() -> None:
                     help="default: <split-dir>/chain_clusters.tsv; cluster rows need it")
     ap.add_argument("--skip-ids", type=Path, action="append", default=[],
                     help="repeatable; same list as data.skip_ids_files")
+    ap.add_argument("--no-cluster-entries", type=Path, default=None,
+                    help="default: <split-dir>/no_cluster_entries.txt; verifies "
+                         "why entries are missing from the splits JSON")
     ap.add_argument("--min-len", type=int, default=MIN_LEN_DEFAULT)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
@@ -155,6 +158,21 @@ def main() -> None:
         add("pdb_entry", "listed in the split id file",
             **{k: len(v) for k, v in id_sets.items()},
             total=len(set().union(*id_sets.values())))
+
+    # The promoted/evaluated relation is EXACT, not a proportion:
+    # split_test_val.py keeps `pid in test_ids and not cluster_promoted`, so the
+    # evaluated pool is the split-level test set minus the promoted entries.
+    # Checking it here is what turns a units error into a visible MISMATCH.
+    if {"val", "test"} <= set(id_sets):
+        expected = by_split.get("test", 0) - promoted.get("test", 0)
+        observed = len(id_sets["val"]) + len(id_sets["test"])
+        verdict = "MATCH" if expected == observed else "MISMATCH"
+        notes.append(
+            f"Evaluated pool: split-level test {by_split.get('test', 0):,} "
+            f"− cluster-promoted {promoted.get('test', 0):,} = {expected:,}; "
+            f"val + test id files = {observed:,} — {verdict}. "
+            "split_test_val.py excludes promoted entries outright, so these must agree."
+        )
 
     if "val" in id_sets and "test" in id_sets:
         overlap = id_sets["val"] & id_sets["test"]
@@ -216,6 +234,28 @@ def main() -> None:
             notes.append(f"{chain_clusters_path} absent — cluster rows omitted.")
     else:
         notes.append("--npz-lengths not given or absent — chain and cluster rows omitted.")
+
+    # ── 5. Why entries are missing from the splits JSON ───────────────────
+    # drop_unclustered_entries removes entries with NO chain carrying a cluster
+    # assignment (prepare_data_splits.py:344). Partially clustered entries are
+    # kept. A missing cluster is a curation rule, not a parsing failure — so
+    # verify the mechanism instead of asserting it.
+    nce = args.no_cluster_entries or args.split_dir / "no_cluster_entries.txt"
+    if nce.exists():
+        dropped = read_ids(nce)
+        still_present = {e for e in dropped if e in meta}
+        add("pdb_entry", "dropped: no chain with a cluster (no_cluster_entries)",
+            total=len(dropped))
+        notes.append(
+            f"no_cluster_entries.txt lists {len(dropped):,} entries; "
+            f"{len(dropped) - len(still_present):,} are absent from the splits JSON "
+            f"as drop_unclustered_entries intends"
+            + (f" — but {len(still_present):,} ARE present, so the drop did not "
+               f"fully apply." if still_present else ".")
+        )
+    else:
+        notes.append(f"{nce} absent — the reason entries are missing from the "
+                     "splits JSON was not verified.")
 
     # ── output ────────────────────────────────────────────────────────────
     fields = ["unit", "quantity", "train", "val", "test", "discarded", "total"]
