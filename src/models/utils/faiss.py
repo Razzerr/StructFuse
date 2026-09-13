@@ -111,7 +111,10 @@ class FaissIndex:
         # Eliminates per-query ESM2 forward passes during training
         emb_path = os.path.join(index_dir, "embeddings.npy")
         if os.path.exists(emb_path):
-            self._embeddings = np.load(emb_path).astype(np.float32)  # (N, D)
+            # asarray, NOT astype: build_index.py already writes float32, and
+            # astype copies unconditionally — a second (N, D) allocation, i.e.
+            # +4.9 GiB transient on the 650M index for no change in value.
+            self._embeddings = np.asarray(np.load(emb_path), dtype=np.float32)  # (N, D)
             self._id2row: Dict[str, int] = {
                 cid: i for i, cid in enumerate(self.row2id)
             }

@@ -173,6 +173,38 @@ def test_holm_is_applied_within_a_declared_family_not_across_all_tests():
     assert abs(smallest["wilcoxon_p_holm"] - min(1.0, 2 * smallest["wilcoxon_p"])) < 1e-18
 
 
+def test_every_adjusted_p_names_the_set_it_is_adjusted_over():
+    """Holm controls FWER inside the declared family only. The row must carry
+    that scope, so a `wilcoxon_p_holm` can never be read out of the TSV as a
+    paper-wide corrected value."""
+    matrix = _matrix()
+    contrasts = (
+        g24.Contrast("a_vs_ref", "family_one", ("worse",), ("ref",), "ref"),
+        g24.Contrast("b_vs_ref", "family_one", ("much_worse",), ("ref",), "ref"),
+        g24.Contrast("c_vs_other", "family_two", ("other_worse",), ("other_ref",), "other_ref"),
+    )
+    table = g24.contrast_table(matrix, contrasts, n_resamples=200, seed=0, unit="cluster")
+    assert "holm_scope" in table.columns
+    scopes = dict(zip(table["comparison"], table["holm_scope"]))
+    assert scopes == {"a_vs_ref": "family_one", "b_vs_ref": "family_one",
+                      "c_vs_other": "family_two"}
+    # The scope is exactly the grouping the adjustment used.
+    for _, row in table.iterrows():
+        same_scope = table[table["holm_scope"] == row["holm_scope"]]
+        assert len(same_scope) == row["holm_family_size"]
+
+
+def test_manifests_state_the_two_scoping_limits():
+    """Both limits must survive in the artifact, not only in a session: the
+    adjustment is family-scoped, and the p-value is not the interval's estimand."""
+    for module in (g23, g24):
+        source = Path(module.__file__).read_text()
+        assert "wilcoxon_estimand" in source, module.__name__
+        # states the limit rather than only the method
+        assert "symmetric about zero" in source, module.__name__
+        assert "nowhere else" in source, module.__name__
+
+
 def test_holm_in_figure_2_is_scoped_to_family_subset_and_metric():
     """A Holm family is one question on one metric on one subset — never a
     pool across metrics, which would be a different and stricter claim."""

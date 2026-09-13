@@ -38,11 +38,17 @@ Knobs:
     coverage.allow_partial=false  # accept a short/partial scan
     coverage.verbose=false        # per-chain stdout dump
 
-Usage (headline 650M, C=8, centre crop, val+test, no training):
+SUBMIT THIS AS A JOB. `FaissIndex` holds `faiss.index` and `embeddings.npy` in
+RAM at once — 4.88 GiB each on `index_t33_2026` — plus ~2 GiB of parsed
+`ids.json`, so it needs ~12 GiB resident before the first batch and more as the
+workers dirty copy-on-write pages. A login node kills it during the index load.
+
+    ./configs/experiment/launch_preflight.sh --only coverage      # 650M headline
+    ./configs/experiment/launch_preflight.sh --only coverage8m    # 8M row
+
+Inside an allocation with >= 64 GB, the underlying commands are:
     python scripts/template_coverage.py experiment=trufor_fusion_with_dist_650M \
         data.crop_mode=center data.num_workers=8
-
-8M row (the config behind paper_8m_trufor_full_k4):
     python scripts/template_coverage.py experiment=ablation/trufor_fusion_with_dist \
         data.crop_mode=center data.num_workers=8
 """
@@ -266,7 +272,11 @@ def main(cfg: DictConfig) -> None:
           f"cap={cfg.data.get('max_chains_per_cluster')} topk={cfg.data.get('topk')}",
           flush=True)
     datamodule = hydra.utils.instantiate(cfg.data)
-    datamodule.setup(stage="fit")
+    # "validate" loads the static val set alone. "fit" would additionally build
+    # the 167k-chain train+val dataset, which this scan never touches unless
+    # include_train is on — wasted minutes and memory on a job that is already
+    # dominated by the FAISS index.
+    datamodule.setup(stage="fit" if include_train else "validate")
     datamodule.setup(stage="test")
 
     per_chain: List[Dict] = []
