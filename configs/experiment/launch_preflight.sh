@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost}." >&2
     exit 2
 fi
 
@@ -67,6 +67,10 @@ run_selected() {
     local job_name="$3"
     local time_limit="$4"
     local overrides="${5:-}"
+    # `cost*` are opt-in: --all is the data preflight, not a benchmark run.
+    if [[ "${key}" == cost* && "${MODE}" == "all" ]]; then
+        return
+    fi
     if [[ "${MODE}" == "all" || "${ONLY}" == "${key}" ]]; then
         submit_preflight "${key}" "${script}" "${job_name}" "${time_limit}" "${overrides}"
     fi
@@ -74,7 +78,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -88,5 +92,13 @@ run_selected "coverage" "scripts/template_coverage.py" "paper_template_coverage_
     "experiment=trufor_fusion_with_dist_650M data.crop_mode=center data.num_workers=8"
 run_selected "coverage8m" "scripts/template_coverage.py" "paper_template_coverage_8m_2026" "08:00:00" \
     "experiment=ablation/trufor_fusion_with_dist data.crop_mode=center data.num_workers=8"
+# cost-smoke runs 3 chains: the first real exercise of the timing path, so a
+# mistake costs seconds. Only run `cost` after it comes back clean.
+run_selected "cost-smoke" "scripts/cost_benchmark.py" "paper_cost_smoke_650m" "00:30:00" \
+    "experiment=trufor_fusion_with_dist_650M data.crop_mode=center data.num_workers=0 \
+     +cost.n_chains=3 +cost.repeats=1 +cost.warmup=1"
+run_selected "cost" "scripts/cost_benchmark.py" "paper_cost_650m" "04:00:00" \
+    "experiment=trufor_fusion_with_dist_650M data.crop_mode=center data.num_workers=0 \
+     +cost.n_chains=200 +cost.repeats=5 +cost.warmup=2"
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"
