@@ -150,6 +150,41 @@ def reconcile(total: float, stages: Dict[str, float]) -> Dict[str, float]:
 
 # ── static facts that need no timing ───────────────────────────────────────
 
+def warmup_record(rows: Sequence[Dict[str, object]], passes: int, n_chains: int,
+                  repeats: int, warm_cache_occupancy: Optional[int]) -> Dict[str, object]:
+    """What the manifest must say about warm-up, and the check that it was enough.
+
+    The template cache cannot reach the forward pass, so `predict` must agree
+    between the cold and warm rows. A gap there is first-encounter kernel
+    selection leaking into whichever cache state ran first — exactly what an
+    8-chain warm-up produced on 2026-09-14 (cold 11.8 vs warm 7.9 ms, same p10).
+    Recording the coverage and the agreement makes two runs with different
+    warm-up schemes distinguishable from the manifest alone; the two 2026-09-14
+    manifests were not.
+    """
+    by_state = {str(r["cache_state"]): r for r in rows}
+    cold = by_state.get("cold", {}).get("predict_median_s")
+    warm = by_state.get("warm", {}).get("predict_median_s")
+    agreement: Dict[str, object] = {
+        "predict_median_s_cold": cold,
+        "predict_median_s_warm": warm,
+        "ratio_cold_over_warm": (float(cold) / float(warm)
+                                 if cold and warm and float(warm) > 0 else None),
+        "rule": "predict must agree between cache states; the template cache "
+                "cannot reach the forward pass, so a gap is a warm-up artefact",
+    }
+    return {
+        "gpu_warmup_passes": passes,
+        "gpu_warmup_chains_per_pass": n_chains,
+        "gpu_warmup_covers_every_selected_chain": True,
+        "warm_template_priming": "one unmeasured build_one pass over every "
+                                 "selected chain (warm row only)",
+        "warm_cache_occupancy_after_priming": warm_cache_occupancy,
+        "measured_repeats": repeats,
+        "adequacy_check": agreement,
+    }
+
+
 def count_params(module: torch.nn.Module) -> Dict[str, int]:
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
     frozen = sum(p.numel() for p in module.parameters() if not p.requires_grad)
@@ -320,6 +355,7 @@ def main(cfg: DictConfig) -> None:
         torch.cuda.reset_peak_memory_stats(device)
 
     rows: List[Dict[str, object]] = []
+    warm_cache_occupancy: Optional[int] = None
     with torch.no_grad():
         for cache_state in ("cold", "warm"):
             acc: Dict[str, List[float]] = {k: [] for k in (*STAGES, *COMPONENTS, "total")}
@@ -352,9 +388,11 @@ def main(cfg: DictConfig) -> None:
                     builder.build_one(pid, item["seq"], sl.start, sl.stop,
                                       filter_holdout=False)
                 cached = getattr(builder, "_tpl_cache", None)
+                warm_cache_occupancy = len(cached) if cached is not None else None
                 print(f"  warm priming: {len(chains)} chains, cache holds "
-                      f"{len(cached) if cached is not None else '?'} templates "
-                      f"(max_tpl_cache={cfg.data.get('max_tpl_cache')})", flush=True)
+                      f"{warm_cache_occupancy if warm_cache_occupancy is not None else '?'} "
+                      f"templates (max_tpl_cache={cfg.data.get('max_tpl_cache')})",
+                      flush=True)
             for _ in range(repeats):
                 for pid in chains:
                     if cache_state == "cold":
@@ -426,6 +464,8 @@ def main(cfg: DictConfig) -> None:
                    "batch_size": 1, "topk": topk,
                    "chain_selection": "even stride over chains sorted by (length, id)",
                    "chain_set_artifact": "chains.tsv"},
+        "warmup": warmup_record(rows, warmup, len(chains), repeats,
+                                warm_cache_occupancy),
         "caveats": [
             "predict = forward only (net + embedding + relpos). It excludes the BCE, "
             "Tversky, P@L metrics and logging that ContactLitModule._step performs.",

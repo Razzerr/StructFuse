@@ -229,6 +229,38 @@ def test_real_main_runs_and_uses_production_attribute_names(monkeypatch=None):
         man = json.loads((tmp / "manifest.json").read_text())
         assert man["cache_preparation"]["preparation_time_measured"] is False
         assert man["frozen"]["topk"] == 4
+        # the warm-up scheme must be readable from the manifest alone — the two
+        # 2026-09-14 runs (8-chain vs full-set GPU warm-up) had identical ones
+        w = man["warmup"]
+        assert w["gpu_warmup_chains_per_pass"] == man["frozen"]["chains"]
+        assert w["gpu_warmup_covers_every_selected_chain"] is True
+        assert w["measured_repeats"] == cfg.cost.repeats
+        chk = w["adequacy_check"]
+        assert chk["predict_median_s_cold"] is not None
+        assert chk["predict_median_s_warm"] is not None
+        assert "ratio_cold_over_warm" in chk
+
+
+def test_warmup_record_exposes_the_cold_warm_predict_agreement():
+    """A gap between cold and warm `predict` is a warm-up artefact (the template
+    cache cannot reach the forward pass). The manifest must carry both medians
+    and their ratio so the defect measured on 2026-09-14 (11.8 vs 7.9 ms) is
+    visible without opening the TSV."""
+    rows = [{"cache_state": "cold", "predict_median_s": 0.0118},
+            {"cache_state": "warm", "predict_median_s": 0.0079}]
+    rec = cb.warmup_record(rows, passes=2, n_chains=200, repeats=5,
+                           warm_cache_occupancy=798)
+    chk = rec["adequacy_check"]
+    assert chk["predict_median_s_cold"] == 0.0118
+    assert chk["predict_median_s_warm"] == 0.0079
+    assert abs(chk["ratio_cold_over_warm"] - 0.0118 / 0.0079) < 1e-12
+    assert rec["gpu_warmup_chains_per_pass"] == 200
+    assert rec["warm_cache_occupancy_after_priming"] == 798
+    assert rec["measured_repeats"] == 5
+    # a run that never produced a warm row must not crash the manifest
+    rec = cb.warmup_record(rows[:1], 2, 200, 5, None)
+    assert rec["adequacy_check"]["predict_median_s_warm"] is None
+    assert rec["adequacy_check"]["ratio_cold_over_warm"] is None
 
 
 def test_cold_clears_per_query_and_warm_is_primed_over_every_chain():
