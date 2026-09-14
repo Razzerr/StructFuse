@@ -243,8 +243,10 @@ def test_cold_clears_per_query_and_warm_is_primed_over_every_chain():
     loop = src[src.index('for cache_state in ("cold", "warm")'):]
     assert loop.count("_clear_template_cache(builder)") >= 3, \
         "cold must re-clear before the query and before each probe"
-    # the GPU warmup may be a small slice ...
-    assert "chains[: min(8, len(chains))]" in loop
+    # the GPU warmup must cover every chain: kernel choice is per SHAPE, and an
+    # 8-chain warmup leaked first-encounter cost into cold `predict` (measured)
+    gpu = loop[loop.index("for _ in range(warmup)"):loop.index('if cache_state == "warm":')]
+    assert "for pid in chains:" in gpu and "chains[:" not in gpu
     # ... but the warm priming must walk ALL chains and build priors
     prime = loop[loop.index('if cache_state == "warm":'):]
     prime = prime[:prime.index("for _ in range(repeats)")]

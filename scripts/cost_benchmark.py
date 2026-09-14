@@ -325,10 +325,15 @@ def main(cfg: DictConfig) -> None:
             acc: Dict[str, List[float]] = {k: [] for k in (*STAGES, *COMPONENTS, "total")}
             # Two DIFFERENT warmups, deliberately separate.
             #
-            # (a) GPU warmup: kernel selection and autotuning. A handful of
-            #     chains is enough and it says nothing about cache state.
+            # (a) GPU warmup: kernel selection and autotuning. It must cover
+            #     EVERY chain, not a handful: kernel choice is per input SHAPE,
+            #     and 200 chains of distinct length are ~150 distinct shapes.
+            #     Measured 2026-09-14 with an 8-chain warmup: cold `predict`
+            #     median 11.9 ms vs warm 7.9 ms with IDENTICAL p10 (7.1 ms) —
+            #     first-encounter shape cost leaking into whichever cache state
+            #     runs first. Full-set warmup removes it from both.
             for _ in range(warmup):
-                for pid in chains[: min(8, len(chains))]:
+                for pid in chains:
                     b = datamodule._collate_eval([dataset[id_pos[pid]]])
                     b = {k: (v.to(device) if torch.is_tensor(v) else v)
                          for k, v in b.items()}
