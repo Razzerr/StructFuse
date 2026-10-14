@@ -1,9 +1,18 @@
 # @package _global_
 # TruFor contact/count-only stream with axial head: no distance bins and no
-# triangle multiplicative updates. Completes the 2x2 dist x triangle panel.
-
+# triangle multiplicative updates. The (-dist, -triangle) cell of the TruFor
+# distance x triangle 2x2.
+#
+# Differs from `trufor_no_dist` ONLY in head_type, and from the reference
+# `trufor_fusion_with_dist` only in the distance flags and head_type
+# (asserted in tests/phase0/test_train_eval_parity.py). `fusion_feature_groups`
+# is deliberately left at the model default: TruFor ignores it (its template
+# width is 2 + tpl_dist_channels, and tpl_dist_channels is 0 when
+# use_tpl_dist_bins=false), but a stray `null` here would still show up as a
+# difference in the audit manifest of one 2x2 cell.
 task_name: "ablation_trufor_no_dist_no_triangle"
 tags: ["ablation", "trufor", "no-dist", "no-triangle", "8M"]
+
 seed: 42
 
 data:
@@ -11,6 +20,5 @@ data:
 
 model:
   fusion_strategy: "trufor"
-  fusion_feature_groups: null
   use_tpl_dist_bins: false
   head_type: "axial"

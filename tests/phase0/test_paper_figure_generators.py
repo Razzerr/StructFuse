@@ -259,7 +259,7 @@ def test_difference_in_differences_reports_no_model_level_mean():
 
 def test_grouped_factorial_only_uses_grouped_cells():
     """The distance x triangle interaction is a per-group-stack result: the
-    cross-attention (-d,-t) and (-d,+t) cells were never trained."""
+    TruFor-style (+d,-t) and (-d,-t) cells were never trained."""
     factorial = [c for c in g24.COMPONENT_CONTRASTS if c.family == "grouped_factorial"]
     assert factorial
     for contrast in factorial:
@@ -283,8 +283,10 @@ def test_figure_2_panels_declare_their_stacks():
     assert "trufor_no_template" in g23.RUNS      # headline kill-switch still reported
     assert "650m_trufor_s42_2026" in str(g23.IDENTITY_TABLE)
     source = (ROOT / "paper/results_2_3_relevant_retrieval/generate_artifacts.py").read_text()
-    assert "ESM2-8M, per-group fusion" in source
-    assert "ESM2-650M, cross-attention" in source
+    # Stack names as the manuscript writes them (2026-10-14).
+    assert "ESM-2 8M, grouped fusion" in source
+    assert "ESM-2 650M, TruFor-style fusion" in source
+    assert 'panel_label(ax, "A")' in source and 'panel_label(ax, "B")' in source
 
 
 def test_panel_a_is_one_point_per_family():

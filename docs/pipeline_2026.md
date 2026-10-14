@@ -66,23 +66,49 @@ excluded from the pipeline entirely rather than special-cased at query time.
 
 Split sizes (cutoff **2024-04-30** — release date of the first CASP16 target):
 
-| split | entries | note |
-|---|---:|---|
-| train | 70,304 | 167,756 chains |
-| val | 15,442 | from the evaluated post-cutoff pool |
-| test | 23,164 | cluster-promoted count below is UNVERIFIED |
-| CASP16 | 42 | `9b0l` / `9sfa` absent from the snapshot |
+**Evaluated level** — the split id files the pipeline actually consumes:
+
+| split | entries | chains | clusters |
+|---|---:|---:|---:|
+| train | 70,304 | 167,756 | 16,932 |
+| val | 15,442 | 69,931 | 4,460 |
+| test | 23,164 | 165,412 | 6,958 |
+| CASP16 | 42 | 145 | 37 |
+
+**Split level** — every entry with an assignment in `mmcif_final_splits.json`,
+a different and much larger population: train 70,304, test **184,992**,
+discarded 373, of which **146,386 test entries (79.1 %) arrived by cluster
+promotion**. Those are excluded from evaluation outright
+(`split_test_val.py:64`), which makes the relation exact:
+
+```
+184,992 − 146,386 = 38,606 = 15,442 val + 23,164 test
+```
+
+Holdout union blocked by `filter_holdout`: **38,606 entries**.
 
 The train set is smaller than the 2025 generation (96,393) because the cutoff is
 frozen while 19 months of new depositions all land post-cutoff and drag their
 clusters across via cluster promotion. Deliberate: the date is principled, the
 set size is not.
 
-**Open, must be resolved before Methods.** An earlier draft of this table said
-test contained "146,386 cluster-promoted entries", which is impossible — the
-number exceeds test's own 23,164 entries. It is probably a chain count, or a
-count over a different pool, but neither reading has been checked. Resolve it
-against the artifact rather than by inference:
+**RESOLVED 2026-09-13.** An earlier draft put "146,386 cluster-promoted
+entries" next to test's 23,164 entries, which is impossible. Both numbers are
+correct; they count different populations — 146,386 is split-level (of 184,992
+test entries), 23,164 is the evaluated subset. `promoted_train_to_test` is a
+PDB-**entry** counter, verified to reconcile exactly against the archived JSON.
+Regenerate the whole table read-only with:
+
+```bash
+python scripts/split_composition.py \
+  --split-dir data/output_splits_2026 \
+  --npz-lengths data/processed_2026/npz_lengths.json \
+  --skip-ids data/corrupt_ids.txt \
+  --skip-ids data/output_splits_2026/no_cluster_ids.txt \
+  --out .temp/split_composition_2026.tsv
+```
+
+Superseded exploratory snippet, kept only for provenance:
 
 ```bash
 python - <<'EOF'

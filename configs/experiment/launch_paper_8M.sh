@@ -6,6 +6,8 @@
 #   ./configs/experiment/launch_paper_8M.sh --final-eval    # bs=1 reported numbers, after --core
 #   ./configs/experiment/launch_paper_8M.sh --trufor-controls        # 2 jobs, headline controls
 #   ./configs/experiment/launch_paper_8M.sh --final-eval-controls    # their bs=1 pass, those 2 only
+#   ./configs/experiment/launch_paper_8M.sh --trufor-panel           # 3 jobs, TruFor 2x2 + loss cells
+#   ./configs/experiment/launch_paper_8M.sh --final-eval-trufor-panel # their bs=1 pass, those 3 only
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -24,7 +26,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gate|--smoke|--core|--trufor-controls|--supplementary|--final-eval|--final-eval-controls|--all)
+        --gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -45,7 +47,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,11p' "$0"
+            sed -n '2,13p' "$0"
             exit 0
             ;;
         *)
@@ -143,6 +145,13 @@ submit_final_eval_controls() {
     submit_final_eval "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
 }
 
+# bs=1 pass for the three --trufor-panel cells only (same reasoning as above).
+submit_final_eval_trufor_panel() {
+    submit_final_eval "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle"
+    submit_final_eval "ablation/trufor_no_dist_no_triangle"   "paper_8m_trufor_contact_only"
+    submit_final_eval "ablation/trufor_bce_only_with_dist"    "paper_8m_trufor_bce_only"
+}
+
 submit_smoke() {
     local repro_cmd="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/smoke_repro_test.py 2>&1 | tee ${TEMP_DIR}/paper_smoke_repro.log"
     local repro_id
@@ -191,6 +200,23 @@ submit_trufor_controls() {
     submit_training "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
 }
 
+# Added 2026-10-14, AFTER Stage E selected TruFor: the grouped panel's
+# triangle, distance x triangle and loss cells applied to the selected stack.
+# Our own fusion x distance contrast showed that component effects depend on
+# the fusion variant, so the grouped results cannot stand in for TruFor.
+# Each config differs from `trufor_fusion_with_dist` exactly as its grouped
+# counterpart differs from `frontier_8M` (test_train_eval_parity.py).
+# Task names are fresh on purpose: the 2025 generation used
+# paper_8m_trufor_{no_triangle_dist,no_dist_no_triangle,bce_only_dist}, whose
+# log directories may still hold old checkpoints. No dilated head and no random
+# retrieval: neither is part of the 2026 claims (unlike the old
+# launch_trufor_ablation_8M.sh --architecture, which also trains a dilated head).
+submit_trufor_panel() {
+    submit_training "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle"
+    submit_training "ablation/trufor_no_dist_no_triangle"   "paper_8m_trufor_contact_only"
+    submit_training "ablation/trufor_bce_only_with_dist"    "paper_8m_trufor_bce_only"
+}
+
 # NOTE: --supplementary is a MIXED bag, not a grouped panel and not a TruFor one:
 # standard-concat fusion, the historical dist-less TruFor (A2, confounded), a
 # dilated head and the k-sweep. After Stage E it is not a ready panel for the
@@ -218,6 +244,12 @@ case "${MODE}" in
         ;;
     final-eval-controls)
         submit_final_eval_controls
+        ;;
+    trufor-panel)
+        submit_trufor_panel
+        ;;
+    final-eval-trufor-panel)
+        submit_final_eval_trufor_panel
         ;;
     smoke)
         submit_smoke

@@ -345,8 +345,10 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    sel.to_csv(out / "selected_cases.tsv", sep="\t", index=False, float_format="%.6g")
-    summary.to_csv(out / "strata_summary.tsv", sep="\t", index=False, float_format="%.6g")
+    # Lossless floats (pandas writes repr): the figure generator checks the
+    # exports against this table exactly, and the paper's TSVs are never rounded.
+    sel.to_csv(out / "selected_cases.tsv", sep="\t", index=False)
+    summary.to_csv(out / "strata_summary.tsv", sep="\t", index=False)
     # What the server export job needs, and nothing else.
     sel[["category", "role", "sample_id", "pdb_id", "chain_id", "crop_start", "crop_end",
          "top1_template_id"]].to_csv(out / "export_requests.tsv", sep="\t", index=False)

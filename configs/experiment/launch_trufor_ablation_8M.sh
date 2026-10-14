@@ -91,6 +91,9 @@ submit_k_sweep() {
     submit_training "ablation/trufor_k16_templates" "paper_8m_trufor_k16"
 }
 
+# 2025-generation panel. For the 2026 paper use
+# `launch_paper_8M.sh --trufor-panel` (+ --final-eval-trufor-panel): same three
+# 2x2/loss configs under fresh task names, no dilated head, and a bs=1 eval mode.
 submit_architecture() {
     submit_training "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle_dist"
     submit_training "ablation/trufor_no_dist_no_triangle" "paper_8m_trufor_no_dist_no_triangle"

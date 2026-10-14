@@ -25,6 +25,9 @@ EXPERIMENTS = [
     "ablation/no_triangle",
     "ablation/random_retrieval",
     "ablation/bce_only",
+    "ablation/trufor_no_triangle_with_dist",
+    "ablation/trufor_no_dist_no_triangle",
+    "ablation/trufor_bce_only_with_dist",
     "frontier_8M",
     "frontier",
     "trufor_fusion_with_dist_650M",
@@ -133,6 +136,62 @@ def test_650m_no_template_control_is_matched_to_the_headline():
     # Width parity: the encoder still sees 2 + 9 channels, zeros materialised in
     # the forward. Flipping this to False would silently change the architecture.
     assert ctrl.model.use_tpl_dist_bins is True
+
+
+# Keys that name a run rather than configure it.
+_NAMING_PREFIXES = ("task_name", "tags", "logger.", "hydra.", "extras.",
+                    "paths.output_dir", "paths.log_dir")
+
+
+def _flat(node, prefix=""):
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            out.update(_flat(value, f"{prefix}.{key}" if prefix else str(key)))
+        return out
+    return {prefix: node}
+
+
+def _config_diff(a: str, b: str) -> set:
+    """Every configuring key whose (unresolved) value differs between two experiments."""
+    from omegaconf import OmegaConf
+    fa = _flat(OmegaConf.to_container(_compose("train", a), resolve=False))
+    fb = _flat(OmegaConf.to_container(_compose("train", b), resolve=False))
+    return {k for k in set(fa) | set(fb)
+            if not k.startswith(_NAMING_PREFIXES)
+            and fa.get(k, "<absent>") != fb.get(k, "<absent>")}
+
+
+def test_trufor_panel_cells_differ_from_their_reference_only_as_intended():
+    """The three TruFor cells added on 2026-10-14 close the selected stack's panel.
+
+    Each must be its grouped counterpart's intervention applied to TruFor, and
+    nothing else: a full-config diff, not a list of keys to compare, so a stray
+    key (the `fusion_feature_groups: null` the 2025 `trufor_no_dist_no_triangle`
+    carried) fails here instead of reaching an audit manifest.
+    """
+    ref = "ablation/trufor_fusion_with_dist"
+    expected = {
+        "ablation/trufor_no_triangle_with_dist": {"model.head_type"},
+        "ablation/trufor_no_dist_no_triangle": {
+            "model.head_type", "model.use_tpl_dist_bins", "data.compute_dist_bins"},
+        "ablation/trufor_bce_only_with_dist": {"model.use_tversky", "model.tversky_weight"},
+        "ablation/trufor_no_dist": {"model.use_tpl_dist_bins", "data.compute_dist_bins"},
+    }
+    for cell, keys in expected.items():
+        got = _config_diff(ref, cell)
+        assert got == keys, f"{cell} vs {ref}: differs in {sorted(got)}, expected {sorted(keys)}"
+    # The 2x2 edge that only the new cell closes.
+    got = _config_diff("ablation/trufor_no_dist", "ablation/trufor_no_dist_no_triangle")
+    assert got == {"model.head_type"}, sorted(got)
+    # Same interventions as the grouped panel they are compared with.
+    grouped = {
+        "ablation/no_triangle": "ablation/trufor_no_triangle_with_dist",
+        "ablation/tpl_contact_only": "ablation/trufor_no_dist_no_triangle",
+        "ablation/bce_only": "ablation/trufor_bce_only_with_dist",
+    }
+    for g_cell, t_cell in grouped.items():
+        assert _config_diff("frontier_8M", g_cell) == _config_diff(ref, t_cell), (g_cell, t_cell)
 
 
 if __name__ == "__main__":
