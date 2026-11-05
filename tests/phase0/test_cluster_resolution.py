@@ -119,6 +119,46 @@ def test_case_twin_chains_keep_their_own_entity_and_cluster():
         assert resolve_cluster("9fya_b", member2cluster, chain2entity) == (0, "entity")
 
 
+def test_a_merging_normaliser_aborts_instead_of_overwriting():
+    """The guards would have stopped the original defect: re-install the old
+    whole-stem `.lower()` and the 9fya file must raise, not silently overwrite."""
+    import scripts.resolve_chain_clusters as rcc
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cif = Path(tmp) / "9fya.cif"
+        cif.write_text(CIF_CASE_TWINS)
+        rcc.check_injective(["9fya_A", "9fya_a"])  # fixed normaliser: fine
+        original = rcc.norm_id
+        rcc.norm_id = lambda v: str(v).strip().lower()
+        try:
+            for call in (lambda: rcc.entity_chain_map_from_file("9fya", cif),
+                         lambda: rcc._entity_map_worker(("9fya", str(cif))),  # not swallowed as a parse error
+                         lambda: rcc.check_injective(["9fya_A", "9fya_a"])):
+                try:
+                    call()
+                except rcc.ChainKeyCollision:
+                    continue
+                raise AssertionError("merged chain key was accepted")
+        finally:
+            rcc.norm_id = original
+
+
+def test_build_index_refuses_two_chains_on_one_key():
+    from scripts.build_index import load_chain_clusters
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tsv = Path(tmp) / "chain_clusters.tsv"
+        tsv.write_text("id\tcluster_id\tsource\tentity_id\n"
+                       "9fya_A\t55552\tentity\t9fya_2\n"
+                       "9FYA_A\t10569\tentity\t9fya_1\n")  # same chain after PDB-code folding
+        try:
+            load_chain_clusters(str(tsv))
+        except ValueError as exc:
+            assert "share key" in str(exc)
+        else:
+            raise AssertionError("two rows on one key were merged silently")
+
+
 def test_build_index_lookup_keeps_chain_case():
     """The index builder reads chain_clusters.tsv through its own normaliser; it
     must not merge case twins either, or ids.json repeats the defect."""

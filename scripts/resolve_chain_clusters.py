@@ -60,6 +60,32 @@ def norm_id(value: str) -> str:
     return head.lower() + sep + tail
 
 
+class ChainKeyCollision(RuntimeError):
+    """Two different chains (or one chain and two entities) met on one key.
+
+    Never legitimate: mmCIF lists each chain in exactly one entity, and stems are
+    unique files. It is the signature of a normaliser that merges distinct IDs,
+    so it aborts the run instead of letting one assignment overwrite another.
+    """
+
+
+def _assign(out: Dict[str, str], key: str, entity: str, where: str) -> None:
+    prev = out.get(key)
+    if prev is not None and prev != entity:
+        raise ChainKeyCollision(f"{where}: key {key!r} maps to both {prev!r} and {entity!r}")
+    out[key] = entity
+
+
+def check_injective(stems: Iterable[str]) -> None:
+    """Every chain stem must keep its own normalised key."""
+    seen: Dict[str, str] = {}
+    for stem in stems:
+        key = norm_id(stem)
+        if key in seen and seen[key] != stem:
+            raise ChainKeyCollision(f"stems {seen[key]!r} and {stem!r} share key {key!r}")
+        seen[key] = stem
+
+
 def split_strand_ids(value: str) -> List[str]:
     if value is None:
         return []
@@ -251,14 +277,14 @@ def entity_chain_map_from_file(pdb_id: str, path: Path) -> Dict[str, str]:
             continue
         entity_stem = norm_id(f"{pdb}_{entity_id}")
         for chain in split_strand_ids(strand_value):
-            out[norm_id(f"{pdb}_{chain}")] = entity_stem
+            _assign(out, norm_id(f"{pdb}_{chain}"), entity_stem, str(path))
     if not out:
         for chain, entity_id in scheme.items():
             chain = chain.strip().strip("'\"")
             entity_id = entity_id.strip().strip("'\"")
             if chain in ("", ".", "?") or entity_id in ("", ".", "?"):
                 continue
-            out[norm_id(f"{pdb}_{chain}")] = norm_id(f"{pdb}_{entity_id}")
+            _assign(out, norm_id(f"{pdb}_{chain}"), norm_id(f"{pdb}_{entity_id}"), str(path))
     return out
 
 
@@ -267,6 +293,8 @@ def _entity_map_worker(item: tuple) -> tuple:
     pdb, path = item
     try:
         return entity_chain_map_from_file(pdb, Path(path)), None
+    except ChainKeyCollision:
+        raise  # a merged key is a code defect, not an unreadable file: abort the run
     except Exception as exc:  # noqa: BLE001
         return {}, f"{path}: {exc}"
 
@@ -429,6 +457,7 @@ def main() -> None:
         raise FileNotFoundError(mmcif_dir)
 
     stems = load_chain_stems(processed_dir, Path(args.chain_list) if args.chain_list else None)
+    check_injective(stems)
     workers = max(1, int(args.workers))
     member2cluster = load_cluster_map(cluster_file)
     chain2entity = build_chain_to_entity_map(mmcif_dir, stems, workers=workers)

@@ -120,6 +120,7 @@ def load_chain_clusters(tsv_path: str) -> Dict[str, int]:
             f"  python scripts/resolve_chain_clusters.py --cluster-file <clusters_30*.txt>"
         )
     id2cluster: Dict[str, int] = {}
+    raw_of: Dict[str, str] = {}
     n_unresolved = 0
     with path.open() as f:
         header = f.readline().rstrip("\n").split("\t")
@@ -132,7 +133,13 @@ def load_chain_clusters(tsv_path: str) -> Dict[str, int]:
                 continue
             cols = line.rstrip("\n").split("\t")
             cid = int(cols[i_cluster])
-            id2cluster[_norm_chain_id(cols[i_id])] = cid
+            key = _norm_chain_id(cols[i_id])
+            if key in raw_of and raw_of[key] != cols[i_id]:
+                # Two distinct chains on one key would let one read the other's
+                # cluster in ids.json - the 2026-11-05 defect. Abort, never overwrite.
+                raise ValueError(f"{path}: chains {raw_of[key]!r} and {cols[i_id]!r} share key {key!r}")
+            raw_of[key] = cols[i_id]
+            id2cluster[key] = cid
             if cid == -1:
                 n_unresolved += 1
     logger.info(
