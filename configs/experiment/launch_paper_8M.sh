@@ -20,7 +20,7 @@ set -euo pipefail
 DRY_RUN=false
 # Anything before this belongs to a previous data generation. Override with
 # --min-ckpt-date if the panel is ever re-run on another rebuild.
-MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-08-22}"
+MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-11-05}"
 SKIP_FRONTIER=false
 MODE=""
 

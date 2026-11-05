@@ -14,7 +14,8 @@
 #   ./configs/experiment/launch_preflight.sh --only cb-low-list     # skip list of Cα-only chains (>50 % Cα fallback)
 #   ./configs/experiment/launch_preflight.sh --only seq-overlap     # val/test chains that are the same protein as a train chain
 #   ./configs/experiment/launch_preflight.sh --only cb-data         # 2026cb: missing embeddings -> indexes -> integrity gate
-# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap and cb-data are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only verify-clusters # chain cluster labels re-derived independently of the resolver
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap, cb-data and verify-clusters are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -38,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,17p' "$0"
+            sed -n '2,18p' "$0"
             exit 0
             ;;
         *)
@@ -49,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters}." >&2
     exit 2
 fi
 
@@ -89,7 +90,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -296,6 +297,19 @@ python scripts/verify_data_integrity.py --check-embeddings; } 2>&1 | tee ${TEMP_
     submit_job "${command}" "${job_name}" "12:00:00" 16 "128G" >/dev/null
 }
 run_cb_data
+
+run_verify_clusters() {
+    local key="verify-clusters"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    local job_name="paper_verify_clusters"
+    local command="python scripts/verify_chain_clusters.py \
+--chain-clusters data/output_splits_2026cb/chain_clusters.tsv --cluster-file data/clusters_30_2026.txt \
+--out-dir ${TEMP_DIR}/verify_chain_clusters --workers 32 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "03:00:00" 32 "128G" >/dev/null
+}
+run_verify_clusters
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

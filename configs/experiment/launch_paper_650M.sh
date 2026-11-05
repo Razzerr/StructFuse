@@ -26,7 +26,7 @@ set -euo pipefail
 DRY_RUN=false
 # logs/ still holds the 2025-generation 650M runs, and "newest .ckpt" would
 # silently pick one of those. Refuse anything older than the rebuild.
-MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-08-22}"
+MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-11-05}"
 MODE=""
 
 while [[ $# -gt 0 ]]; do
