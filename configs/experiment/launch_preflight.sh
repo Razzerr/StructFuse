@@ -8,7 +8,8 @@
 #   ./configs/experiment/launch_preflight.sh --only cost-smoke      # then --only cost
 #   ./configs/experiment/launch_preflight.sh --only export-maps     # Figure 4, headline
 #   ./configs/experiment/launch_preflight.sh --only export-maps-notpl
-# cost* and export-maps* are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only esmfold-casp16-smoke   # then --only esmfold-casp16
+# cost*, export-maps* and esmfold* are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -43,7 +44,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16}." >&2
     exit 2
 fi
 
@@ -83,7 +84,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -141,6 +142,37 @@ run_export() {
 # The two bs=1 evaluations of final_runs.md: W&B run id and hydra run dir.
 run_export "export-maps"       "trufor_fusion_with_dist_650M" "n87663ed" "paper_650m_trufor_s42_bs1/runs/2026-09-11_08-45-58"              "structfuse"
 run_export "export-maps-notpl" "trufor_no_templates_650M"     "qux75yw4" "paper_650m_trufor_no_templates_s42_bs1/runs/2026-09-11_08-47-11" "no_templates"
+
+# ── External reference: ESMFold on the evaluated CASP16 chains (opt-in). ──
+# One-off first, on the login node: bash scripts/setup_esmfold_env.sh
+# Labels come from the evaluation collate of a no-retrieval experiment; the gate
+# checks them against the pinned bs=1 table of the headline run (n87663ed).
+ESMFOLD_VENV="${ESMFOLD_VENV:-/mnt/storage_6/project_data/pl0735-01/old_pl0468-02/venvs/esmfold}"
+run_esmfold() {
+    local key="$1" max_chains="$2" time_limit="$3"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    local ref="${LOGS_DIR}/paper_650m_trufor_s42_bs1/runs/2026-09-11_08-45-58/per_sample_metrics.tsv"
+    if [[ "${DRY_RUN}" != "true" ]]; then
+        local missing=""
+        [[ -x "${ESMFOLD_VENV}/bin/python" ]] || missing="${missing} ${ESMFOLD_VENV} (run scripts/setup_esmfold_env.sh)"
+        [[ -f "${ref}" ]] || missing="${missing} ${ref}"
+        if [[ -n "${missing}" ]]; then
+            echo "SKIP ${key}: inputs missing:${missing}" >&2
+            return
+        fi
+    fi
+    local extra=""
+    [[ -n "${max_chains}" ]] && extra="+ext.max_chains=${max_chains}"
+    local job_name="paper_${key//-/_}"
+    local command="HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ${ESMFOLD_VENV}/bin/python scripts/esmfold_predict.py \
+experiment=trufor_no_templates_650M data.esm_embeddings_dir=null data.eval_batch_size=1 data.num_workers=0 \
++ext.subset=casp16 +ext.reference_tsv=${ref} ${extra} 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "${time_limit}" 8 "128G" >/dev/null
+}
+run_esmfold "esmfold-casp16-smoke" 3  "00:30:00"
+run_esmfold "esmfold-casp16"       "" "03:00:00"
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"
