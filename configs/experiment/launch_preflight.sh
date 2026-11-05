@@ -11,7 +11,8 @@
 #   ./configs/experiment/launch_preflight.sh --only esmfold-casp16-smoke   # then --only esmfold-casp16
 #   ./configs/experiment/launch_preflight.sh --only casefix-audit   # chain-ID case fix: labels + identity audit
 #   ./configs/experiment/launch_preflight.sh --only cb-rebuild      # Cβ contact labels -> data/processed_2026cb + gate
-# cost*, export-maps*, esmfold*, casefix-audit and cb-rebuild are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only cb-low-list     # skip list of Cα-only chains (>50 % Cα fallback)
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild and cb-low-list are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -35,7 +36,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,14p' "$0"
+            sed -n '2,15p' "$0"
             exit 0
             ;;
         *)
@@ -46,7 +47,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list}." >&2
     exit 2
 fi
 
@@ -86,7 +87,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -230,6 +231,20 @@ python scripts/compare_contact_generations.py --old-dir data/processed_2026 --ne
     submit_job "${command}" "${job_name}" "08:00:00" 32 "128G" >/dev/null
 }
 run_cb_rebuild
+
+# Cα-only chains after the Cβ switch (decided 2026-11-05: exclude like unclustered
+# chains). Writes the skip list next to the corrected splits.
+run_cb_low_list() {
+    local key="cb-low-list"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    local job_name="paper_cb_low_list"
+    local command="python scripts/list_low_cb_chains.py --processed-dir ${CB_DIR} \
+--out data/output_splits_2026cb/low_cb_ids.txt --threshold 0.5 --workers 16 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "02:00:00" 16 "64G" >/dev/null
+}
+run_cb_low_list
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

@@ -181,6 +181,7 @@ def build_faiss_index_from_precomputed(
     exclude_ids: Set[str] = None,
     id2cluster: Dict[str, int] = None,
     num_threads: int = 16,
+    skip_stems: Optional[Set[str]] = None,
 ) -> None:
     """Fast path: build FAISS index directly from precomputed ESM2 embeddings.
 
@@ -213,6 +214,9 @@ def build_faiss_index_from_precomputed(
         stem = pc_path.stem
         pdb_id = stem.split("_")[0]
         if pdb_id in exclude_ids:
+            skipped_excluded += 1
+            continue
+        if skip_stems and stem in skip_stems:  # chain-level skip lists (exact stem)
             skipped_excluded += 1
             continue
         # A chain with no cluster assignment cannot be checked by the
@@ -299,6 +303,7 @@ def build_faiss_index(
     max_len: int,
     exclude_ids: Set[str] = None,
     id2cluster: Dict[str, int] = None,
+    skip_stems: Optional[Set[str]] = None,
 ) -> None:
     """
     Build FAISS index from ESM2 embeddings of protein sequences.
@@ -327,6 +332,9 @@ def build_faiss_index(
         try:
             pdb_id = npz_path.stem.split("_")[0]
             if pdb_id in exclude_ids:
+                skipped += 1
+                continue
+            if skip_stems and npz_path.stem in skip_stems:  # chain-level skip lists
                 skipped += 1
                 continue
 
@@ -509,6 +517,14 @@ def main():
              "Dramatically faster (~4h → ~3min).",
     )
     ap.add_argument(
+        "--skip_ids_files",
+        nargs="*",
+        default=[],
+        help="Chain-level skip lists (one stem per line, exact match), the same files as "
+             "data.skip_ids_files, so the index holds exactly the chains the dataset may use. "
+             "A missing file is an error.",
+    )
+    ap.add_argument(
         "--num_threads",
         type=int,
         default=16,
@@ -535,6 +551,15 @@ def main():
     # Missing or -1 entries are inadmissible and get dropped by the build paths.
     id2cluster = load_chain_clusters(args.chain_clusters_tsv)
 
+    skip_stems: Set[str] = set()
+    for raw in args.skip_ids_files:
+        path = Path(raw)
+        if not path.exists():
+            raise FileNotFoundError(f"skip ids file not found: {path}")
+        stems = {ln.strip() for ln in path.read_text().splitlines() if ln.strip()}
+        logger.info(f"Loaded {len(stems)} chain stems to skip from {path}")
+        skip_stems |= stems
+
     # Fast path: precomputed embeddings (skip ESM2 entirely)
     if args.precomputed_embeddings_dir:
         precomputed_dir = Path(args.precomputed_embeddings_dir)
@@ -547,6 +572,7 @@ def main():
             exclude_ids=exclude_ids,
             id2cluster=id2cluster,
             num_threads=args.num_threads,
+            skip_stems=skip_stems,
         )
         return
 
@@ -567,6 +593,7 @@ def main():
         max_len=args.max_len,
         exclude_ids=exclude_ids,
         id2cluster=id2cluster,
+        skip_stems=skip_stems,
     )
 
 
