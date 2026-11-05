@@ -370,6 +370,83 @@ def drop_unclustered_entries(mmcif_files: dict, exclude_file: str) -> dict:
     return kept
 
 
+
+def export_id_lists(mmcif_files: dict, output_dir) -> dict:
+    """Write the entry-level id lists derived from the final split dict.
+
+    Shared by this script and `extend_splits.py`, so both write the lists
+    with the same rules. Returns the lists.
+    """
+    # Final export for StructFuse
+    train_ids = []
+    test_ids = []
+    
+    # Subset lists for detailed evaluation
+    test_gold_ids = []      # temporal-only, no casp16, no cluster_promoted (cleanest)
+    test_casp16_ids = []    # CASP16 targets
+    test_cluster_promoted_ids = []  # Promoted via cluster homology
+    test_temporal_only_ids = []     # temporal test without casp16 (may include cluster_promoted)
+
+    for pdb_id, info in mmcif_files.items():
+        split = info.get("split")
+        if split == "train":
+            train_ids.append(pdb_id)
+        elif split == "test":
+            test_ids.append(pdb_id)
+            
+            is_casp16 = info.get("casp16_test_set", False)
+            is_cluster_promoted = info.get("cluster_promoted", False)
+            temporal_split = info.get("temporal_split", "unknown")
+            
+            if is_casp16:
+                test_casp16_ids.append(pdb_id)
+            
+            if is_cluster_promoted:
+                test_cluster_promoted_ids.append(pdb_id)
+            
+            # Temporal-only: was test before any promotions, not CASP16
+            if temporal_split == "test" and not is_casp16:
+                test_temporal_only_ids.append(pdb_id)
+            
+            # Gold: temporal test, not CASP16, not cluster_promoted (cleanest generalization claim)
+            if temporal_split == "test" and not is_casp16 and not is_cluster_promoted:
+                test_gold_ids.append(pdb_id)
+
+    train_ids = sorted(train_ids)
+    test_ids = sorted(test_ids)
+    test_gold_ids = sorted(test_gold_ids)
+    test_casp16_ids = sorted(test_casp16_ids)
+    test_cluster_promoted_ids = sorted(test_cluster_promoted_ids)
+    test_temporal_only_ids = sorted(test_temporal_only_ids)
+
+    with open(Path(output_dir) / "all_train_ids.txt", "w") as f:
+        f.write("\n".join(train_ids) + "\n")
+
+    with open(Path(output_dir) / "all_test_ids.txt", "w") as f:
+        f.write("\n".join(test_ids) + "\n")
+    
+    with open(Path(output_dir) / "test_gold_ids.txt", "w") as f:
+        f.write("\n".join(test_gold_ids) + "\n")
+    
+    with open(Path(output_dir) / "test_casp16_ids.txt", "w") as f:
+        f.write("\n".join(test_casp16_ids) + "\n")
+    
+    with open(Path(output_dir) / "test_cluster_promoted_ids.txt", "w") as f:
+        f.write("\n".join(test_cluster_promoted_ids) + "\n")
+    
+    with open(Path(output_dir) / "test_temporal_only_ids.txt", "w") as f:
+        f.write("\n".join(test_temporal_only_ids) + "\n")
+
+    logger.info(f"Final TRAIN size: {len(train_ids)}")
+    logger.info(f"Final TEST size: {len(test_ids)}")
+    logger.info(f"  - Gold (temporal, no casp16, no cluster_promoted): {len(test_gold_ids)}")
+    logger.info(f"  - CASP16: {len(test_casp16_ids)}")
+    logger.info(f"  - Cluster promoted: {len(test_cluster_promoted_ids)}")
+    logger.info(f"  - Temporal-only (no casp16): {len(test_temporal_only_ids)}")
+
+    return {"train": train_ids, "test": test_ids, "gold": test_gold_ids, "casp16": test_casp16_ids,
+            "cluster_promoted": test_cluster_promoted_ids, "temporal_only": test_temporal_only_ids}
+
 def __main__():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -455,72 +532,7 @@ def __main__():
     for entity_id, info in list(mmcif_files.items())[:2]:
         logger.info(f"{entity_id}: {info}")
 
-    # Final export for StructFuse
-    train_ids = []
-    test_ids = []
-    
-    # Subset lists for detailed evaluation
-    test_gold_ids = []      # temporal-only, no casp16, no cluster_promoted (cleanest)
-    test_casp16_ids = []    # CASP16 targets
-    test_cluster_promoted_ids = []  # Promoted via cluster homology
-    test_temporal_only_ids = []     # temporal test without casp16 (may include cluster_promoted)
-
-    for pdb_id, info in mmcif_files.items():
-        split = info.get("split")
-        if split == "train":
-            train_ids.append(pdb_id)
-        elif split == "test":
-            test_ids.append(pdb_id)
-            
-            is_casp16 = info.get("casp16_test_set", False)
-            is_cluster_promoted = info.get("cluster_promoted", False)
-            temporal_split = info.get("temporal_split", "unknown")
-            
-            if is_casp16:
-                test_casp16_ids.append(pdb_id)
-            
-            if is_cluster_promoted:
-                test_cluster_promoted_ids.append(pdb_id)
-            
-            # Temporal-only: was test before any promotions, not CASP16
-            if temporal_split == "test" and not is_casp16:
-                test_temporal_only_ids.append(pdb_id)
-            
-            # Gold: temporal test, not CASP16, not cluster_promoted (cleanest generalization claim)
-            if temporal_split == "test" and not is_casp16 and not is_cluster_promoted:
-                test_gold_ids.append(pdb_id)
-
-    train_ids = sorted(train_ids)
-    test_ids = sorted(test_ids)
-    test_gold_ids = sorted(test_gold_ids)
-    test_casp16_ids = sorted(test_casp16_ids)
-    test_cluster_promoted_ids = sorted(test_cluster_promoted_ids)
-    test_temporal_only_ids = sorted(test_temporal_only_ids)
-
-    with open(Path(args.output_dir) / "all_train_ids.txt", "w") as f:
-        f.write("\n".join(train_ids) + "\n")
-
-    with open(Path(args.output_dir) / "all_test_ids.txt", "w") as f:
-        f.write("\n".join(test_ids) + "\n")
-    
-    with open(Path(args.output_dir) / "test_gold_ids.txt", "w") as f:
-        f.write("\n".join(test_gold_ids) + "\n")
-    
-    with open(Path(args.output_dir) / "test_casp16_ids.txt", "w") as f:
-        f.write("\n".join(test_casp16_ids) + "\n")
-    
-    with open(Path(args.output_dir) / "test_cluster_promoted_ids.txt", "w") as f:
-        f.write("\n".join(test_cluster_promoted_ids) + "\n")
-    
-    with open(Path(args.output_dir) / "test_temporal_only_ids.txt", "w") as f:
-        f.write("\n".join(test_temporal_only_ids) + "\n")
-
-    logger.info(f"Final TRAIN size: {len(train_ids)}")
-    logger.info(f"Final TEST size: {len(test_ids)}")
-    logger.info(f"  - Gold (temporal, no casp16, no cluster_promoted): {len(test_gold_ids)}")
-    logger.info(f"  - CASP16: {len(test_casp16_ids)}")
-    logger.info(f"  - Cluster promoted: {len(test_cluster_promoted_ids)}")
-    logger.info(f"  - Temporal-only (no casp16): {len(test_temporal_only_ids)}")
+    export_id_lists(mmcif_files, args.output_dir)
 
 
 if __name__ == "__main__":
