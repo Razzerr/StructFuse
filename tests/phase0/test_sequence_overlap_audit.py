@@ -112,6 +112,33 @@ def test_skip_list_holds_only_evaluated_chains_meeting_the_rule():
             raise AssertionError("existing skip list overwritten")
 
 
+def test_candidate_choice_is_deterministic_and_prefers_a_rule_passing_candidate():
+    """A tie in shared k-mers must not depend on hash order, and a high-identity
+    fragment that fails the rule must not hide a slightly lower one that passes."""
+    query = S1
+    tied = [S1[:20] + "A" * 20, S1[:20] + "G" * 20, S1[:20] + "W" * 20]
+    aligner = soa.alignment_identity
+    soa._G.update(seqs=tied, index=soa.build_kmer_index(tied, 6, 100), k=6, top=2, identity=0.95, coverage=0.9)
+    calls = []
+
+    def recording(q, t):
+        calls.append(tied.index(t))
+        return {"seq_identity_aligned": 0.5, "query_coverage": 1.0, "template_coverage": 1.0}
+
+    soa.alignment_identity = recording
+    try:
+        soa.best_near_match(query)
+        assert sorted(calls) == [0, 1], f"ties must resolve to the lowest indices, got {calls}"
+
+        stats = {tied[0]: {"seq_identity_aligned": 1.0, "query_coverage": 0.5, "template_coverage": 0.5},
+                 tied[1]: {"seq_identity_aligned": 0.96, "query_coverage": 0.95, "template_coverage": 0.95}}
+        soa.alignment_identity = lambda q, t: stats[t]
+        best = soa.best_near_match(query)
+        assert best["train_idx"] == 1 and abs(best["identity"] - 0.96) < 1e-9, best
+    finally:
+        soa.alignment_identity = aligner
+
+
 def test_cap_keeps_first_sorted_stem_and_casp16_is_exempt():
     assert soa.apply_cap(["2b_A", "2a_B", "2a_A"], {"2a_A": 1, "2a_B": 1, "2b_A": 1}, 1, set()) == {"2a_A"}
     assert soa.apply_cap(["2a_A", "2a_B"], {"2a_A": 1, "2a_B": 1}, 1, {"2a_B"}) == {"2a_A", "2a_B"}

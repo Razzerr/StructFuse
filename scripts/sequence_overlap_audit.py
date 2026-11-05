@@ -30,6 +30,7 @@ Usage (inside an allocation):
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import multiprocessing as mp
 import sys
@@ -94,18 +95,32 @@ _G: dict = {}
 
 
 def best_near_match(query: str) -> dict:
-    """Best training sequence among the k-mer-ranked candidates (highest identity)."""
+    """Best training sequence among the k-mer-ranked candidates.
+
+    Candidates are ranked by (shared k-mers, index): `kmers` returns a set whose order
+    depends on hash randomisation, so without the index a tie in the count could pick
+    different candidates in different runs. The kept one is the first that meets the
+    most of the rule: both coverages, then either, then simply the highest identity.
+    A row keeps one candidate, so a high-identity fragment must not hide another
+    candidate that passes the rule.
+    """
     seqs, index, k, top = _G["seqs"], _G["index"], _G["k"], _G["top"]
+    identity, coverage = _G["identity"], _G["coverage"]
     counts = Counter()
     for km in kmers(query, k):
         counts.update(index.get(km, ()))
     best = {"seq": query, "train_idx": -1, "identity": float("nan"), "query_cov": float("nan"),
             "train_cov": float("nan")}
-    for idx, _ in counts.most_common(top):
+    best_key = None
+    for idx, _ in heapq.nsmallest(top, counts.items(), key=lambda kv: (-kv[1], kv[0])):
         stats = alignment_identity(query, seqs[idx])
-        if best["train_idx"] < 0 or stats["seq_identity_aligned"] > best["identity"]:
-            best.update(train_idx=idx, identity=stats["seq_identity_aligned"],
-                        query_cov=stats["query_coverage"], train_cov=stats["template_coverage"])
+        row = {"exact": False, "identity": stats["seq_identity_aligned"],
+               "query_cov": stats["query_coverage"], "train_cov": stats["template_coverage"]}
+        key = (same_protein(row, identity, coverage, "both"), same_protein(row, identity, coverage, "either"),
+               row["identity"])
+        if best_key is None or key > best_key:
+            best_key = key
+            best.update(train_idx=idx, identity=row["identity"], query_cov=row["query_cov"], train_cov=row["train_cov"])
     return best
 
 
@@ -152,7 +167,7 @@ def main() -> int:
     ap.add_argument("--identity", type=float, default=0.95)
     ap.add_argument("--coverage", type=float, default=0.9)
     ap.add_argument("--kmer", type=int, default=10)
-    ap.add_argument("--top-candidates", type=int, default=5)
+    ap.add_argument("--top-candidates", type=int, default=100)
     ap.add_argument("--max-posting", type=int, default=2000)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--max-eval-chains", type=int, default=0, help="smoke runs only; 0 = all")
@@ -209,7 +224,7 @@ def main() -> int:
           f"eval without an exact training match {len(queries)}", flush=True)
 
     _G.update(seqs=train_seqs, index=build_kmer_index(train_seqs, args.kmer, args.max_posting),
-              k=args.kmer, top=args.top_candidates)
+              k=args.kmer, top=args.top_candidates, identity=args.identity, coverage=args.coverage)
     print(f"k-mer index: {len(_G['index'])} {args.kmer}-mers", flush=True)
     if args.workers > 1:
         with mp.get_context("fork").Pool(args.workers) as pool:
