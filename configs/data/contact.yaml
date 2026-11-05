@@ -74,19 +74,24 @@ holdout_id_files:
 # Set to directory path after running: python scripts/precompute_esm2_embeddings.py
 esm_embeddings_dir: ${paths.esm_t6}
 
-# Skip-lists of chain stems, one stem per line (e.g. `8tz6_B`), filtered out of
-# every dataset at setup time. Kept as separate files because the two reasons are
-# audited separately:
-#   corrupt_ids.txt    — known-corrupt NPZ (processed or precomputed ESM); the
-#                        query side would crash on load.
+# Skip-lists of chain stems, one stem per line, filtered out of every dataset at
+# setup time. Kept as separate files because the reasons are audited separately; a
+# missing file is an error:
 #   no_cluster_ids.txt — no RCSB sequence-cluster assignment (written by
 #                        scripts/resolve_chain_clusters.py). The same-cluster
 #                        retrieval filter cannot check these in either direction,
 #                        so they are excluded from the pipeline rather than
-#                        special-cased at query time.
+#                        special-cased at query time. Also kept out of the index.
+#   low_cb_ids.txt     — Cα-only models: more than half of the residues have no Cβ
+#                        to label (scripts/list_low_cb_chains.py). Also kept out of
+#                        the index.
+#   same_protein_as_train_ids.txt — val/test chains with a same-protein training
+#                        chain (scripts/sequence_overlap_audit.py). Evaluation only:
+#                        they stay in the index as templates.
 skip_ids_files:
-  - data/corrupt_ids.txt
   - ${paths.split_dir}/no_cluster_ids.txt
+  - ${paths.split_dir}/low_cb_ids.txt
+  - ${paths.split_dir}/same_protein_as_train_ids.txt
 # ── Evaluation cap (EVAL ONLY — training keeps the full redundancy) ──────────
 # Chains inside one RCSB 30%-identity cluster are near-duplicates, so a mean
 # taken over chains is a family-weighted average: the 2026 test set holds

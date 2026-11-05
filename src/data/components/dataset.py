@@ -484,13 +484,13 @@ class ContactDataset(Dataset):
         skip_stems: Set[str] = set()
         for raw in skip_ids_files or []:
             p = Path(raw)
-            if p.exists():
-                with open(p) as f:
-                    stems = {ln.strip() for ln in f if ln.strip()}
-                skip_stems |= stems
-                log.info(f"  Loaded {len(stems)} skip stems from {p}")
-            else:
-                log.warning(f"  skip ids file not found: {p}")
+            if not p.exists():
+                # A missing list would silently bring excluded chains back.
+                raise FileNotFoundError(f"skip ids file not found: {p}")
+            with open(p) as f:
+                stems = {ln.strip() for ln in f if ln.strip()}
+            skip_stems |= stems
+            log.info(f"  Loaded {len(stems)} skip stems from {p}")
 
         # Filter index entries by PDB ID and min_len (pure dict lookups, instant)
         n_excluded = 0

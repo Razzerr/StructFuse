@@ -16,7 +16,7 @@ Run after `resolve_chain_clusters.py`, the split regeneration and the index
 rebuild; `verify_no_leak.py` covers the remaining train-time retrieval check.
 
     python scripts/verify_data_integrity.py \
-        --index-dirs data/index_t33_2026 data/index_t6_2026
+        --index-dirs data/index_t33_2026cb data/index_t6_2026cb
 """
 
 from __future__ import annotations
@@ -73,13 +73,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     # nargs="*" so `--index-dirs` with no values checks splits/clusters only,
     # which is the state before the indexes are built.
-    ap.add_argument("--index-dirs", nargs="*", default=["data/index_t33_2026", "data/index_t6_2026"])
-    ap.add_argument("--chain-clusters-tsv", default="data/output_splits_2026/chain_clusters.tsv")
-    ap.add_argument("--no-cluster-ids", default="data/output_splits_2026/no_cluster_ids.txt")
-    ap.add_argument("--corrupt-ids", default="data/corrupt_ids.txt")
-    ap.add_argument("--train-ids", default="data/output_splits_2026/all_train_ids.txt")
-    ap.add_argument("--val-ids", default="data/output_splits_2026/val_holdout_ids.txt")
-    ap.add_argument("--test-ids", default="data/output_splits_2026/test_ids.txt")
+    ap.add_argument("--index-dirs", nargs="*", default=["data/index_t33_2026cb", "data/index_t6_2026cb"])
+    ap.add_argument("--chain-clusters-tsv", default="data/output_splits_2026cb/chain_clusters.tsv")
+    ap.add_argument("--no-cluster-ids", default="data/output_splits_2026cb/no_cluster_ids.txt")
+    ap.add_argument("--corrupt-ids", default="", help="optional; the 2026cb generation has no such list")
+    ap.add_argument("--low-cb-ids", default="data/output_splits_2026cb/low_cb_ids.txt")
+    ap.add_argument("--same-protein-ids", default="data/output_splits_2026cb/same_protein_as_train_ids.txt")
+    ap.add_argument("--processed-dir", default="data/processed_2026cb",
+                    help="every ids.json row must point here, or features and labels mix generations; '' skips")
+    ap.add_argument("--train-ids", default="data/output_splits_2026cb/all_train_ids.txt")
+    ap.add_argument("--val-ids", default="data/output_splits_2026cb/val_holdout_ids.txt")
+    ap.add_argument("--test-ids", default="data/output_splits_2026cb/test_ids.txt")
     ap.add_argument(
         "--check-embeddings",
         action="store_true",
@@ -106,10 +110,13 @@ def main() -> int:
             cols = line.rstrip("\n").split("\t")
             chain2cluster[cols[i_id]] = int(cols[i_cl])
     excluded = read_stems(resolve(args.no_cluster_ids))
-    corrupt = read_stems(resolve(args.corrupt_ids)) if resolve(args.corrupt_ids).exists() else set()
+    corrupt = read_stems(resolve(args.corrupt_ids)) if args.corrupt_ids else set()
+    low_cb = read_stems(resolve(args.low_cb_ids))
+    same_protein = read_stems(resolve(args.same_protein_ids))
     rep.info(
         f"{len(chain2cluster)} chains in {args.chain_clusters_tsv}; "
-        f"{len(excluded)} unclustered; {len(corrupt)} corrupt"
+        f"{len(excluded)} unclustered; {len(corrupt)} corrupt; {len(low_cb)} C-alpha only; "
+        f"{len(same_protein)} same protein as a training chain"
     )
 
     unresolved = {s for s, c in chain2cluster.items() if c == -1}
@@ -124,9 +131,14 @@ def main() -> int:
         read_stems(resolve(p)) for p in (args.train_ids, args.val_ids, args.test_ids)
     )
     all_stems = set(chain2cluster)
-    train_c = chain_stems_for_split(train_e, all_stems) - excluded - corrupt
-    val_c = chain_stems_for_split(val_e, all_stems) - excluded - corrupt
-    test_c = chain_stems_for_split(test_e, all_stems) - excluded - corrupt
+    dropped = excluded | corrupt | low_cb
+    train_c = chain_stems_for_split(train_e, all_stems) - dropped
+    val_all = chain_stems_for_split(val_e, all_stems) - dropped
+    test_all = chain_stems_for_split(test_e, all_stems) - dropped
+    # The same-protein list removes evaluated chains; it must not name anything else.
+    stray = same_protein - val_all - test_all
+    rep.check(not stray, "same-protein list names only val/test chains", f"{len(stray)} others, e.g. {sorted(stray)[:3]}")
+    val_c, test_c = val_all - same_protein, test_all - same_protein
     rep.info(f"chains after exclusion — train={len(train_c)} val={len(val_c)} test={len(test_c)}")
 
     # (1) nothing excluded may survive anywhere
@@ -214,6 +226,23 @@ def main() -> int:
             f"{raw}: no unclustered chain indexed",
             f"{len(indexed_excluded)} found",
         )
+
+        # C-alpha-only chains must not be indexed; same-protein chains may stay
+        # (they leave evaluation, not the template memory).
+        indexed_low_cb = set(stems) & low_cb
+        rep.check(not indexed_low_cb, f"{raw}: no C-alpha-only chain indexed", f"{len(indexed_low_cb)} found")
+
+        # every chain a dataset can load must be retrievable as a query, or it would
+        # silently get no templates
+        missing = (train_c | val_c | test_c) - set(stems)
+        rep.check(not missing, f"{raw}: every train/val/test chain is indexed",
+                  f"{len(missing)} missing, e.g. {sorted(missing)[:3]}")
+
+        if args.processed_dir:
+            want = Path(args.processed_dir).name
+            foreign = [m["id"] for m in meta if Path(m["npz"]).parent.name != want]
+            rep.check(not foreign, f"{raw}: every template NPZ is in {want}",
+                      f"{len(foreign)} elsewhere, e.g. {foreign[:3]}")
 
         # metadata must agree with the resolver
         mismatched = [

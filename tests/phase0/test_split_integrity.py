@@ -34,6 +34,10 @@ def _build_fixture(
     index_cluster_overrides: dict | None = None,
     train_entries: str = "1aaa\n",
     index_extra: list | None = None,
+    low_cb: str = "",
+    same_protein: str = "",
+    npz_dir: str = "",
+    drop_from_index: tuple = (),
 ) -> dict:
     """A minimal but complete artifact set: 3 entries, 1 chain each, 3 clusters."""
     chains = {"1aaa_A": 10, "2bbb_A": 20, "3ccc_A": 30, "4ddd_A": -1}
@@ -43,15 +47,17 @@ def _build_fixture(
     _write(tmp / "chain_clusters.tsv", "\n".join(rows) + "\n")
     _write(tmp / "no_cluster_ids.txt", "4ddd_A\n")
     _write(tmp / "corrupt_ids.txt", "")
+    _write(tmp / "low_cb_ids.txt", low_cb)
+    _write(tmp / "same_protein_ids.txt", same_protein)
     _write(tmp / "train.txt", train_entries)
     _write(tmp / "val.txt", "2bbb\n")
     _write(tmp / "test.txt", "3ccc\n")
 
     overrides = index_cluster_overrides or {}
     meta = [
-        {"id": stem, "npz": f"{stem}.npz", "cluster_id": overrides.get(stem, cid)}
+        {"id": stem, "npz": f"{npz_dir}{stem}.npz", "cluster_id": overrides.get(stem, cid)}
         for stem, cid in chains.items()
-        if cid != -1
+        if cid != -1 and stem not in drop_from_index
     ]
     meta.extend(index_extra or [])
     index_dir = tmp / "index"
@@ -60,7 +66,7 @@ def _build_fixture(
     return {"index_dir": index_dir}
 
 
-def _run(tmp: Path) -> subprocess.CompletedProcess:
+def _run(tmp: Path, processed_dir: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable, str(SCRIPT),
@@ -68,6 +74,9 @@ def _run(tmp: Path) -> subprocess.CompletedProcess:
             "--chain-clusters-tsv", str(tmp / "chain_clusters.tsv"),
             "--no-cluster-ids", str(tmp / "no_cluster_ids.txt"),
             "--corrupt-ids", str(tmp / "corrupt_ids.txt"),
+            "--low-cb-ids", str(tmp / "low_cb_ids.txt"),
+            "--same-protein-ids", str(tmp / "same_protein_ids.txt"),
+            "--processed-dir", processed_dir,
             "--train-ids", str(tmp / "train.txt"),
             "--val-ids", str(tmp / "val.txt"),
             "--test-ids", str(tmp / "test.txt"),
@@ -83,6 +92,42 @@ def test_clean_pipeline_passes_every_invariant():
         result = _run(Path(tmp))
         assert result.returncode == 0, result.stdout + result.stderr
         assert "All data-integrity checks passed" in result.stdout
+
+
+def test_calpha_only_chain_in_the_index_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), low_cb="1aaa_A\n")
+        result = _run(Path(tmp))
+        assert result.returncode == 1 and "no C-alpha-only chain indexed" in result.stdout, result.stdout
+
+
+def test_same_protein_list_may_name_only_evaluated_chains_which_stay_indexed():
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), same_protein="3ccc_A\n")
+        result = _run(Path(tmp))
+        assert result.returncode == 0, result.stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), same_protein="1aaa_A\n")
+        result = _run(Path(tmp))
+        assert result.returncode == 1 and "names only val/test chains" in result.stdout, result.stdout
+
+
+def test_chain_missing_from_the_index_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), drop_from_index=("3ccc_A",))
+        result = _run(Path(tmp))
+        assert result.returncode == 1 and "every train/val/test chain is indexed" in result.stdout, result.stdout
+
+
+def test_index_pointing_at_another_data_generation_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), npz_dir="data/processed_2026/")
+        result = _run(Path(tmp), processed_dir="data/processed_2026cb")
+        assert result.returncode == 1 and "every template NPZ is in processed_2026cb" in result.stdout, result.stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        _build_fixture(Path(tmp), npz_dir="data/processed_2026cb/")
+        result = _run(Path(tmp), processed_dir="data/processed_2026cb")
+        assert result.returncode == 0, result.stdout
 
 
 def test_unclustered_chain_in_the_index_is_rejected():

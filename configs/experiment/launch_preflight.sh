@@ -13,7 +13,8 @@
 #   ./configs/experiment/launch_preflight.sh --only cb-rebuild      # Cβ contact labels -> data/processed_2026cb + gate
 #   ./configs/experiment/launch_preflight.sh --only cb-low-list     # skip list of Cα-only chains (>50 % Cα fallback)
 #   ./configs/experiment/launch_preflight.sh --only seq-overlap     # val/test chains that are the same protein as a train chain
-# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list and seq-overlap are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only cb-data         # 2026cb: missing embeddings -> indexes -> integrity gate
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap and cb-data are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -37,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,16p' "$0"
+            sed -n '2,17p' "$0"
             exit 0
             ;;
         *)
@@ -48,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data}." >&2
     exit 2
 fi
 
@@ -88,7 +89,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -259,11 +260,42 @@ run_seq_overlap() {
     local command="python scripts/sequence_overlap_audit.py --processed-dir ${CB_DIR} \
 --split-dir data/output_splits_2026cb --out-dir ${TEMP_DIR}/seq_overlap --workers 16 \
 --out-skip-list data/output_splits_2026cb/same_protein_as_train_ids.txt \
---skip-ids-files data/corrupt_ids.txt data/output_splits_2026cb/no_cluster_ids.txt \
+--skip-ids-files data/output_splits_2026cb/no_cluster_ids.txt \
 data/output_splits_2026cb/low_cb_ids.txt 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "04:00:00" 16 "128G" >/dev/null
 }
 run_seq_overlap
+
+# Finish the 2026cb generation. The ESM caches are keyed by chain and the sequences
+# are unchanged, so 2026cb shares them through symlinks and only the chains the case
+# fix brought back get embedded (the script skips existing outputs). The indexes are
+# rebuilt so that labels, NPZ paths and rows all belong to 2026cb. The same-protein
+# list is deliberately NOT passed to the index: those chains stay template memory.
+run_cb_data() {
+    local key="cb-data"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    local split="data/output_splits_2026cb"
+    local skip="${split}/no_cluster_ids.txt ${split}/low_cb_ids.txt"
+    local pre="data/precomputed"
+    local job_name="paper_cb_data"
+    local command="{ { [ -e ${pre}/esm_t6_8M_2026cb ] || ln -s esm_t6_8M_2026 ${pre}/esm_t6_8M_2026cb; } && \
+{ [ -e ${pre}/esm_t33_650M_2026cb ] || ln -s esm_t33_650M_2026 ${pre}/esm_t33_650M_2026cb; } && \
+python scripts/precompute_esm2_embeddings.py --data_root ${CB_DIR} --output_dir ${pre}/esm_t6_8M_2026cb \
+--model_name esm2_t6_8M_UR50D --batch_size 32 --skip_ids_files ${skip} && \
+python scripts/precompute_esm2_embeddings.py --data_root ${CB_DIR} --output_dir ${pre}/esm_t33_650M_2026cb \
+--model_name esm2_t33_650M_UR50D --batch_size 4 --skip_ids_files ${skip} && \
+python scripts/build_index.py --processed_dir ${CB_DIR} --out_dir data/index_t6_2026cb --exclude_ids '' \
+--chain_clusters_tsv ${split}/chain_clusters.tsv --skip_ids_files ${skip} \
+--precomputed_embeddings_dir ${pre}/esm_t6_8M_2026cb && \
+python scripts/build_index.py --processed_dir ${CB_DIR} --out_dir data/index_t33_2026cb --exclude_ids '' \
+--chain_clusters_tsv ${split}/chain_clusters.tsv --skip_ids_files ${skip} \
+--precomputed_embeddings_dir ${pre}/esm_t33_650M_2026cb && \
+python scripts/verify_data_integrity.py --check-embeddings; } 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "12:00:00" 16 "128G" >/dev/null
+}
+run_cb_data
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

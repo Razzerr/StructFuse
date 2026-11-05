@@ -11,7 +11,10 @@ data_dir: ${paths.root_dir}/data/
 # tagged with it, so a run's audit manifest records which data build produced it
 # and two generations can coexist on disk during a migration. Override with
 # `paths.data_version=2025` to reproduce anything built before 2026-08.
-data_version: "2026"
+# 2026cb: Cβ contact labels, chain-ID case fix in the cluster labels, split extended
+# with the 32 wrongly dropped entries. Same snapshot and residues as 2026; the ESM
+# caches are shared with it (data/precomputed/esm_*_2026cb are symlinks).
+data_version: "2026cb"
 
 processed_dir: ${paths.data_dir}/processed_${paths.data_version}
 split_dir: ${paths.data_dir}/output_splits_${paths.data_version}
