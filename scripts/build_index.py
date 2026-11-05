@@ -87,8 +87,14 @@ def _mean_pool_representations(reps: torch.Tensor, masks: torch.Tensor) -> torch
 
 
 def _norm_chain_id(chain_id: str) -> str:
-    """Normalize an index/cluster member ID for metadata lookups."""
-    return str(chain_id).strip().lower()
+    """Normalize an index/cluster member ID for metadata lookups.
+
+    Only the PDB code is case-insensitive; `9fya_A` and `9fya_a` are different
+    chains, so lower-casing the whole stem made one of them read the other's
+    cluster (see `resolve_chain_clusters.norm_id`).
+    """
+    head, sep, tail = str(chain_id).strip().partition("_")
+    return head.lower() + sep + tail
 
 
 def load_chain_clusters(tsv_path: str) -> Dict[str, int]:

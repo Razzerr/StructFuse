@@ -68,12 +68,72 @@ def test_entity_map_survives_multiline_field_and_chain_lists():
             "6xmx", _fixture(Path(tmp)) / "6xmx.cif"
         )
         # Every strand of entity 1, not just the first.
-        for chain in ("a", "b", "c"):
+        for chain in ("A", "B", "C"):
             assert mapping[f"6xmx_{chain}"] == "6xmx_1", mapping
         # Column alignment held past the `;`-delimited sequence block.
-        assert mapping["6xmx_h"] == "6xmx_2", mapping
-        assert mapping["6xmx_i"] == "6xmx_2", mapping
-        assert mapping["6xmx_r"] == "6xmx_3", mapping
+        assert mapping["6xmx_H"] == "6xmx_2", mapping
+        assert mapping["6xmx_I"] == "6xmx_2", mapping
+        assert mapping["6xmx_R"] == "6xmx_3", mapping
+
+
+# The 9fya case (2026-11-05): chain IDs that differ only by case belong to
+# DIFFERENT entities, listed lower-case entity first, as in the real file.
+CIF_CASE_TWINS = """data_9FYA
+#
+loop_
+_entity_poly.entity_id
+_entity_poly.type
+_entity_poly.pdbx_seq_one_letter_code
+_entity_poly.pdbx_strand_id
+1 'polypeptide(L)' MSTNPKPQRKTKRNTNRRPQDVKFPGG a,c,b
+2 'polypeptide(L)' MKVLAAGIVGLLLAQSSFA A,C,B
+#
+loop_
+_atom_site.group_PDB
+ATOM
+"""
+
+
+def test_case_twin_chains_keep_their_own_entity_and_cluster():
+    """`9fya_A` and `9fya_a` are different chains; merging them gave the later
+    entity to both and let identical templates past the same-cluster filter."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mmcif = root / "mmCIF"
+        mmcif.mkdir()
+        (mmcif / "9fya.cif").write_text(CIF_CASE_TWINS)
+        mapping = entity_chain_map_from_file("9fya", mmcif / "9fya.cif")
+        for chain in ("a", "b", "c"):
+            assert mapping[f"9fya_{chain}"] == "9fya_1", mapping
+        for chain in ("A", "B", "C"):
+            assert mapping[f"9fya_{chain}"] == "9fya_2", mapping
+
+        clusters = root / "clusters.txt"
+        clusters.write_text("9FYA_1 9FYE_2\n9FYA_2 9FYE_1\n")  # cluster ids 0 and 1
+        member2cluster = load_cluster_map(clusters)
+        stems = ["9fya_A", "9fya_a", "9fya_B", "9fya_b"]
+        chain2entity = build_chain_to_entity_map(mmcif, stems, workers=1)
+        assert resolve_cluster("9fya_A", member2cluster, chain2entity) == (1, "entity")
+        assert resolve_cluster("9fya_B", member2cluster, chain2entity) == (1, "entity")
+        assert resolve_cluster("9fya_a", member2cluster, chain2entity) == (0, "entity")
+        assert resolve_cluster("9fya_b", member2cluster, chain2entity) == (0, "entity")
+
+
+def test_build_index_lookup_keeps_chain_case():
+    """The index builder reads chain_clusters.tsv through its own normaliser; it
+    must not merge case twins either, or ids.json repeats the defect."""
+    from scripts.build_index import _norm_chain_id, load_chain_clusters
+
+    assert _norm_chain_id("9FYA_A") == "9fya_A"
+    assert _norm_chain_id("9fya_a") == "9fya_a"
+    with tempfile.TemporaryDirectory() as tmp:
+        tsv = Path(tmp) / "chain_clusters.tsv"
+        tsv.write_text("id\tcluster_id\tsource\tentity_id\n"
+                       "9fya_A\t55552\tentity\t9fya_2\n"
+                       "9fya_a\t10569\tentity\t9fya_1\n")
+        id2cluster = load_chain_clusters(str(tsv))
+        assert id2cluster[_norm_chain_id("9fya_A")] == 55552
+        assert id2cluster[_norm_chain_id("9fya_a")] == 10569
 
 
 def test_empty_entity_map_raises_instead_of_reporting_everything_unmapped():
@@ -113,7 +173,7 @@ def test_resolve_cluster_sources():
 
 def test_numeric_chain_suffix_is_not_read_as_an_entity_id():
     """`6xmx_1` as a chain stem means AUTH chain "1", not entity 1."""
-    member2cluster = {"6xmx_1": 16149, "af_test_1": 9}
+    member2cluster = {"6xmx_1": 16149, "af_TEST_1": 9}
     assert resolve_cluster("6xmx_1", member2cluster, {}) == (-1, "numeric_exact_suppressed")
     # AlphaFold IDs are not PDB chain IDs, so exact lookup stays available.
     assert resolve_cluster("AF_TEST_1", member2cluster, {}) == (9, "exact")

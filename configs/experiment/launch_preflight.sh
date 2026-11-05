@@ -9,7 +9,8 @@
 #   ./configs/experiment/launch_preflight.sh --only export-maps     # Figure 4, headline
 #   ./configs/experiment/launch_preflight.sh --only export-maps-notpl
 #   ./configs/experiment/launch_preflight.sh --only esmfold-casp16-smoke   # then --only esmfold-casp16
-# cost*, export-maps* and esmfold* are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only casefix-audit   # chain-ID case fix: labels + identity audit
+# cost*, export-maps*, esmfold* and casefix-audit are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -33,7 +34,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,13p' "$0"
             exit 0
             ;;
         *)
@@ -44,7 +45,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit}." >&2
     exit 2
 fi
 
@@ -84,7 +85,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -173,6 +174,36 @@ experiment=trufor_no_templates_650M data.esm_embeddings_dir=null data.eval_batch
 }
 run_esmfold "esmfold-casp16-smoke" 3  "00:30:00"
 run_esmfold "esmfold-casp16"       "" "03:00:00"
+
+# Chain-ID case fix (2026-11-05). One job, nothing of the 2026 generation is
+# overwritten: (1) re-resolve chain -> cluster with the fixed resolver into
+# data/casefix_2026/, (2) copy index_t33_2026 metadata with those labels (same
+# rows, symlinked vectors; audit-only), (3) replay retrieval for the evaluated
+# test chains on the corrected labels and audit top-1 identity. No control TSV:
+# the old model's metrics do not belong to the new templates.
+CASEFIX_DIR="data/casefix_2026"
+run_casefix() {
+    local key="casefix-audit"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    if [[ "${DRY_RUN}" != "true" && -e "${PROJECT_DIR}/${CASEFIX_DIR}" ]]; then
+        echo "SKIP ${key}: ${PROJECT_DIR}/${CASEFIX_DIR} already exists; move it away to rerun" >&2
+        return
+    fi
+    local job_name="paper_casefix_audit"
+    local command="{ mkdir -p ${CASEFIX_DIR} && \
+python scripts/resolve_chain_clusters.py --processed-dir data/processed_2026 --cluster-file data/clusters_30_2026.txt \
+--out-tsv ${CASEFIX_DIR}/chain_clusters.tsv --out-no-cluster-ids ${CASEFIX_DIR}/no_cluster_ids.txt \
+--out-no-cluster-entries ${CASEFIX_DIR}/no_cluster_entries.txt --workers 16 && \
+python scripts/relabel_index_clusters.py --index-dir data/index_t33_2026 \
+--chain-clusters ${CASEFIX_DIR}/chain_clusters.tsv --out-dir ${CASEFIX_DIR}/index_t33_relabel && \
+python scripts/retrieval_identity_audit.py --label 650m_trufor_s42_2026_casefix \
+--index-dir ${CASEFIX_DIR}/index_t33_relabel --identity-scope both --control-per-sample-tsv '' \
+--allow-score-mismatch --out-dir ${TEMP_DIR}/casefix_2026/identity_audit; } 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "08:00:00" 16 "128G" >/dev/null
+}
+run_casefix
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

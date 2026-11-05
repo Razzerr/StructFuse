@@ -48,7 +48,16 @@ logger = logging.getLogger(__name__)
 
 
 def norm_id(value: str) -> str:
-    return str(value).strip().lower()
+    """Lower-case the PDB code only; keep the chain/entity suffix as written.
+
+    PDB codes are case-insensitive, chain IDs are not: in mmCIF `A` and `a` are
+    different chains and often different entities (e.g. 9fya: entity 1 = a,b,c,
+    entity 2 = A,B,C). Lower-casing the whole stem merged such twins into one key,
+    so the entity written last won for both and 58,320 chains got another
+    entity's cluster (found 2026-11-05).
+    """
+    head, sep, tail = str(value).strip().partition("_")
+    return head.lower() + sep + tail
 
 
 def split_strand_ids(value: str) -> List[str]:
