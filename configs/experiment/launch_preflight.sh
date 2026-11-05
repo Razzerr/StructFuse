@@ -12,7 +12,8 @@
 #   ./configs/experiment/launch_preflight.sh --only casefix-audit   # chain-ID case fix: labels + identity audit
 #   ./configs/experiment/launch_preflight.sh --only cb-rebuild      # Cβ contact labels -> data/processed_2026cb + gate
 #   ./configs/experiment/launch_preflight.sh --only cb-low-list     # skip list of Cα-only chains (>50 % Cα fallback)
-# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild and cb-low-list are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only seq-overlap     # val/test chains that are the same protein as a train chain
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list and seq-overlap are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,15p' "$0"
+            sed -n '2,16p' "$0"
             exit 0
             ;;
         *)
@@ -47,7 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap}." >&2
     exit 2
 fi
 
@@ -87,7 +88,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -245,6 +246,22 @@ run_cb_low_list() {
     submit_job "${command}" "${job_name}" "02:00:00" 16 "64G" >/dev/null
 }
 run_cb_low_list
+
+# RCSB can place identical sequences in different clusters, so a cluster-disjoint
+# split need not be sequence-disjoint. Read-only; decides whether the split changes.
+run_seq_overlap() {
+    local key="seq-overlap"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    local job_name="paper_seq_overlap"
+    local command="python scripts/sequence_overlap_audit.py --processed-dir ${CB_DIR} \
+--split-dir data/output_splits_2026cb --out-dir ${TEMP_DIR}/seq_overlap --workers 16 \
+--skip-ids-files data/corrupt_ids.txt data/output_splits_2026cb/no_cluster_ids.txt \
+data/output_splits_2026cb/low_cb_ids.txt 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "04:00:00" 16 "128G" >/dev/null
+}
+run_seq_overlap
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"
