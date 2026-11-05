@@ -10,7 +10,8 @@
 #   ./configs/experiment/launch_preflight.sh --only export-maps-notpl
 #   ./configs/experiment/launch_preflight.sh --only esmfold-casp16-smoke   # then --only esmfold-casp16
 #   ./configs/experiment/launch_preflight.sh --only casefix-audit   # chain-ID case fix: labels + identity audit
-# cost*, export-maps*, esmfold* and casefix-audit are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only cb-rebuild      # Cβ contact labels -> data/processed_2026cb + gate
+# cost*, export-maps*, esmfold*, casefix-audit and cb-rebuild are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -34,7 +35,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,13p' "$0"
+            sed -n '2,14p' "$0"
             exit 0
             ;;
         *)
@@ -45,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild}." >&2
     exit 2
 fi
 
@@ -85,7 +86,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -204,6 +205,31 @@ python scripts/retrieval_identity_audit.py --label 650m_trufor_s42_2026_casefix 
     submit_job "${command}" "${job_name}" "08:00:00" 16 "128G" >/dev/null
 }
 run_casefix
+
+# Cβ contact labels (CASP definition; decided 2026-11-05). Same mmCIF snapshot and
+# chain filters as the 2026 build (min_len 20, max_len 1280, cutoff 8 Å, min_sep 6),
+# only --contact_atom differs. The gate requires identical stems, seq, L, mask and
+# Cα coords versus data/processed_2026, so the ESM caches and FAISS vectors stay valid.
+CB_DIR="data/processed_2026cb"
+run_cb_rebuild() {
+    local key="cb-rebuild"
+    if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
+        return
+    fi
+    if [[ "${DRY_RUN}" != "true" && -e "${PROJECT_DIR}/${CB_DIR}" ]]; then
+        echo "SKIP ${key}: ${PROJECT_DIR}/${CB_DIR} already exists; move it away to rerun" >&2
+        return
+    fi
+    local job_name="paper_cb_rebuild"
+    local command="{ python scripts/build_contacts.py --contact_atom CB \
+--mmcif_dir /mnt/storage_6/project_data/pl0735-01/old_pl0468-02/pdb_snapshot_2026/mmCIF \
+--out_dir ${CB_DIR} --cutoff 8.0 --min_sep 6 --min_len 20 --max_len 1280 --num_workers 32 && \
+python scripts/build_npz_lengths.py --processed_dir ${CB_DIR} && \
+python scripts/compare_contact_generations.py --old-dir data/processed_2026 --new-dir ${CB_DIR} \
+--out-dir ${TEMP_DIR}/cb_rebuild_gate --workers 32; } 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "08:00:00" 32 "128G" >/dev/null
+}
+run_cb_rebuild
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

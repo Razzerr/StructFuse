@@ -4,7 +4,8 @@ build_contacts.py
 Parse mmCIF files into per-chain caches containing:
 - 1-letter sequence
 - C-alpha coordinates
-- binary contact map (C_alpha-C_alpha < cutoff Å, optional min sequence separation)
+- binary contact map (<atom>-<atom> < cutoff Å, atom = --contact_atom CA|CB; optional min sequence separation)
+- Cβ coordinates by the CASP definition (CB; Cα for Gly; virtual Cβ if CB is missing) and their origin
 - residue mask (1 if C_alpha present)
 - metadata (pdb_id, chain_id, path, cutoff, min_sep)
 
@@ -14,6 +15,7 @@ Output: one NPZ per chain: {pdbid}_{chain}.npz
 
 Usage:
   python scripts/build_contacts.py \
+    --contact_atom CB \
     --mmcif_dir data/mmcif \
     --out_dir data/processed_2026 \
     --cutoff 8.0 \
@@ -45,13 +47,13 @@ logger = logging.getLogger(__name__)
 
 
 def _worker(
-    args: Tuple[Path, Path, float, int, int, int, bool],
+    args: Tuple[Path, Path, float, int, int, int, bool, str],
 ) -> Tuple[bool, Path, List[Path], Optional[str], int]:
     """
     Worker function for parallel mmCIF processing.
 
     Args:
-        args: Tuple of (mmcif_path, out_dir, cutoff, min_sep, min_len, max_len, overwrite)
+        args: Tuple of (mmcif_path, out_dir, cutoff, min_sep, min_len, max_len, overwrite, contact_atom)
 
     Returns:
         Tuple[bool, Path, List[Path], Optional[str], int]:
@@ -61,7 +63,7 @@ def _worker(
             - traceback: Error traceback string if failed, else None
             - skipped: Number of chains skipped (already exist)
     """
-    path, out_dir, cutoff, min_sep, min_len, max_len, overwrite = args
+    path, out_dir, cutoff, min_sep, min_len, max_len, overwrite, contact_atom = args
 
     try:
         items = process_mmcif_file(
@@ -70,6 +72,7 @@ def _worker(
             min_sep=min_sep,
             min_len=min_len,
             max_len=max_len,
+            contact_atom=contact_atom,
         )
         outputs = []
         skipped = 0
@@ -91,6 +94,9 @@ def _worker(
                 source_path=item["source_path"],
                 cutoff=item["cutoff"],
                 min_sep=item["min_sep"],
+                coords_cb=item["coords_cb"],
+                cb_source=item["cb_source"],
+                contact_atom=item["contact_atom"],
             )
             outputs.append(out_path)
         return True, path, outputs, None, skipped
@@ -114,6 +120,13 @@ def main():
         type=str,
         default="data/processed_2026",
         help="Directory to write NPZ files.",
+    )
+    ap.add_argument(
+        "--contact_atom",
+        choices=("CA", "CB"),
+        required=True,
+        help="Atom the contact map is computed from. No default: the label definition "
+        "must be chosen explicitly (2026 generation: CA; Cβ generation: CB).",
     )
     ap.add_argument(
         "--cutoff",
@@ -160,6 +173,7 @@ def main():
     logger.info("Starting contact map generation with args:")
     logger.info(f"  mmCIF directory: {mmcif_dir}")
     logger.info(f"  Output directory: {out_dir}")
+    logger.info(f"  Contact atom: {args.contact_atom}")
     logger.info(f"  Contact cutoff: {args.cutoff} Å")
     logger.info(f"  Min sequence separation: {args.min_sep}")
     logger.info(f"  Min chain length: {args.min_len}")
@@ -183,7 +197,7 @@ def main():
 
     out_dir = out_dir.resolve()
     worker_args = [
-        (p, out_dir, args.cutoff, args.min_sep, args.min_len, args.max_len, args.overwrite)
+        (p, out_dir, args.cutoff, args.min_sep, args.min_len, args.max_len, args.overwrite, args.contact_atom)
         for p in files
     ]
 

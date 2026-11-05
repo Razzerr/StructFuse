@@ -151,7 +151,39 @@ def read_mmcif_structure(path: str) -> gemmi.Structure:
     return structure
 
 
-def parse_chain_gemmi(chain: gemmi.Chain) -> Tuple[str, np.ndarray, np.ndarray]:
+# Where each residue's Cβ position came from (stored per residue as `cb_source`).
+CB_NONE, CB_ATOM, CB_GLY_CA, CB_VIRTUAL, CB_CA_FALLBACK = 0, 1, 2, 3, 4
+
+
+def virtual_cb(n: np.ndarray, ca: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Ideal-geometry Cβ from backbone N, Cα, C (the trRosetta/AF2 pseudo-Cβ constants)."""
+    b = ca - n
+    cc = c - ca
+    a = np.cross(b, cc)
+    return -0.58273431 * a + 0.56802827 * b - 0.54067466 * cc + ca
+
+
+def _xyz(atom) -> np.ndarray:
+    return np.array([atom.pos.x, atom.pos.y, atom.pos.z], dtype=np.float64)
+
+
+def residue_cb(residue, aa: str, ca_atom) -> Tuple[List[float], int]:
+    """Cβ by the CASP contact definition: the CB atom; Cα for glycine; for a
+    non-glycine residue without CB, a virtual Cβ from N, Cα, C; Cα when N or C
+    is missing too. Only called for residues that have a Cα."""
+    ca = _xyz(ca_atom)
+    if aa == "G":
+        return ca.tolist(), CB_GLY_CA
+    cb_atom = residue.find_atom("CB", "*")
+    if cb_atom is not None:
+        return _xyz(cb_atom).tolist(), CB_ATOM
+    n_atom, c_atom = residue.find_atom("N", "*"), residue.find_atom("C", "*")
+    if n_atom is not None and c_atom is not None:
+        return virtual_cb(_xyz(n_atom), ca, _xyz(c_atom)).tolist(), CB_VIRTUAL
+    return ca.tolist(), CB_CA_FALLBACK
+
+
+def parse_chain_gemmi(chain: gemmi.Chain) -> Tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract sequence, C-alpha coordinates, and mask from a gemmi Chain.
 
@@ -163,10 +195,17 @@ def parse_chain_gemmi(chain: gemmi.Chain) -> Tuple[str, np.ndarray, np.ndarray]:
             - seq: str, 1-letter sequence
             - coords: np.ndarray (L, 3), C_alpha coordinates (0.0 if missing)
             - mask: np.ndarray (L,), 1 if C_alpha present, 0 otherwise
+            - cb_coords: np.ndarray (L, 3), Cβ by `residue_cb` (0.0 where no Cα)
+            - cb_source: np.ndarray (L,), CB_* code per residue
+
+    The residue set (and therefore seq, L and mask) does not depend on Cβ, so
+    caches keyed on the sequence stay valid when the contact atom changes.
     """
     seq_list: List[str] = []
     coords_list: List[List[float]] = []
     mask_list: List[int] = []
+    cb_list: List[List[float]] = []
+    cb_src: List[int] = []
 
     for residue in chain:
         # Skip non-polymer residues (water, ligands, etc.)
@@ -186,15 +225,22 @@ def parse_chain_gemmi(chain: gemmi.Chain) -> Tuple[str, np.ndarray, np.ndarray]:
         if ca_atom is None:
             coords_list.append([0.0, 0.0, 0.0])
             mask_list.append(0)
+            cb_list.append([0.0, 0.0, 0.0])
+            cb_src.append(CB_NONE)
         else:
             pos = ca_atom.pos
             coords_list.append([pos.x, pos.y, pos.z])
             mask_list.append(1)
+            cb, src = residue_cb(residue, seq_list[-1], ca_atom)
+            cb_list.append(cb)
+            cb_src.append(src)
 
     seq = "".join(seq_list)
     coords = np.array(coords_list, dtype=np.float32)
     mask = np.array(mask_list, dtype=np.uint8)
-    return seq, coords, mask
+    cb_coords = np.array(cb_list, dtype=np.float32).reshape(-1, 3)
+    cb_source = np.array(cb_src, dtype=np.uint8)
+    return seq, coords, mask, cb_coords, cb_source
 
 
 def process_mmcif_file(
@@ -203,13 +249,14 @@ def process_mmcif_file(
     min_sep: int = 6,
     min_len: int = 20,
     max_len: int = 0,
+    contact_atom: str = "CA",
 ) -> List[dict]:
     """
     Parse an mmCIF file and extract per-chain contact maps.
 
     Args:
         path: Path to mmCIF file (.cif or .cif.gz)
-        cutoff: C_alpha distance threshold in Angstroms
+        cutoff: distance threshold in Angstroms between `contact_atom` positions
         min_sep: Minimum sequence separation |i-j|
         min_len: Minimum chain length (residues)
         max_len: Maximum chain length (0 = no limit)
@@ -225,6 +272,8 @@ def process_mmcif_file(
             - chain_id: chain identifier
             - source_path: original file path
             - cutoff, min_sep: preprocessing parameters
+            - coords_cb, cb_source: Cβ by the CASP definition and its origin per residue
+            - contact_atom: 'CA' or 'CB', the atom `contact` was computed from
     """
     structure = read_mmcif_structure(path)
     
@@ -247,7 +296,7 @@ def process_mmcif_file(
     model = structure[0]
 
     for chain in model:
-        seq, coords, mask = parse_chain_gemmi(chain)
+        seq, coords, mask, cb_coords, cb_source = parse_chain_gemmi(chain)
         L = len(seq)
 
         if L < min_len:
@@ -259,7 +308,12 @@ def process_mmcif_file(
         if mask.sum() == 0:
             continue
 
-        contact = contact_map_from_coords(coords, mask, cutoff=cutoff, min_sep=min_sep)
+        if contact_atom == "CB":
+            contact = contact_map_from_coords(cb_coords, mask, cutoff=cutoff, min_sep=min_sep)
+        elif contact_atom == "CA":
+            contact = contact_map_from_coords(coords, mask, cutoff=cutoff, min_sep=min_sep)
+        else:
+            raise ValueError(f"contact_atom must be 'CA' or 'CB', got {contact_atom!r}")
 
         results.append(
             dict(
@@ -273,6 +327,9 @@ def process_mmcif_file(
                 source_path=str(path),
                 cutoff=np.float32(cutoff),
                 min_sep=np.int32(min_sep),
+                coords_cb=cb_coords.astype(np.float32),
+                cb_source=cb_source.astype(np.uint8),
+                contact_atom=contact_atom,
             )
         )
 
