@@ -1,7 +1,7 @@
 import parasail
 import numpy as np
 import blosum as bl
-from typing import Tuple
+from typing import Optional, Tuple
 
 from src.utils import RankedLogger
 
@@ -240,19 +240,23 @@ def project_distance(
     query_to_template: np.ndarray,
     min_seq_sep: int = 0,
     symmetrize: bool = True,
+    template_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Project pairwise Cα-Cα distances from a template onto query residue pairs
-    via the given alignment, then discretise to bin indices.
+    Project pairwise distances from a template onto query residue pairs via the
+    given alignment, then discretise to bin indices.
 
     Args:
         query_seq: query sequence of length Lq
         template_seq: template sequence of length Lt
-        template_coords: (Lt, 3) array of Cα coordinates in Å
+        template_coords: (Lt, 3) coordinates in Å (the atom of the contact labels)
         query_to_template: (Lq,) alignment map from needleman_wunsch;
             -1 where the query position maps to a gap.
         min_seq_sep: pairs with |i-j| < min_seq_sep are set to "unknown" (0).
         symmetrize: average upper/lower triangle to enforce symmetry.
+        template_mask: (Lt,) True where the template residue has coordinates. A
+            residue without them is stored at the origin, so its distances would
+            be meaningless; pairs touching it stay "unknown" (0).
 
     Returns:
         (Lq, Lq) int8 bin indices. 0 = unknown, 1..8 = finite bins from
@@ -269,6 +273,8 @@ def project_distance(
     dist_bins = np.zeros((Lq, Lq), dtype=np.int8)
 
     valid_mask = query_to_template >= 0
+    if template_mask is not None:
+        valid_mask = valid_mask & template_mask[np.clip(query_to_template, 0, None)]
     valid_indices = np.where(valid_mask)[0]
     template_indices = query_to_template[valid_indices]
 

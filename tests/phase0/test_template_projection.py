@@ -154,6 +154,23 @@ def test_gap_positions_get_the_unknown_distance_bin():
             f"query {gap} aligns to a gap; every bin must stay 0 (unknown)")
 
 
+def test_template_residue_without_coordinates_gets_the_unknown_bin():
+    """Such a residue is stored at the origin; its "distances" must not be binned."""
+    n = 30
+    coords = np.zeros((n, 3), dtype=np.float32)
+    coords[:, 0] = np.arange(n) * 100.0
+    coords[7] = 0.0                     # no coordinates: stored at the origin
+    coords[0] = (3.0, 0.0, 0.0)         # 3 A from the origin -> bin 1 if not masked
+    mask = np.ones(n, dtype=bool)
+    mask[7] = False
+    a2t = np.arange(n)
+    unmasked = project_distance("A" * n, "A" * n, coords, a2t, min_seq_sep=0)
+    assert unmasked[0, 7] == 1, "fixture must show the defect without the mask"
+    masked = project_distance("A" * n, "A" * n, coords, a2t, min_seq_sep=0, template_mask=mask)
+    assert masked[7].sum() == 0 and masked[:, 7].sum() == 0, "pairs touching it stay unknown"
+    assert masked[0, 20] == unmasked[0, 20], "other pairs are untouched"
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

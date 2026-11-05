@@ -64,7 +64,8 @@ class PriorBuilder:
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
         max_tpl_cache: int = 1000,
-        # Stage 2 — optional per-pair features derived from template Cα coords.
+        # Stage 2 — optional per-pair features derived from template coords (the
+        # atom of the contact labels: Cβ or Cα, see _get_tpl).
         # When True, build_one returns a richer dict with the corresponding
         # arrays; otherwise the legacy (prior, count) tuple shape is preserved
         # for backward compatibility.
@@ -111,6 +112,7 @@ class PriorBuilder:
 
         self.compute_dist_bins = bool(compute_dist_bins)
         self._needs_coords = self.compute_dist_bins
+        self._tpl_atom: Optional[str] = None
 
         self._id_to_npz = {m["id"]: m["npz"] for m in self.faiss_index.meta}
         self._tpl_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -145,11 +147,26 @@ class PriorBuilder:
             tC = td["contact"].astype(np.uint8).copy()
             entry: Dict[str, np.ndarray] = {"seq": tseq, "contact": tC}
             if self._needs_coords:
-                entry["coords"] = td["coords"].astype(np.float32).copy()
+                # Histograms use the atom the contact labels use, read from the NPZ
+                # itself so the two cannot disagree. No field = a Cα-generation NPZ.
+                atom = str(td["contact_atom"]) if "contact_atom" in td.files else "CA"
+                entry["contact_atom"] = atom
+                entry["coords"] = td["coords_cb" if atom == "CB" else "coords"].astype(np.float32).copy()
+                entry["mask"] = td["mask"].astype(bool).copy()
             td.close()
         except (EOFError, OSError, zipfile.BadZipFile, KeyError, ValueError) as exc:
             log.warning(f"Skipping corrupt template NPZ {tpl_id} ({npz_path}): {exc}")
             return None
+        if self._needs_coords:
+            # Outside the try: mixing data generations is a configuration error,
+            # not a corrupt file to skip.
+            if self._tpl_atom is None:
+                self._tpl_atom = entry["contact_atom"]
+            elif entry["contact_atom"] != self._tpl_atom:
+                raise RuntimeError(
+                    f"Template {tpl_id} uses {entry['contact_atom']} but earlier templates "
+                    f"use {self._tpl_atom}: the index points at mixed data generations."
+                )
         self._tpl_cache[tpl_id] = entry
         return self._tpl_cache[tpl_id]
 
@@ -274,6 +291,7 @@ class PriorBuilder:
                     q2t,
                     min_seq_sep=self.min_seq_sep,
                     symmetrize=True,
+                    template_mask=tpl["mask"],
                 )  # (Lc, Lc) int8 ∈ [0..8]
                 oh = np.eye(N_DIST_BINS, dtype=np.float32)[dbin]  # (Lc, Lc, 9)
                 dist_bins_acc += wk * oh
