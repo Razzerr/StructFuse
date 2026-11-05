@@ -96,6 +96,22 @@ def test_exact_and_near_copies_are_found_and_shares_are_cluster_balanced():
         assert s["partial_smoke_run"] is False
 
 
+def test_skip_list_holds_only_evaluated_chains_meeting_the_rule():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        proc, sp = _fixture(tmp, CHAINS, SPLIT, CLUSTERS)
+        out = tmp / "same.txt"
+        s = _run(tmp, proc, sp, extra=["--out-skip-list", str(out)])
+        assert out.read_text().split() == ["8vvv_A", "9aaa_A", "9bbb_A"], out.read_text()
+        assert s["skip_list"]["chains"] == 3
+        try:
+            _run(tmp, proc, sp, extra=["--out-skip-list", str(out)])
+        except SystemExit as exc:
+            assert "refusing to overwrite" in str(exc)
+        else:
+            raise AssertionError("existing skip list overwritten")
+
+
 def test_cap_keeps_first_sorted_stem_and_casp16_is_exempt():
     assert soa.apply_cap(["2b_A", "2a_B", "2a_A"], {"2a_A": 1, "2a_B": 1, "2b_A": 1}, 1, set()) == {"2a_A"}
     assert soa.apply_cap(["2a_A", "2a_B"], {"2a_A": 1, "2a_B": 1}, 1, {"2a_B"}) == {"2a_A", "2a_B"}

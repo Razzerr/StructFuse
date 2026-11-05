@@ -33,6 +33,7 @@ except ModuleNotFoundError:
     sys.modules["blosum"] = stub
 
 from src.data.components.dataset import PriorBuilder  # noqa: E402
+from src.data.utils.template_selection import SAME_PROTEIN_COVERAGE, SAME_PROTEIN_IDENTITY  # noqa: E402
 from src.data.utils import align  # noqa: E402
 
 L = 30
@@ -48,9 +49,9 @@ def _coords():
     return ca, cb
 
 
-def _write(d: Path, stem: str, generation: str, mask=None) -> Path:
+def _write(d: Path, stem: str, generation: str, mask=None, seq="C" * L) -> Path:
     ca, cb = _coords()
-    kw = dict(seq=np.array("A" * L, dtype=object), coords=ca, contact=np.zeros((L, L), np.uint8),
+    kw = dict(seq=np.array(seq, dtype=object), coords=ca, contact=np.zeros((L, L), np.uint8),
               mask=np.ones(L, np.uint8) if mask is None else mask, L=np.int32(L))
     if generation == "CB":
         kw.update(coords_cb=cb, cb_source=np.ones(L, np.uint8), contact_atom="CB")
@@ -65,18 +66,22 @@ def _builder(paths: dict, hits: list) -> PriorBuilder:
     b.topk, b.use_blosum, b.only_positive_transfer = len(hits), False, False
     b.min_seq_sep, b.min_template_similarity, b.random_retrieval = 0, 0.0, False
     b.compute_dist_bins, b._needs_coords, b._tpl_atom = True, True, None
+    b.same_protein_identity, b.same_protein_coverage = SAME_PROTEIN_IDENTITY, SAME_PROTEIN_COVERAGE
     b._id_to_npz, b._tpl_cache, b._max_tpl_cache = paths, {}, 100
     return b
 
 
 def _bins(builder) -> np.ndarray:
+    return _build(builder)["dist_bins"]  # (9, L, L)
+
+
+def _build(builder) -> dict:
     original = align.needleman_wunsch
     align.needleman_wunsch = lambda *a, **k: ("", "", np.arange(L), np.arange(L))
     try:
-        out = builder.build_one("q_A", "A" * L, 0, L)
+        return builder.build_one("q_A", "A" * L, 0, L)
     finally:
         align.needleman_wunsch = original
-    return out["dist_bins"]  # (9, L, L)
 
 
 def test_cb_generation_histogram_reads_cb():
@@ -101,6 +106,33 @@ def test_template_residue_without_coordinates_is_unknown():
         dist = _bins(_builder({"1abc_A": p}, [("1abc_A", 0.9)]))
         assert dist[0, 2, 20] > 0.99 and dist[1:, 2, 20].sum() < 0.01, dist[:, 2, 20]
         assert dist[0, 20, :].min() > 0.99, "every pair touching the residue stays unknown"
+
+
+def test_same_protein_template_is_refused_and_the_next_one_is_used():
+    """Query is all alanine: the first hit is identical, the second unrelated."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        paths = {"1abc_A": _write(d, "1abc_A", "CB", seq="A" * L), "2xyz_A": _write(d, "2xyz_A", "CB", seq="C" * L)}
+        fetched = []
+
+        def fetch(pid, n, **kw):
+            fetched.append(n)
+            return [("1abc_A", 0.99), ("2xyz_A", 0.8)]
+
+        b = _builder(paths, [])
+        b.topk = 1
+        b.faiss_index = types.SimpleNamespace(topk_precomputed=fetch)
+        out = _build(b)
+        assert out["n_templates_retrieved"] == 1, out["n_templates_retrieved"]
+        assert abs(out["best_tpl_sim"] - 0.8) < 1e-6, "the refused chain must not set the template stats"
+        assert fetched[0] > 1, "must fetch beyond k so a refused template can be replaced"
+
+
+def test_only_same_protein_candidates_leave_no_template():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        out = _build(_builder({"1abc_A": _write(d, "1abc_A", "CB", seq="A" * L)}, [("1abc_A", 0.99)]))
+        assert out["n_templates_retrieved"] == 0 and out["dist_bins"].sum() == 0
 
 
 def test_mixed_generations_stop_the_run():

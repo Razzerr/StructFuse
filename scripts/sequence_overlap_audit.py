@@ -116,14 +116,18 @@ def cluster_balanced(flags: dict, clusters: dict) -> float:
     return float(np.mean([np.mean(v) for v in per.values()])) if per else float("nan")
 
 
+def same_protein(r: dict, identity: float, coverage: float, mode: str = "either") -> bool:
+    if r["exact"]:
+        return True
+    cov_q, cov_t = r["query_cov"], r["train_cov"]
+    if not (r["identity"] >= identity):  # NaN (no candidate) is False
+        return False
+    return (cov_q >= coverage and cov_t >= coverage) if mode == "both" else (cov_q >= coverage or cov_t >= coverage)
+
+
 def summarize(rows: list, clusters: dict, identity: float, coverage: float) -> dict:
     def same(r, mode):
-        if r["exact"]:
-            return True
-        cov_q, cov_t = r["query_cov"], r["train_cov"]
-        if not (r["identity"] >= identity):  # NaN (no candidate) is False
-            return False
-        return (cov_q >= coverage and cov_t >= coverage) if mode == "both" else (cov_q >= coverage or cov_t >= coverage)
+        return same_protein(r, identity, coverage, mode)
 
     out = {"chains": len(rows), "clusters": len({clusters[r["stem"]] for r in rows})}
     tests = {"exact": lambda r: r["exact"], "same_protein_both_cov": lambda r: same(r, "both"),
@@ -152,7 +156,14 @@ def main() -> int:
     ap.add_argument("--max-posting", type=int, default=2000)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--max-eval-chains", type=int, default=0, help="smoke runs only; 0 = all")
+    ap.add_argument("--out-skip-list", type=Path, default=None,
+                    help="write the val/test chains meeting the rule ('either' coverage), one stem per "
+                         "line: they leave evaluation via data.skip_ids_files (decided 2026-11-05)")
     args = ap.parse_args()
+    if args.out_skip_list is not None and args.out_skip_list.exists():
+        raise SystemExit(f"{args.out_skip_list} exists; refusing to overwrite")
+    if args.out_skip_list is not None and args.max_eval_chains:
+        raise SystemExit("--out-skip-list needs the full population, not a smoke run")
 
     split = args.split_dir
     lengths = json.loads((args.processed_dir / "npz_lengths.json").read_text())
@@ -254,6 +265,10 @@ def main() -> int:
                                                  "clusters": len({clusters[s] for s in touched})},
         "partial_smoke_run": bool(args.max_eval_chains),
     }
+    if args.out_skip_list is not None:
+        listed = sorted(r["stem"] for r in rows if same_protein(r, args.identity, args.coverage))
+        args.out_skip_list.write_text("".join(f"{s}\n" for s in listed))
+        summary["skip_list"] = {"path": str(args.out_skip_list), "chains": len(listed)}
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary["populations"], indent=2))
     print(json.dumps(summary["train_chains_with_an_exact_eval_copy"]))

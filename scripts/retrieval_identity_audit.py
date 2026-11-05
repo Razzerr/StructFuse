@@ -39,6 +39,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.data.utils.template_selection import (  # noqa: E402
+    SAME_PROTEIN_COVERAGE,
+    SAME_PROTEIN_IDENTITY,
+    select_templates,
+)
+
 PAPER_SECTION_DIR = ROOT / "paper" / "retrieval_identity"
 DEFAULT_OUTDIR = PAPER_SECTION_DIR / "artifacts"
 
@@ -226,6 +232,12 @@ def center_crop_bounds(length: int, crop_size: int | None) -> tuple[int, int]:
         return 0, length
     start = max(0, (length - crop_size) // 2)
     return start, start + crop_size
+
+
+def query_to_template(query_seq: str, template_seq: str) -> np.ndarray:
+    from src.data.utils.align import needleman_wunsch
+
+    return needleman_wunsch(query_seq, template_seq)[2]
 
 
 def alignment_identity(query_seq: str, template_seq: str) -> dict[str, float | int]:
@@ -571,6 +583,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-size", type=int, default=384)
     parser.add_argument("--min-len", type=int, default=20)
     parser.add_argument("--min-template-similarity", type=float, default=0.0)
+    parser.add_argument(
+        "--no-same-protein-rule",
+        action="store_true",
+        help="Replay retrieval without the same-protein rule of template_selection "
+        "(runs from before that rule existed); production applies it.",
+    )
     parser.add_argument("--max-samples", type=int, default=0, help="0 means full split")
     parser.add_argument("--n-bootstrap", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
@@ -705,11 +723,17 @@ def main() -> None:
         full_seq = load_seq(query_npz)
         crop_start, crop_end = center_crop_bounds(len(full_seq), args.crop_size)
         crop_seq = full_seq[crop_start:crop_end]
-        hits = faiss_index.topk_precomputed(
-            pid,
-            args.topk,
-            min_similarity=args.min_template_similarity,
+        kept, n_same_protein = select_templates(
+            fetch=lambda n: faiss_index.topk_precomputed(
+                pid, n, min_similarity=args.min_template_similarity
+            ),
+            load_seq=lambda tpl_id: load_seq(id_to_npz[tpl_id]),
+            query_seq=crop_seq,
+            k=args.topk,
+            align=query_to_template,
+            identity=None if args.no_same_protein_rule else SAME_PROTEIN_IDENTITY,
         )
+        hits = [(tpl_id, score) for tpl_id, score, _ in kept]
 
         ref = reference_rows.get(pid, {})
         ctrl = control_rows.get(pid, {})
@@ -733,6 +757,7 @@ def main() -> None:
             "crop_len": len(crop_seq),
             "topk": args.topk,
             "n_hits": len(hits),
+            "n_same_protein_refused": n_same_protein,
             "best_template_id": "",
             "best_template_protein_id": "",
             "best_template_cluster_id": "",
@@ -873,6 +898,10 @@ def main() -> None:
         "notes": [
             "Retrieval is replayed with filter_holdout=False, matching validation/test inference.",
             "Same-protein and same-cluster filtering remain active inside FaissIndex.topk_precomputed.",
+            "Same-sequence rule: "
+            + ("OFF (--no-same-protein-rule)." if args.no_same_protein_rule else
+               f"ON, identity >= {SAME_PROTEIN_IDENTITY} over aligned pairs and coverage >= "
+               f"{SAME_PROTEIN_COVERAGE} of either chain (template_selection), on the crop."),
             "Retrieval score is FAISS inner product/cosine similarity between normalized mean-pooled ESM2 embeddings.",
             "Default sequence identity is computed between the center-cropped query sequence and the best full-length template sequence, matching the contact-evaluation crop.",
             "seq_identity_aligned uses matches divided by aligned residue pairs; seq_identity_query_len uses matches divided by query length.",

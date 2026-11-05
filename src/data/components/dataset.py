@@ -10,6 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
 
+from src.data.utils.template_selection import (
+    SAME_PROTEIN_COVERAGE,
+    SAME_PROTEIN_IDENTITY,
+    select_templates,
+)
 from src.utils import pylogger
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
@@ -80,6 +85,10 @@ class PriorBuilder:
         # Stable seed for the random_retrieval ablation — forwarded to FaissIndex,
         # which seeds each query's RNG by stable_hash(random_seed, query_id).
         random_seed: int = 0,
+        # Same-protein rule (see template_selection). None turns it off; every
+        # construction site gets it by default, so no path can silently omit it.
+        same_protein_identity: Optional[float] = SAME_PROTEIN_IDENTITY,
+        same_protein_coverage: float = SAME_PROTEIN_COVERAGE,
     ):
         from src.models.utils.faiss import FaissIndex
 
@@ -109,6 +118,8 @@ class PriorBuilder:
         self.min_seq_sep = int(min_seq_sep)
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
+        self.same_protein_identity = same_protein_identity
+        self.same_protein_coverage = float(same_protein_coverage)
 
         self.compute_dist_bins = bool(compute_dist_bins)
         self._needs_coords = self.compute_dist_bins
@@ -221,12 +232,20 @@ class PriorBuilder:
         if self.topk <= 0:
             return _empty_return()
 
-        hits = self.faiss_index.topk_precomputed(
-            pid,
-            self.topk,
-            min_similarity=self.min_template_similarity,
-            random_retrieval=self.random_retrieval,
-            filter_holdout=filter_holdout,
+        hits, _ = select_templates(
+            fetch=lambda n: self.faiss_index.topk_precomputed(
+                pid,
+                n,
+                min_similarity=self.min_template_similarity,
+                random_retrieval=self.random_retrieval,
+                filter_holdout=filter_holdout,
+            ),
+            load_seq=lambda tpl_id: (self._get_tpl(tpl_id) or {}).get("seq"),
+            query_seq=crop_seq,
+            k=self.topk,
+            align=lambda q, t: needleman_wunsch(q, t)[2],
+            identity=self.same_protein_identity,
+            coverage=self.same_protein_coverage,
         )
         if not hits:
             return _empty_return()
@@ -244,14 +263,12 @@ class PriorBuilder:
         if rich and self.compute_dist_bins:
             dist_bins_acc = np.zeros((Lc, Lc, N_DIST_BINS), dtype=np.float32)
 
-        for (tpl_id, _sim), wk in zip(hits, w):
+        for (tpl_id, _sim, q2t), wk in zip(hits, w):
             tpl = self._get_tpl(tpl_id)
             if tpl is None:
                 continue  # corrupt NPZ — logged in _get_tpl, skip this template
-            # Compute NW once; feed into every projector to avoid recomputing
-            # the O(Lq·Lt) alignment for each feature type.
-            _, _, q2t, _ = needleman_wunsch(crop_seq, tpl["seq"])
-
+            # q2t comes from the selection above, so the O(Lq·Lt) alignment is
+            # computed once per template and fed into every projector.
             Pk = project_prior(
                 crop_seq,
                 tpl["seq"],

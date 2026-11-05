@@ -248,7 +248,8 @@ run_cb_low_list() {
 run_cb_low_list
 
 # RCSB can place identical sequences in different clusters, so a cluster-disjoint
-# split need not be sequence-disjoint. Read-only; decides whether the split changes.
+# split need not be sequence-disjoint. Writes the evaluation skip list of chains that
+# are the same protein as a training chain (decided 2026-11-05).
 run_seq_overlap() {
     local key="seq-overlap"
     if [[ "${MODE}" != "only" || "${ONLY}" != "${key}" ]]; then
@@ -257,6 +258,7 @@ run_seq_overlap() {
     local job_name="paper_seq_overlap"
     local command="python scripts/sequence_overlap_audit.py --processed-dir ${CB_DIR} \
 --split-dir data/output_splits_2026cb --out-dir ${TEMP_DIR}/seq_overlap --workers 16 \
+--out-skip-list data/output_splits_2026cb/same_protein_as_train_ids.txt \
 --skip-ids-files data/corrupt_ids.txt data/output_splits_2026cb/no_cluster_ids.txt \
 data/output_splits_2026cb/low_cb_ids.txt 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "04:00:00" 16 "128G" >/dev/null

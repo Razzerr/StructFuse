@@ -82,10 +82,13 @@ def _run_main(tmp, idx, ref, ctl, control_arg=None):
             "--control-per-sample-tsv", str(ctl) if control_arg is None else control_arg]
     old_argv, old_index, old_ident = sys.argv, ria.LightweightFaissIndex, ria.alignment_identity
     sys.argv, ria.LightweightFaissIndex, ria.alignment_identity = argv, _FakeIndex, _fake_identity
+    old_align = ria.query_to_template
+    ria.query_to_template = lambda q, t: np.full(len(q), -1)  # nothing aligned: rule cannot refuse
     try:
         ria.main()
     finally:
         sys.argv, ria.LightweightFaissIndex, ria.alignment_identity = old_argv, old_index, old_ident
+        ria.query_to_template = old_align
     return out
 
 
