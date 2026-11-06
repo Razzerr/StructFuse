@@ -1,0 +1,19 @@
+# @package _global_
+# The selected stack with a larger pair head: twice the blocks, twice the query heads,
+# four times the KV heads. All at once on purpose: if this much capacity does not move
+# validation, no part of it is worth separating. Checkpointing because memory grows.
+
+task_name: "ablation_trufor_head_capacity"
+tags: ["ablation", "head-capacity", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  depth: 16
+  head_num_heads: 8
+  head_num_kv_heads: 4
+  use_checkpoint: true
+
+data:
+  compute_dist_bins: true
