@@ -27,6 +27,7 @@ from src.models.utils.metrics import (
     per_chain_range_counts,
 )
 from src.models.utils.visualize import (
+    index_with_most_contacts,
     plot_contact_map_comparison,
     plot_precision_recall_curve,
 )
@@ -956,9 +957,9 @@ class ContactLitModule(LightningModule):
             log.info(f"Per-sample metrics saved to {output_path}")
 
     def _log_visualization(self, viz_cache: Dict):
-        """Log a contact map visualization for the first sample in batch"""
-        # Extract relevant data from cache
-        idx = 0  # First sample
+        """Log a contact map visualization for the batch's chain with the most contacts."""
+        # Validation is pinned and sorted, so this is the same chain every epoch.
+        idx = index_with_most_contacts(viz_cache["contact"], viz_cache["valid_mask"])
 
         seq = viz_cache["seq"][idx]
         crop_bounds = viz_cache["crop_bounds"][idx]
