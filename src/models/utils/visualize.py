@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Optional
 
 
+def index_with_most_contacts(contact, valid_mask) -> int:
+    """Batch index of the chain with the most contacts in its scored pairs; first on a tie."""
+    return int((contact * valid_mask).flatten(1).sum(dim=1).argmax().item())
+
+
 def plot_contact_map_comparison(
     pred_prob: torch.Tensor,
     target: torch.Tensor,
