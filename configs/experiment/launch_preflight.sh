@@ -15,7 +15,8 @@
 #   ./configs/experiment/launch_preflight.sh --only seq-overlap     # val/test chains that are the same protein as a train chain
 #   ./configs/experiment/launch_preflight.sh --only cb-data         # 2026cb: missing embeddings -> indexes -> integrity gate
 #   ./configs/experiment/launch_preflight.sh --only verify-clusters # chain cluster labels re-derived independently of the resolver
-# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap, cb-data and verify-clusters are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only pytest          # whole tests/phase0 with the real parasail, gemmi and torch
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap, cb-data, verify-clusters and pytest are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -39,7 +40,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,18p' "$0"
+            sed -n '2,19p' "$0"
             exit 0
             ;;
         *)
@@ -50,7 +51,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest}." >&2
     exit 2
 fi
 
@@ -90,7 +91,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -311,6 +312,16 @@ run_verify_clusters() {
     submit_job "${command}" "${job_name}" "03:00:00" 32 "128G" >/dev/null
 }
 run_verify_clusters
+
+run_pytest() {
+    if [[ "${MODE}" != "only" || "${ONLY}" != "pytest" ]]; then
+        return
+    fi
+    local job_name="paper_pytest_phase0"
+    local command="python -m pytest tests/phase0 -q 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "01:00:00" 8 "64G" >/dev/null
+}
+run_pytest
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"
