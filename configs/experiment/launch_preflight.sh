@@ -329,21 +329,21 @@ run_pytest() {
 }
 run_pytest
 
-# Restartable: finished chains are skipped. max_pair_elems is half the 650M value
-# because 3B holds 2.2x the attention maps per pair (36 layers x 40 heads).
+# Restartable: finished chains are skipped. max_pair_elems is a quarter of the 650M
+# value: 2,000,000 ran out of 93 GiB on the longest chains (job 9485667).
 run_esm3b_cache() {
     if [[ "${MODE}" != "only" || "${ONLY}" != "esm3b-cache" ]]; then
         return
     fi
     local job_name="paper_esm3b_cache"
     local splits="data/output_splits_2026cb"
-    local command="python scripts/precompute_esm2_embeddings.py --data_root ${CB_DIR} \
+    local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/precompute_esm2_embeddings.py --data_root ${CB_DIR} \
 --output_dir data/precomputed/esm_t36_3B_2026cb --model_name esm2_t36_3B_UR50D \
---batch_size 4 --max_pair_elems 2000000 \
+--batch_size 4 --max_pair_elems 1000000 \
 --only_entries_files ${splits}/all_train_ids.txt ${splits}/val_holdout_ids.txt ${splits}/test_ids.txt \
 --skip_ids_files ${splits}/no_cluster_ids.txt ${splits}/low_cb_ids.txt ${splits}/same_protein_as_train_ids.txt \
 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
-    submit_job "${command}" "${job_name}" "72:00:00" 16 "128G" >/dev/null
+    submit_job "${command}" "${job_name}" "72:00:00" 16 "256G" >/dev/null
 }
 run_esm3b_cache
 
