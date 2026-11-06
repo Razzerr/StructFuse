@@ -13,12 +13,15 @@ from torch.utils.data import Dataset, Sampler
 from src.data.utils.template_selection import (
     SAME_PROTEIN_COVERAGE,
     SAME_PROTEIN_IDENTITY,
+    alignment_weights,
     select_templates,
 )
 from src.utils import pylogger
 
 # Values of `PriorBuilder(alignment=...)`; see src/data/utils/align.py.
 ALIGNMENTS = ("local", "global_legacy")
+# Values of `PriorBuilder(template_weighting=...)`.
+TEMPLATE_WEIGHTINGS = ("alignment", "cosine")
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
@@ -95,9 +98,17 @@ class PriorBuilder:
         # Alignment behind the template features. The same-protein rule always uses
         # the local one, so "global_legacy" changes the features and nothing else.
         alignment: str = "local",
+        # How the K templates are averaged. Always from the local alignment of the
+        # rule, so `alignment` and this knob can be measured separately.
+        template_weighting: str = "alignment",
     ):
         if alignment not in ALIGNMENTS:
             raise ValueError(f"alignment must be one of {ALIGNMENTS}, got {alignment!r}")
+        if template_weighting not in TEMPLATE_WEIGHTINGS:
+            raise ValueError(
+                f"template_weighting must be one of {TEMPLATE_WEIGHTINGS}, "
+                f"got {template_weighting!r}"
+            )
 
         from src.models.utils.faiss import FaissIndex
 
@@ -130,6 +141,7 @@ class PriorBuilder:
         self.same_protein_identity = same_protein_identity
         self.same_protein_coverage = float(same_protein_coverage)
         self.alignment = alignment
+        self.template_weighting = template_weighting
 
         self.compute_dist_bins = bool(compute_dist_bins)
         self._needs_coords = self.compute_dist_bins
@@ -261,10 +273,12 @@ class PriorBuilder:
         if not hits:
             return _empty_return()
 
-        # Softmax weights from cosine similarities
         sims = np.array([h[1] for h in hits], dtype=np.float32)
-        w = np.exp(sims - sims.max())
-        w /= w.sum() + 1e-8
+        if self.template_weighting == "alignment":
+            w = alignment_weights(crop_seq, [(self._get_tpl(h[0])["seq"], h[2]) for h in hits])
+        else:
+            w = np.exp(sims - sims.max())
+            w /= w.sum() + 1e-8
 
         prior_acc = np.zeros((Lc, Lc), dtype=np.float32)
         count_acc = np.zeros((Lc, Lc), dtype=np.float32)

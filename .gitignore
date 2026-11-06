@@ -165,3 +165,4 @@ models/
 .wandb/
 .vscode-server/
 notebooks/
+/.code_snapshots/

@@ -29,10 +29,13 @@ EXPERIMENTS = [
     "ablation/trufor_no_dist_no_triangle",
     "ablation/trufor_bce_only_with_dist",
     "ablation/trufor_global_alignment",
+    "ablation/trufor_cosine_weights",
     "frontier_8M",
     "frontier",
     "trufor_fusion_with_dist_650M",
     "trufor_no_templates_650M",
+    "trufor_fusion_with_dist_3B",
+    "trufor_no_templates_3B",
     "baseline/esm2_650m_trained",
 ]
 
@@ -91,6 +94,15 @@ def test_data_paths_agree_between_entrypoints():
                 f"{exp}: data.{key} differs — train={tr.data.get(key)!r} "
                 f"eval={ev.data.get(key)!r}"
             )
+
+
+def test_3b_stack_differs_from_650m_only_in_the_backbone_and_its_cache():
+    """Retrieval stays on the 650M index, and the 3B control is matched like the 650M one."""
+    expected = {"model.esm_model", "model.d_esm", "data.esm_embeddings_dir"}
+    assert _config_diff("trufor_fusion_with_dist_650M", "trufor_fusion_with_dist_3B") == expected
+    assert _config_diff("trufor_no_templates_650M", "trufor_no_templates_3B") == expected
+    assert _config_diff("trufor_fusion_with_dist_3B", "trufor_no_templates_3B") == _config_diff(
+        "trufor_fusion_with_dist_650M", "trufor_no_templates_650M")
 
 
 def _run_all():
@@ -179,6 +191,7 @@ def test_trufor_panel_cells_differ_from_their_reference_only_as_intended():
         "ablation/trufor_bce_only_with_dist": {"model.use_tversky", "model.tversky_weight"},
         "ablation/trufor_no_dist": {"model.use_tpl_dist_bins", "data.compute_dist_bins"},
         "ablation/trufor_global_alignment": {"data.alignment"},
+        "ablation/trufor_cosine_weights": {"data.template_weighting"},
     }
     for cell, keys in expected.items():
         got = _config_diff(ref, cell)

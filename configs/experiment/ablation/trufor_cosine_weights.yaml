@@ -1,0 +1,15 @@
+# @package _global_
+# The selected stack with the templates averaged by retrieval score, as before
+# 2026-11-06, on the same data, to measure what weighting by alignment did.
+
+task_name: "ablation_trufor_cosine_weights"
+tags: ["ablation", "template-weights", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+
+data:
+  compute_dist_bins: true
+  template_weighting: "cosine"

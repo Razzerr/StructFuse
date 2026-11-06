@@ -1,0 +1,21 @@
+# @package _global_
+# ESM-2 3B candidate. Retrieval stays on the 650M index: the index alone decides the
+# retrieval space, so only query chains need a 3B cache.
+
+defaults:
+  - override /model: esm2_t36_3B
+
+task_name: "trufor_fusion_with_dist_3B"
+tags: ["candidate", "fusion-parity", "trufor", "tpl-dist", "3B"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  use_checkpoint: true
+
+data:
+  batch_size: 8
+  index_dir: ${paths.index_t33}
+  esm_embeddings_dir: ${paths.esm_t36}
+  compute_dist_bins: true

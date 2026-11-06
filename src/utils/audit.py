@@ -69,6 +69,10 @@ def _plain_list(value: Any) -> list[Any]:
 def _git_identity() -> tuple[Optional[str], Optional[bool]]:
     """Resolve the launched commit and whether its checkout had local changes."""
     commit = os.environ.get("STRUCTFUSE_GIT_COMMIT")
+    # A code snapshot is an archive of one commit. Asking git would describe the
+    # live checkout it sits inside, not the code that ran.
+    if commit is not None and os.environ.get("STRUCTFUSE_CODE_SNAPSHOT"):
+        return commit, False
     try:
         if commit is None:
             commit = subprocess.check_output(
@@ -260,6 +264,7 @@ def dump_audit_manifest(
             "topk": _safe_select(cfg, "data.topk"),
             "random_retrieval": _safe_select(cfg, "data.random_retrieval"),
             "alignment": _safe_select(cfg, "data.alignment"),
+            "template_weighting": _safe_select(cfg, "data.template_weighting"),
             "min_template_similarity": _safe_select(cfg, "data.min_template_similarity"),
             "holdout_id_files": holdout_files,
             "esm_embeddings_dir": _safe_select(cfg, "data.esm_embeddings_dir"),

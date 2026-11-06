@@ -22,9 +22,36 @@ fi
 LOGS_DIR="${PROJECT_DIR}/logs"
 TEMP_DIR="${PROJECT_DIR}/.temp"
 LAUNCH_MANIFEST_DIR="${TEMP_DIR}/launch_manifests"
+# Where a job runs and which commit it records; see use_code_snapshot.
+JOB_DIR="${PROJECT_DIR}"
+JOB_COMMIT=""
 
 git_commit() {
     git -C "${SOURCE_ROOT}" rev-parse HEAD
+}
+
+# Run the jobs of this launch from an immutable copy of one commit, sharing data,
+# logs and caches through symlinks. A queued or running job imports code from
+# disk, so without this the live checkout could not move to another branch until
+# every job from the previous one had finished.
+use_code_snapshot() {
+    local ref="$1"
+    JOB_COMMIT="$(git -C "${SOURCE_ROOT}" rev-parse --verify "${ref}^{commit}")"
+    JOB_DIR="${PROJECT_DIR}/.code_snapshots/${JOB_COMMIT}"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "[DRY-RUN] code snapshot of ${ref}: ${JOB_DIR}" >&2
+        return
+    fi
+    if [[ ! -d "${JOB_DIR}" ]]; then
+        local tmp="${JOB_DIR}.tmp.$$"
+        mkdir -p "${tmp}"
+        git -C "${SOURCE_ROOT}" archive "${JOB_COMMIT}" | tar -x -C "${tmp}"
+        local name
+        for name in data logs models .temp .wandb; do
+            ln -s "${PROJECT_DIR}/${name}" "${tmp}/${name}"
+        done
+        mv "${tmp}" "${JOB_DIR}"
+    fi
 }
 
 worktree_is_dirty() {
@@ -78,7 +105,7 @@ submit_job() {
     local memory="$5"
     local dependency="${6:-}"
     local commit
-    commit="$(git_commit)"
+    commit="${JOB_COMMIT:-$(git_commit)}"
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         echo "[DRY-RUN] job=${job_name} time=${time_limit} cpus=${cpus} mem=${memory} dependency=${dependency:-none} exclude=${SLURM_EXCLUDE_NODES:-none}" >&2
@@ -116,7 +143,7 @@ submit_job() {
             --wrap="$(cat <<EOF
 #!/bin/bash
 set -eo pipefail
-cd "${PROJECT_DIR}"
+cd "${JOB_DIR}"
 
 eval "\$(${MAMBA_BIN} shell hook --shell bash)"
 micromamba activate "${MAMBA_ENV}"
@@ -129,8 +156,9 @@ export WANDB_DIR="${PROJECT_DIR}/logs"
 export WANDB_CONFIG_DIR="${PROJECT_DIR}/.wandb"
 export WANDB_CACHE_DIR="${PROJECT_DIR}/.wandb/cache"
 export NETRC="${PROJECT_DIR}/.wandb/.netrc"
-export PROJECT_ROOT="${PROJECT_DIR}"
+export PROJECT_ROOT="${JOB_DIR}"
 export STRUCTFUSE_GIT_COMMIT="${commit}"
+export STRUCTFUSE_CODE_SNAPSHOT="${JOB_COMMIT}"
 export PYTHONUNBUFFERED=1
 
 echo "StructFuse commit: ${commit}"

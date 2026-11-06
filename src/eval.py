@@ -93,13 +93,15 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         val_metrics.update({
             k: v for k, v in trainer.callback_metrics.items() if str(k).startswith("val/")
         })
-        log.info("Testing the in-memory validated checkpoint!")
-        trainer.test(
-            model=model,
-            datamodule=datamodule,
-            ckpt_path=None,
-            weights_only=False,
-        )
+        # run_test=false: choosing between configurations must not look at the test set.
+        if cfg.get("run_test", True):
+            log.info("Testing the in-memory validated checkpoint!")
+            trainer.test(
+                model=model,
+                datamodule=datamodule,
+                ckpt_path=None,
+                weights_only=False,
+            )
     else:
         val_metrics = {}
         log.info("Starting testing without validation calibration!")

@@ -1,0 +1,24 @@
+# @package _global_
+# ESM-2 3B candidate. Retrieval stays on the 650M index: the index alone decides the
+# retrieval space, so only query chains need a 3B cache.
+
+defaults:
+  - override /model: esm2_t36_3B
+
+task_name: "trufor_no_templates_3B"
+tags: ["control", "no-templates", "trufor", "tpl-dist", "3B", "kill-switch"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true    # keep encoder input width at 2 + 9, zeros in forward
+  use_checkpoint: true       # mirror trufor_fusion_with_dist_3B.yaml
+  topk: 0                    # passive, kept consistent with data.topk for the audit log
+  use_template_features: false
+
+data:
+  batch_size: 8
+  index_dir: ${paths.index_t33}          # unused at topk=0; pinned for audit symmetry
+  esm_embeddings_dir: ${paths.esm_t36}
+  topk: 0                    # real switch — PriorBuilder skips FAISS entirely
+  compute_dist_bins: false   # no templates → no distance features to compute

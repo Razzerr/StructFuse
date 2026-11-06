@@ -8,8 +8,10 @@
 #   ./configs/experiment/launch_paper_8M.sh --final-eval-controls    # their bs=1 pass, those 2 only
 #   ./configs/experiment/launch_paper_8M.sh --trufor-panel           # 3 jobs, TruFor 2x2 + loss cells
 #   ./configs/experiment/launch_paper_8M.sh --final-eval-trufor-panel # their bs=1 pass, those 3 only
-#   ./configs/experiment/launch_paper_8M.sh --aligner-gate           # 3 jobs, run first: local vs old aligner + control
-#   ./configs/experiment/launch_paper_8M.sh --final-eval-aligner-gate # their bs=1 pass, those 3 only
+#   ./configs/experiment/launch_paper_8M.sh --aligner-gate           # 4 jobs, run first, validation only
+#   ./configs/experiment/launch_paper_8M.sh --select-eval-aligner-gate # their bs=1 validation pass, no test
+#   ./configs/experiment/launch_paper_8M.sh --select-train <experiment> <task> --code <ref>  # one candidate, no test
+#   ./configs/experiment/launch_paper_8M.sh --select-eval <experiment> <task> --code <ref>   # its bs=1 validation pass
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -25,16 +27,33 @@ DRY_RUN=false
 MIN_CKPT_DATE="${MIN_CKPT_DATE:-2026-11-05}"
 SKIP_FRONTIER=false
 MODE=""
+CODE_REF=""
+SELECT_EXPERIMENT=""
+SELECT_TASK=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --aligner-gate|--final-eval-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
+        --aligner-gate|--select-eval-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
             fi
             MODE="${1#--}"
             shift
+            ;;
+        --select-train|--select-eval)
+            if [[ -n "${MODE}" || $# -lt 3 ]]; then
+                echo "$1 takes <experiment> <task> and excludes other modes." >&2
+                exit 2
+            fi
+            MODE="${1#--}"
+            SELECT_EXPERIMENT="$2"
+            SELECT_TASK="$3"
+            shift 3
+            ;;
+        --code)
+            CODE_REF="$2"
+            shift 2
             ;;
         --dry-run)
             DRY_RUN=true
@@ -49,7 +68,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,15p' "$0"
+            sed -n '2,17p' "$0"
             exit 0
             ;;
         *)
@@ -68,12 +87,23 @@ source "$(dirname "$0")/_launch_common.sh"
 prepare_output_dirs
 require_clean_worktree
 
+# Choosing between configurations: from a snapshot, and never on the test set.
+case "${MODE}" in
+    aligner-gate|select-eval-aligner-gate|select-train|select-eval)
+        CODE_REF="${CODE_REF:-HEAD}"
+        ;;
+esac
+if [[ -n "${CODE_REF}" ]]; then
+    use_code_snapshot "${CODE_REF}"
+fi
+
 submit_training() {
     local experiment="$1"
     local job_name="$2"
     local time_limit="${3:-24:00:00}"
     local extra_args="${4:-}"
-    local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py experiment=${experiment} test=true task_name=${job_name} ${extra_args} 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    local run_test="${5:-true}"
+    local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py experiment=${experiment} test=${run_test} task_name=${job_name} ${extra_args} 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "${time_limit}" 16 "256G" >/dev/null
 }
 
@@ -86,6 +116,8 @@ submit_training() {
 submit_final_eval() {
     local experiment="$1"
     local train_task="$2"
+    local job_suffix="${3:-bs1}"
+    local extra_args="${4:-}"
     # logs/ still holds runs from the 2025 data generation, and "newest .ckpt"
     # would silently pick one of those for any cell not yet re-run. Refuse
     # anything older than the rebuild.
@@ -110,10 +142,10 @@ submit_final_eval() {
         fi
         return
     fi
-    local job_name="${train_task}_bs1"
+    local job_name="${train_task}_${job_suffix}"
     local command="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/eval.py \
 experiment=${experiment} task_name=${job_name} ckpt_path=${ckpt} \
-validate_before_test=true data.eval_batch_size=1 logger=wandb 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+validate_before_test=true data.eval_batch_size=1 ${extra_args} logger=wandb 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "04:00:00" 16 "256G" >/dev/null
 }
 
@@ -147,11 +179,16 @@ submit_final_eval_controls() {
     submit_final_eval "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
 }
 
-# bs=1 pass for the three --aligner-gate cells only.
-submit_final_eval_aligner_gate() {
-    submit_final_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
-    submit_final_eval "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
-    submit_final_eval "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+# bs=1 validation pass of one candidate; the test set stays unread.
+submit_select_eval() {
+    submit_final_eval "$1" "$2" "valbs1" "run_test=false"
+}
+
+submit_select_eval_aligner_gate() {
+    submit_select_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
+    submit_select_eval "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
+    submit_select_eval "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+    submit_select_eval "ablation/trufor_cosine_weights"   "paper_8m_trufor_cosine_weights"
 }
 
 # bs=1 pass for the three --trufor-panel cells only (same reasoning as above).
@@ -204,13 +241,14 @@ submit_gate() {
 # a retrieval kill-switch and the (-dist,+triangle) cell, both on TruFor. The
 # grouped panel stays as its own mechanism analysis and is NOT an ablation of
 # TruFor; nothing here re-runs it.
-# Measures the aligner change of 2026-11-06 on one data build. The full model and
-# its no-template control keep their panel task names, so only the old-aligner
-# cell is extra; the control takes no templates, so it serves both aligners.
+# Measures the aligner and the template weights of 2026-11-06 on one data build.
+# The full model and its no-template control keep their panel task names, so only
+# the other two cells are extra; the control takes no templates, so it serves all.
 submit_aligner_gate() {
-    submit_training "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
-    submit_training "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
-    submit_training "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+    submit_training "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4" "24:00:00" "" false
+    submit_training "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates" "24:00:00" "" false
+    submit_training "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment" "24:00:00" "" false
+    submit_training "ablation/trufor_cosine_weights"   "paper_8m_trufor_cosine_weights" "24:00:00" "" false
 }
 
 submit_trufor_controls() {
@@ -254,8 +292,14 @@ case "${MODE}" in
     aligner-gate)
         submit_aligner_gate
         ;;
-    final-eval-aligner-gate)
-        submit_final_eval_aligner_gate
+    select-eval-aligner-gate)
+        submit_select_eval_aligner_gate
+        ;;
+    select-train)
+        submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "48:00:00" "" false
+        ;;
+    select-eval)
+        submit_select_eval "${SELECT_EXPERIMENT}" "${SELECT_TASK}"
         ;;
     gate)
         submit_gate

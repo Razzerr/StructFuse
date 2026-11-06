@@ -16,7 +16,8 @@
 #   ./configs/experiment/launch_preflight.sh --only cb-data         # 2026cb: missing embeddings -> indexes -> integrity gate
 #   ./configs/experiment/launch_preflight.sh --only verify-clusters # chain cluster labels re-derived independently of the resolver
 #   ./configs/experiment/launch_preflight.sh --only pytest          # whole tests/phase0 with the real parasail, gemmi and torch
-# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap, cb-data, verify-clusters and pytest are opt-in and never part of --all.
+#   ./configs/experiment/launch_preflight.sh --only esm3b-cache     # ESM-2 3B embeddings of the train/val/test chains
+# cost*, export-maps*, esmfold*, casefix-audit, cb-rebuild, cb-low-list, seq-overlap, cb-data, verify-clusters, pytest and esm3b-cache are opt-in and never part of --all.
 
 set -euo pipefail
 
@@ -40,7 +41,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,19p' "$0"
+            sed -n '2,20p' "$0"
             exit 0
             ;;
         *)
@@ -51,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODE}" ]]; then
-    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest}." >&2
+    echo "Choose --all or --only {verify|coverage|coverage8m|ceiling|correlation|cost-smoke|cost|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest|esm3b-cache}." >&2
     exit 2
 fi
 
@@ -91,7 +92,7 @@ run_selected() {
 
 if [[ "${MODE}" == "only" ]]; then
     case "${ONLY}" in
-        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest) ;;
+        verify|coverage|coverage8m|ceiling|correlation|cost|cost-smoke|export-maps|export-maps-notpl|esmfold-casp16-smoke|esmfold-casp16|casefix-audit|cb-rebuild|cb-low-list|seq-overlap|cb-data|verify-clusters|pytest|esm3b-cache) ;;
         *)
             echo "Invalid --only value: ${ONLY}" >&2
             exit 2
@@ -319,12 +320,32 @@ run_pytest() {
     fi
     local job_name="paper_pytest_phase0"
     # paper/ is gitignored and not on the server, so its two generator tests run locally.
+    # One more test reads its fixture from paper/ too; it passes locally.
     local command="python -m pytest tests/phase0 -q --color=no \
 --ignore=tests/phase0/test_paper_figure_generators.py \
---ignore=tests/phase0/test_qualitative_figure.py 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+--ignore=tests/phase0/test_qualitative_figure.py \
+--deselect=tests/phase0/test_cb_contacts.py::test_virtual_cb_reproduces_real_cb_on_a_full_atom_model 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "01:00:00" 8 "64G" >/dev/null
 }
 run_pytest
+
+# Restartable: finished chains are skipped. max_pair_elems is half the 650M value
+# because 3B holds 2.2x the attention maps per pair (36 layers x 40 heads).
+run_esm3b_cache() {
+    if [[ "${MODE}" != "only" || "${ONLY}" != "esm3b-cache" ]]; then
+        return
+    fi
+    local job_name="paper_esm3b_cache"
+    local splits="data/output_splits_2026cb"
+    local command="python scripts/precompute_esm2_embeddings.py --data_root ${CB_DIR} \
+--output_dir data/precomputed/esm_t36_3B_2026cb --model_name esm2_t36_3B_UR50D \
+--batch_size 4 --max_pair_elems 2000000 \
+--only_entries_files ${splits}/all_train_ids.txt ${splits}/val_holdout_ids.txt ${splits}/test_ids.txt \
+--skip_ids_files ${splits}/no_cluster_ids.txt ${splits}/low_cb_ids.txt ${splits}/same_protein_as_train_ids.txt \
+2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    submit_job "${command}" "${job_name}" "72:00:00" 16 "128G" >/dev/null
+}
+run_esm3b_cache
 
 run_selected "ceiling" "scripts/ceiling.py" "paper_ceiling_t33" "02:00:00"
 run_selected "correlation" "scripts/feature_correlation.py" "paper_feature_corr_t33" "02:00:00"

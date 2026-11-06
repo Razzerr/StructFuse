@@ -42,6 +42,27 @@ def is_same_protein(
     return aligned.size / len(query_seq) >= coverage or aligned.size / len(template_seq) >= coverage
 
 
+def alignment_weights(
+    query_seq: str,
+    templates: Sequence[Tuple[str, np.ndarray]],
+) -> np.ndarray:
+    """Weight of each (template_seq, query_to_template), summing to 1.
+
+    Proportional to the identical aligned residues, so identity and coverage both
+    count. Retrieval scores cannot do this job: they differ in the second decimal,
+    which made a softmax over them nearly uniform. Uniform when nothing matches.
+    """
+    q = np.frombuffer(query_seq.encode(), dtype=np.uint8)
+    matches = np.zeros(len(templates), dtype=np.float32)
+    for k, (template_seq, q2t) in enumerate(templates):
+        aligned = np.flatnonzero(q2t >= 0)
+        t = np.frombuffer(template_seq.encode(), dtype=np.uint8)
+        matches[k] = float((q[aligned] == t[q2t[aligned]]).sum())
+    if matches.sum() <= 0:
+        return np.full(len(templates), 1.0 / max(1, len(templates)), dtype=np.float32)
+    return matches / matches.sum()
+
+
 def select_templates(
     fetch: Callable[[int], Sequence[Tuple[str, float]]],
     load_seq: Callable[[str], Optional[str]],

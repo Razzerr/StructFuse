@@ -34,7 +34,7 @@ except ModuleNotFoundError:
     sys.modules["blosum"] = stub
 
 from src.data.components.dataset import PriorBuilder  # noqa: E402
-from src.data.utils.template_selection import SAME_PROTEIN_COVERAGE, SAME_PROTEIN_IDENTITY  # noqa: E402
+from src.data.utils.template_selection import SAME_PROTEIN_COVERAGE, SAME_PROTEIN_IDENTITY, alignment_weights  # noqa: E402
 from src.data.utils import align  # noqa: E402
 
 L = 30
@@ -67,7 +67,7 @@ def _builder(paths: dict, hits: list) -> PriorBuilder:
     b.topk, b.use_blosum, b.only_positive_transfer = len(hits), False, False
     b.min_seq_sep, b.min_template_similarity, b.random_retrieval = 0, 0.0, False
     b.compute_dist_bins, b._needs_coords, b._tpl_atom = True, True, None
-    b.alignment = "local"
+    b.alignment, b.template_weighting = "local", "alignment"
     b.same_protein_identity, b.same_protein_coverage = SAME_PROTEIN_IDENTITY, SAME_PROTEIN_COVERAGE
     b._id_to_npz, b._tpl_cache, b._max_tpl_cache = paths, {}, 100
     return b
@@ -132,12 +132,39 @@ def test_old_aligner_moves_the_features_and_the_rule_stays_local():
 
 
 def test_unknown_alignment_name_is_refused():
-    try:
-        PriorBuilder("unused", alignment="nw")
-    except ValueError as exc:
-        assert "alignment must be one of" in str(exc)
-    else:
-        raise AssertionError("unknown alignment accepted")
+    for kw, text in (({"alignment": "nw"}, "alignment must be one of"),
+                     ({"template_weighting": "rank"}, "template_weighting must be one of")):
+        try:
+            PriorBuilder("unused", **kw)
+        except ValueError as exc:
+            assert text in str(exc)
+        else:
+            raise AssertionError(f"accepted {kw}")
+
+
+def _two_templates(tmp):
+    """Query "A"*L: 15 identical residues in the first, 5 in the second, same score.
+    Residue 2 has no coordinates in the second, so that pair is "unknown" there and
+    the histogram of pair (2, 20) shows the weight of the first template directly."""
+    mask = np.ones(L, np.uint8)
+    mask[2] = 0
+    first = _write(Path(tmp), "1abc_A", "CB", seq="A" * 15 + "C" * 15)
+    second = _write(Path(tmp), "2xyz_A", "CB", seq="A" * 5 + "C" * 25, mask=mask)
+    return _builder({"1abc_A": first, "2xyz_A": second}, [("1abc_A", 0.9), ("2xyz_A", 0.9)])
+
+
+def test_templates_are_weighted_by_identical_aligned_residues():
+    with tempfile.TemporaryDirectory() as tmp:
+        dist = _bins(_two_templates(tmp))
+        assert abs(dist[1, 2, 20] - 0.75) < 1e-5 and abs(dist[0, 2, 20] - 0.25) < 1e-5, dist[:, 2, 20]
+
+
+def test_cosine_weights_stay_available_and_unchanged():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _two_templates(tmp)
+        b.template_weighting = "cosine"
+        dist = _bins(b)
+        assert abs(dist[1, 2, 20] - 0.5) < 1e-5 and abs(dist[0, 2, 20] - 0.5) < 1e-5, dist[:, 2, 20]
 
 
 def test_cb_generation_histogram_reads_cb():

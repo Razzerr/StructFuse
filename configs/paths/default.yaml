@@ -24,6 +24,7 @@ index_t6: ${paths.data_dir}/index_t6_${paths.data_version}
 index_t33: ${paths.data_dir}/index_t33_${paths.data_version}
 esm_t6: ${paths.data_dir}/precomputed/esm_t6_8M_${paths.data_version}
 esm_t33: ${paths.data_dir}/precomputed/esm_t33_650M_${paths.data_version}
+esm_t36: ${paths.data_dir}/precomputed/esm_t36_3B_${paths.data_version}
 
 # path to logging directory
 log_dir: ${paths.root_dir}/logs/

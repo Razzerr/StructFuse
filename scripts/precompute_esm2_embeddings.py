@@ -84,6 +84,14 @@ def load_skip_stems(skip_files) -> set:
     return stems
 
 
+def chains_to_embed(npz_files, skip_stems, only_entries=None) -> list:
+    """Chain files kept by the skip lists and, when given, the set of PDB entries."""
+    kept = [p for p in npz_files if p.stem not in skip_stems]
+    if only_entries is not None:
+        kept = [p for p in kept if p.stem.split("_")[0] in only_entries]
+    return kept
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pre-compute ESM2 embeddings")
     parser.add_argument("--data_root", type=str, default="data/processed_2026",
@@ -113,6 +121,11 @@ def main():
                              "from the whole pipeline (splits, index, training), so "
                              "they must not receive embeddings either. Pass with no "
                              "values to disable filtering.")
+    parser.add_argument("--only_entries_files", type=str, nargs="*", default=None,
+                        help="Files listing PDB entries, one per line. When given, "
+                             "only their chains are embedded: a backbone that keeps "
+                             "the retrieval index of another one needs its own cache "
+                             "for query chains only.")
     args = parser.parse_args()
 
     data_root = Path(args.data_root)
@@ -125,11 +138,14 @@ def main():
 
     # Drop chains excluded from the pipeline (corrupt, or no RCSB cluster)
     skip_stems = load_skip_stems(args.skip_ids_files)
-    if skip_stems:
-        n_before = len(npz_files)
-        npz_files = [p for p in npz_files if p.stem not in skip_stems]
-        print(f"Excluded {n_before - len(npz_files)} chains via skip lists "
-              f"({len(skip_stems)} stems listed), {len(npz_files)} remaining")
+    only_entries = None
+    if args.only_entries_files:
+        only_entries = load_skip_stems(args.only_entries_files)
+    n_before = len(npz_files)
+    npz_files = chains_to_embed(npz_files, skip_stems, only_entries)
+    print(f"Excluded {n_before - len(npz_files)} chains ({len(skip_stems)} stems on "
+          f"skip lists, restricted to entries: {only_entries is not None}), "
+          f"{len(npz_files)} remaining")
 
     # Skip already processed
     todo = []

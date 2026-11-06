@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.data.utils.template_selection import (  # noqa: E402
+    alignment_weights,
     CANDIDATE_MARGIN,
     is_same_protein,
     select_templates,
@@ -93,6 +94,22 @@ def test_fetches_more_when_the_margin_is_used_up():
 def test_unreadable_template_is_skipped_and_short_supply_returns_what_exists():
     kept, _ = select_templates(lambda n: [("bad", .9), ("a", .8)], {"a": "G" * 100}.get, Q, 4, _align)
     assert [k[0] for k in kept] == ["a"], kept
+
+
+def test_weights_count_identical_aligned_residues_and_sum_to_one():
+    q = "ACDEFGHIKL"
+    full = ("ACDEFGHIKL", np.arange(10))                          # 10 identical
+    half = ("ACDEFWWWWW", np.arange(10))                          # 5 identical
+    part = ("ACDEF", np.array([0, 1, 2, 3, 4, -1, -1, -1, -1, -1]))  # 5, aligned over half
+    w = alignment_weights(q, [full, half, part])
+    assert np.allclose(w, [0.5, 0.25, 0.25]) and abs(w.sum() - 1) < 1e-6, w
+
+
+def test_weights_are_uniform_when_nothing_matches():
+    q = "AAAA"
+    none = ("WWWW", np.arange(4))
+    unaligned = ("WWWW", np.full(4, -1))
+    assert np.allclose(alignment_weights(q, [none, unaligned]), [0.5, 0.5])
 
 
 def _run_all():
