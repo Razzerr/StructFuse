@@ -318,7 +318,10 @@ run_pytest() {
         return
     fi
     local job_name="paper_pytest_phase0"
-    local command="python -m pytest tests/phase0 -q 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+    # paper/ is gitignored and not on the server, so its two generator tests run locally.
+    local command="python -m pytest tests/phase0 -q --color=no \
+--ignore=tests/phase0/test_paper_figure_generators.py \
+--ignore=tests/phase0/test_qualitative_figure.py 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "01:00:00" 8 "64G" >/dev/null
 }
 run_pytest
