@@ -1,0 +1,15 @@
+# @package _global_
+# The selected stack with three recycling iterations: four passes through the head at
+# evaluation, one to four (one with gradient) in training, the AF2 scheme.
+
+task_name: "ablation_trufor_recycling"
+tags: ["ablation", "recycling", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  recycling_iters: 3
+
+data:
+  compute_dist_bins: true

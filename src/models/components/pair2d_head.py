@@ -304,10 +304,12 @@ class Pair2DHead(nn.Module):
         use_depthwise: bool = False,
         use_checkpoint: bool = False,
         triangle_c: int = 32,
+        recycling_iters: int = 0,
     ):
         super().__init__()
 
         self.head_type = head_type
+        self.recycling_iters = int(recycling_iters)
         self.use_checkpoint = use_checkpoint
         self.use_template_features = bool(use_template_features)
         self.use_tpl_dist_bins = bool(use_tpl_dist_bins)
@@ -433,6 +435,14 @@ class Pair2DHead(nn.Module):
                 "Must be 'cnn', 'dilated', 'axial', or 'axial_tri'"
             )
         
+        # Recycling (AF2 Alg. 1): the head's output re-enters through a zero-initialised
+        # projection, so a recycled model starts identical to the one without it.
+        if self.recycling_iters > 0:
+            self.recycle_norm = nn.LayerNorm(width)
+            self.recycle_proj = nn.Conv2d(width, width, 1)
+            nn.init.zeros_(self.recycle_proj.weight)
+            nn.init.zeros_(self.recycle_proj.bias)
+
         # Output projection
         self.out = nn.Conv2d(width, 1, 1)
         # Prior probability init: contacts are ~5% of valid pairs.
@@ -454,6 +464,53 @@ class Pair2DHead(nn.Module):
         for m in self._frozen_template_bns:
             m.eval()
         return self
+
+    def _run_blocks(self, x, pair_mask):
+        if self.head_type == "axial":
+            for block in self.blocks:
+                if self.use_checkpoint and self.training:
+                    x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                else:
+                    x = block(x, pair_mask=pair_mask)
+        elif self.head_type == "axial_tri":
+            # Triangle blocks run channel-last (B, L, L, C); axial blocks stay
+            # channel-first (B, C, L, L) and handle their own permute.
+            for block in self.blocks:
+                if isinstance(block, TriangleMultiplicativeUpdate):
+                    x = x.permute(0, 2, 3, 1).contiguous()
+                    if self.use_checkpoint and self.training:
+                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                    else:
+                        x = block(x, pair_mask)
+                    x = x.permute(0, 3, 1, 2).contiguous()
+                else:
+                    if self.use_checkpoint and self.training:
+                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
+                    else:
+                        x = block(x, pair_mask=pair_mask)
+        else:
+            for block in self.blocks:
+                x = block(x)
+        return x
+
+    def _with_recycled(self, x0, prev):
+        norm = self.recycle_norm(prev.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        return x0 + self.recycle_proj(norm)
+
+    def _run_recycled(self, x0, pair_mask):
+        """AF2's scheme: extra passes carry no gradient. Training draws how many, so
+        the head learns from every stage of refinement; evaluation always runs them all."""
+        extra = self.recycling_iters
+        if self.training:
+            extra = int(torch.randint(0, self.recycling_iters + 1, (1,)).item())
+        prev = None
+        with torch.no_grad():
+            for _ in range(extra):
+                inp = x0 if prev is None else self._with_recycled(x0, prev)
+                prev = self._run_blocks(inp, pair_mask).detach()
+        return self._run_blocks(
+            x0 if prev is None else self._with_recycled(x0, prev), pair_mask
+        )
 
     def forward(
         self,
@@ -515,31 +572,10 @@ class Pair2DHead(nn.Module):
 
         # Processing
         x = self.inp(x)
-        if self.head_type == "axial":
-            for block in self.blocks:
-                if self.use_checkpoint and self.training:
-                    x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
-                else:
-                    x = block(x, pair_mask=pair_mask)
-        elif self.head_type == "axial_tri":
-            # Triangle blocks run channel-last (B, L, L, C); axial blocks stay
-            # channel-first (B, C, L, L) and handle their own permute.
-            for block in self.blocks:
-                if isinstance(block, TriangleMultiplicativeUpdate):
-                    x = x.permute(0, 2, 3, 1).contiguous()
-                    if self.use_checkpoint and self.training:
-                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
-                    else:
-                        x = block(x, pair_mask)
-                    x = x.permute(0, 3, 1, 2).contiguous()
-                else:
-                    if self.use_checkpoint and self.training:
-                        x = grad_checkpoint(block, x, pair_mask, use_reentrant=False)
-                    else:
-                        x = block(x, pair_mask=pair_mask)
+        if self.recycling_iters > 0:
+            x = self._run_recycled(x, pair_mask)
         else:
-            for block in self.blocks:
-                x = block(x)
+            x = self._run_blocks(x, pair_mask)
         logits = self.out(x)  # (B, 1, L, L)
         logits = 0.5 * (logits + logits.transpose(-1, -2))
 

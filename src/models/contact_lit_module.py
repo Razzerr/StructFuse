@@ -58,6 +58,7 @@ class ContactLitModule(LightningModule):
         head_num_kv_heads: int = None,  # GQA: KV heads (None = same as head_num_heads)
         alternating_axial: bool = False,  # Alternate row/col attention per block
         triangle_c: int = 32,  # Stage 3: inner dim for triangle mult update
+        recycling_iters: int = 0,  # extra passes through the head; 0 = none
         d_esm: int = 1280,
         d_pair: int = 128,
         width: int = 128,
@@ -119,6 +120,7 @@ class ContactLitModule(LightningModule):
             alternating_axial=alternating_axial,
             use_checkpoint=use_checkpoint,
             triangle_c=triangle_c,
+            recycling_iters=recycling_iters,
         )
         self.use_tpl_dist_bins = bool(use_tpl_dist_bins)
         if compile_model:

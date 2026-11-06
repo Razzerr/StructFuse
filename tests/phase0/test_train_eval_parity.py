@@ -30,6 +30,7 @@ EXPERIMENTS = [
     "ablation/trufor_bce_only_with_dist",
     "ablation/trufor_global_alignment",
     "ablation/trufor_cosine_weights",
+    "ablation/trufor_recycling",
     "frontier_8M",
     "frontier",
     "trufor_fusion_with_dist_650M",
@@ -192,6 +193,7 @@ def test_trufor_panel_cells_differ_from_their_reference_only_as_intended():
         "ablation/trufor_no_dist": {"model.use_tpl_dist_bins", "data.compute_dist_bins"},
         "ablation/trufor_global_alignment": {"data.alignment"},
         "ablation/trufor_cosine_weights": {"data.template_weighting"},
+        "ablation/trufor_recycling": {"model.recycling_iters"},
     }
     for cell, keys in expected.items():
         got = _config_diff(ref, cell)
