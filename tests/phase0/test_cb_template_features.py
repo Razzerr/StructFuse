@@ -67,7 +67,7 @@ def _builder(paths: dict, hits: list) -> PriorBuilder:
     b.topk, b.use_blosum, b.only_positive_transfer = len(hits), False, False
     b.min_seq_sep, b.min_template_similarity, b.random_retrieval = 0, 0.0, False
     b.compute_dist_bins, b._needs_coords, b._tpl_atom = True, True, None
-    b.alignment, b.template_weighting = "local", "alignment"
+    b.alignment, b.template_weighting, b.per_template = "local", "alignment", False
     b.same_protein_identity, b.same_protein_coverage = SAME_PROTEIN_IDENTITY, SAME_PROTEIN_COVERAGE
     b._id_to_npz, b._tpl_cache, b._max_tpl_cache = paths, {}, 100
     return b

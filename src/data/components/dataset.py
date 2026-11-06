@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, Sampler
 from src.data.utils.template_selection import (
     SAME_PROTEIN_COVERAGE,
     SAME_PROTEIN_IDENTITY,
+    alignment_quality,
     alignment_weights,
     select_templates,
 )
@@ -101,6 +102,9 @@ class PriorBuilder:
         # How the K templates are averaged. Always from the local alignment of the
         # rule, so `alignment` and this knob can be measured separately.
         template_weighting: str = "alignment",
+        # Keep each template's maps apart for per-template attention, next to the
+        # aggregated ones. Needs the distance bins.
+        per_template: bool = False,
     ):
         if alignment not in ALIGNMENTS:
             raise ValueError(f"alignment must be one of {ALIGNMENTS}, got {alignment!r}")
@@ -109,6 +113,8 @@ class PriorBuilder:
                 f"template_weighting must be one of {TEMPLATE_WEIGHTINGS}, "
                 f"got {template_weighting!r}"
             )
+        if per_template and not compute_dist_bins:
+            raise ValueError("per_template=True requires compute_dist_bins=True")
 
         from src.models.utils.faiss import FaissIndex
 
@@ -142,6 +148,7 @@ class PriorBuilder:
         self.same_protein_coverage = float(same_protein_coverage)
         self.alignment = alignment
         self.template_weighting = template_weighting
+        self.per_template = bool(per_template)
 
         self.compute_dist_bins = bool(compute_dist_bins)
         self._needs_coords = self.compute_dist_bins
@@ -238,6 +245,15 @@ class PriorBuilder:
 
         rich = self._needs_coords
 
+        def _empty_stack():
+            K = self.topk
+            return {
+                "tpl_prior": np.zeros((K, Lc, Lc), np.float32),
+                "tpl_dbin": np.zeros((K, Lc, Lc), np.int8),
+                "tpl_quality": np.zeros((K, 2), np.float32),
+                "tpl_present": np.zeros(K, bool),
+            }
+
         def _empty_return():
             prior = np.zeros((Lc, Lc), np.float32)
             count = np.zeros((Lc, Lc), np.float32)
@@ -250,6 +266,8 @@ class PriorBuilder:
             # per-protein analyses (template-quality stratification, paired tests).
             out["n_templates_retrieved"] = 0
             out["best_tpl_sim"] = 0.0
+            if self.per_template:
+                out.update(_empty_stack())
             return out
 
         if self.topk <= 0:
@@ -287,11 +305,15 @@ class PriorBuilder:
         dist_bins_acc = None
         if rich and self.compute_dist_bins:
             dist_bins_acc = np.zeros((Lc, Lc, N_DIST_BINS), dtype=np.float32)
+        stack = _empty_stack() if self.per_template else None
 
-        for (tpl_id, _sim, q2t), wk in zip(hits, w):
+        for k, ((tpl_id, _sim, q2t), wk) in enumerate(zip(hits, w)):
             tpl = self._get_tpl(tpl_id)
             if tpl is None:
                 continue  # corrupt NPZ — logged in _get_tpl, skip this template
+            if stack is not None:
+                # From the local alignment, whichever aligner builds the features.
+                stack["tpl_quality"][k] = alignment_quality(crop_seq, tpl["seq"], q2t)
             # q2t comes from the selection above, so the O(Lq·Lt) alignment is
             # computed once per template and fed into every projector.
             if self.alignment == "global_legacy":
@@ -339,6 +361,10 @@ class PriorBuilder:
                 )  # (Lc, Lc) int8 ∈ [0..8]
                 oh = np.eye(N_DIST_BINS, dtype=np.float32)[dbin]  # (Lc, Lc, 9)
                 dist_bins_acc += wk * oh
+                if stack is not None:
+                    stack["tpl_prior"][k] = Pk_pos
+                    stack["tpl_dbin"][k] = dbin
+                    stack["tpl_present"][k] = True
 
         if not rich:
             return prior_acc, count_acc
@@ -353,6 +379,8 @@ class PriorBuilder:
         # per-protein analyses (paired Wilcoxon, template-quality stratification).
         out["n_templates_retrieved"] = int(len(hits))
         out["best_tpl_sim"] = float(sims.max()) if len(hits) > 0 else 0.0
+        if stack is not None:
+            out.update(stack)
 
         return out
 
@@ -865,6 +893,7 @@ def collate_padded(
     n_templates_retrieved = torch.zeros(B, dtype=torch.long)
     best_tpl_sim = torch.zeros(B, dtype=torch.float32)
     dist_bins = None
+    tpl_stack = None
 
     if prior_builder is not None:
         # Stage 2 rich features — pre-allocate only if PriorBuilder is
@@ -875,6 +904,16 @@ def collate_padded(
             dist_bins = torch.zeros(
                 (B, N_DIST_BINS, Lmax, Lmax), dtype=torch.float32
             )
+        if getattr(prior_builder, "per_template", False):
+            K = prior_builder.topk
+            # Bin indices rather than one-hot: 9x smaller in shared memory; the
+            # channels are expanded on the GPU by template_stack.
+            tpl_stack = {
+                "tpl_prior": torch.zeros((B, K, Lmax, Lmax), dtype=torch.float32),
+                "tpl_dbin": torch.zeros((B, K, Lmax, Lmax), dtype=torch.int8),
+                "tpl_quality": torch.zeros((B, K, 2), dtype=torch.float32),
+                "tpl_present": torch.zeros((B, K), dtype=torch.bool),
+            }
 
         for b, item in enumerate(cropped):
             Lc = item["L"]
@@ -901,6 +940,16 @@ def collate_padded(
                     arr[:, :L_use, :L_use]
                 )
 
+            if tpl_stack is not None:
+                tpl_stack["tpl_prior"][b, :, :L_use, :L_use] = torch.from_numpy(
+                    extra["tpl_prior"][:, :L_use, :L_use]
+                )
+                tpl_stack["tpl_dbin"][b, :, :L_use, :L_use] = torch.from_numpy(
+                    extra["tpl_dbin"][:, :L_use, :L_use]
+                )
+                tpl_stack["tpl_quality"][b] = torch.from_numpy(extra["tpl_quality"])
+                tpl_stack["tpl_present"][b] = torch.from_numpy(extra["tpl_present"])
+
             n_templates_retrieved[b] = int(extra.get("n_templates_retrieved", 0))
             best_tpl_sim[b] = float(extra.get("best_tpl_sim", 0.0))
 
@@ -910,6 +959,8 @@ def collate_padded(
     batch_out["best_tpl_sim"] = best_tpl_sim
     if dist_bins is not None:
         batch_out["tpl_dist_bins"] = dist_bins
+    if tpl_stack is not None:
+        batch_out.update(tpl_stack)
 
     # ── Precomputed ESM2 embeddings (loaded + cropped in DataLoader worker) ──
     if esm_embeddings_dir is not None:

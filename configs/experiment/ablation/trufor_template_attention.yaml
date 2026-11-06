@@ -1,0 +1,15 @@
+# @package _global_
+# The selected stack with the K templates kept apart: one encoder per template, then
+# attention over the templates for each residue pair, instead of averaging their maps.
+
+task_name: "ablation_trufor_template_attention"
+tags: ["ablation", "template-attention", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor_per_template"
+  use_tpl_dist_bins: true
+
+data:
+  compute_dist_bins: true
+  per_template_features: true

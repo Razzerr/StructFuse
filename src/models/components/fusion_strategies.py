@@ -8,6 +8,7 @@ Provides multiple fusion approaches:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple
 
 
@@ -230,6 +231,36 @@ class FeatureFusionModule(nn.Module):
         out = self.channel_emb(merge, H, W)  # (B, C, H, W)
         
         return out
+
+
+# Per-template scalars broadcast over the map: identity, share of the query aligned.
+TEMPLATE_QUALITY_CHANNELS = 2
+
+
+def template_stack(
+    prior: torch.Tensor,
+    dbin: torch.Tensor,
+    quality: torch.Tensor,
+    present: torch.Tensor,
+    pair_mask: torch.Tensor,
+    n_dist: int,
+) -> torch.Tensor:
+    """Channels of each template: contact prior, its presence, distance one-hot, quality.
+
+    Args:
+        prior: (B, K, L, L); dbin: (B, K, L, L) bin indices; quality: (B, K, 2);
+        present: (B, K) bool; pair_mask: (B, L, L), 1 on real residue pairs.
+
+    Returns:
+        (B, K, 2 + n_dist + TEMPLATE_QUALITY_CHANNELS, L, L), zero on padding and for
+        absent templates.
+    """
+    L = prior.shape[-1]
+    onehot = F.one_hot(dbin.long(), n_dist).permute(0, 1, 4, 2, 3).to(prior.dtype)
+    q = quality[:, :, :, None, None].expand(-1, -1, -1, L, L).to(prior.dtype)
+    stack = torch.cat([prior[:, :, None], (prior != 0).to(prior.dtype)[:, :, None], onehot, q], dim=2)
+    keep = pair_mask[:, None, None].to(prior.dtype) * present[:, :, None, None, None].to(prior.dtype)
+    return stack * keep
 
 
 def _validate_tpl_dist_bins(
@@ -475,6 +506,89 @@ class TruForFusion(nn.Module):
         return x_final
 
 
+class PerTemplateTruForFusion(TruForFusion):
+    """TruFor fusion whose structural stream keeps each template apart.
+
+    Every template passes through the same encoder. For each residue pair, the ESM
+    stream then queries the K templates (AF2 template pointwise attention, Alg. 17),
+    and the result enters the same cross-modal fusion as the averaged stream did. The
+    attention sees no rank, so the order of the templates cannot matter.
+
+    Args:
+        tpl_attn_dim: Dimension of the attention queries and keys.
+        Others as in TruForFusion.
+    """
+    def __init__(
+        self,
+        d_pair: int,
+        d_rel: int,
+        num_heads: int = 8,
+        reduction: int = 1,
+        tpl_dist_channels: int = 0,
+        tpl_attn_dim: int = 32,
+    ):
+        super().__init__(
+            d_pair=d_pair,
+            d_rel=d_rel,
+            num_heads=num_heads,
+            reduction=reduction,
+            tpl_dist_channels=tpl_dist_channels,
+        )
+        self.template_channels = 2 + self.tpl_dist_channels + TEMPLATE_QUALITY_CHANNELS
+        self.template_encoder = nn.Sequential(
+            nn.Conv2d(self.template_channels, d_pair // 2, 3, padding=1),
+            nn.BatchNorm2d(d_pair // 2),
+            nn.ReLU(),
+            nn.Conv2d(d_pair // 2, d_pair, 3, padding=1),
+            nn.BatchNorm2d(d_pair),
+            nn.ReLU(),
+        )
+        self.tpl_query = nn.Conv2d(d_pair, tpl_attn_dim, 1, bias=False)
+        self.tpl_key = nn.Conv2d(d_pair, tpl_attn_dim, 1, bias=False)
+        self.tpl_attn_scale = tpl_attn_dim ** -0.5
+
+    def forward(
+        self,
+        pair_feat: torch.Tensor,
+        prior: torch.Tensor,
+        count: torch.Tensor,
+        rel: torch.Tensor,
+        esm_contacts: torch.Tensor,
+        tpl_dist_bins: torch.Tensor | None = None,
+        tpl_stack: torch.Tensor | None = None,
+        tpl_present: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`prior`, `count` and `tpl_dist_bins` are the averaged maps, not used here.
+
+        Args:
+            tpl_stack: (B, K, template_channels, L, L), see template_stack
+            tpl_present: (B, K) bool
+
+        Returns:
+            (B, out_channels, L, L) cross-fused features
+        """
+        if tpl_stack is None or tpl_present is None:
+            raise ValueError(
+                "fusion_strategy=trufor_per_template needs the per-template maps: set "
+                "data.per_template_features=true and pass tpl_stack and tpl_present"
+            )
+        esm_feat = self.esm_encoder(torch.cat([pair_feat, esm_contacts], dim=1))
+
+        B, K, C, H, W = tpl_stack.shape
+        value = self.template_encoder(tpl_stack.reshape(B * K, C, H, W))
+        key = self.tpl_key(value).reshape(B, K, -1, H, W)
+        query = self.tpl_query(esm_feat)[:, None]
+        score = (query * key).sum(dim=2) * self.tpl_attn_scale  # (B, K, H, W)
+        # Finite fill, then zeroed: with no template present every weight is 0, where
+        # -inf would give NaN weights and NaN gradients.
+        present = tpl_present[:, :, None, None]
+        weight = score.masked_fill(~present, -1e4).softmax(dim=1) * present
+        template_feat = (weight[:, :, None] * value.reshape(B, K, -1, H, W)).sum(dim=1)
+
+        x_fused = self.ffm(esm_feat, template_feat)
+        return torch.cat([x_fused, self.rel_proj(rel)], dim=1)
+
+
 class GroupedFeatureFusion(nn.Module):
     """
     Per-group feature encoders + zero-init residual addition.
@@ -604,6 +718,14 @@ def get_fusion_strategy(
             reduction=reduction,
             tpl_dist_channels=tpl_dist_channels,
         )
+    elif strategy == "trufor_per_template":
+        return PerTemplateTruForFusion(
+            d_pair=d_pair,
+            d_rel=d_rel,
+            num_heads=num_heads,
+            reduction=reduction,
+            tpl_dist_channels=tpl_dist_channels,
+        )
     elif strategy == "grouped":
         groups = feature_groups if feature_groups else {"tpl_contact": 2}
         return GroupedFeatureFusion(
@@ -612,5 +734,5 @@ def get_fusion_strategy(
     else:
         raise ValueError(
             f"Unknown fusion strategy: {strategy}. "
-            "Choose 'standard', 'trufor', or 'grouped'."
+            "Choose 'standard', 'trufor', 'trufor_per_template', or 'grouped'."
         )

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from src.models.components.esm_backbone import ESM2Backbone
 from src.models.components.contact_model import ContactModel
+from src.models.components.fusion_strategies import template_stack
 from src.models.components.pair2d_head import relpos_buckets
 from src.models.utils.faiss import FaissIndex
 from src.models.utils.loss import (
@@ -306,6 +307,21 @@ class ContactLitModule(LightningModule):
         reps, contacts = self.esm(seq_list, self.device)  # (B, L_max, D), (B, 1, L_max, L_max)
         return reps, contacts
 
+    def _template_stack(self, batch, pair_mask):
+        """Per-template maps of the batch as model channels, or (None, None)."""
+        if "tpl_prior" not in batch:
+            return None, None
+        present = batch["tpl_present"].to(self.device)
+        stack = template_stack(
+            batch["tpl_prior"].to(self.device),
+            batch["tpl_dbin"].to(self.device),
+            batch["tpl_quality"].to(self.device),
+            present,
+            pair_mask,
+            n_dist=int(self.hparams["fusion_feature_groups"]["tpl_dist"]),
+        )
+        return stack, present
+
     def _step(
         self,
         batch: Dict[str, torch.Tensor],
@@ -353,10 +369,14 @@ class ContactLitModule(LightningModule):
         if tpl_dist_bins is not None:
             tpl_dist_bins = tpl_dist_bins.to(self.device)
 
+        tpl_stack, tpl_present = self._template_stack(batch, pair_mask)
+
         logits = self.net(
             h, prior, count, rel, esm_contacts,
             pair_mask=pair_mask.unsqueeze(1),
             tpl_dist_bins=tpl_dist_bins,
+            tpl_stack=tpl_stack,
+            tpl_present=tpl_present,
         )
 
         valid_mask = valid.squeeze(1)  # (B, L, L) — reuse already-computed product

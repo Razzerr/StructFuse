@@ -63,6 +63,20 @@ def alignment_weights(
     return matches / matches.sum()
 
 
+def alignment_quality(
+    query_seq: str,
+    template_seq: str,
+    query_to_template: np.ndarray,
+) -> Tuple[float, float]:
+    """(identity over aligned pairs, share of the query aligned); (0, 0) if nothing aligned."""
+    aligned = np.flatnonzero(query_to_template >= 0)
+    if aligned.size == 0:
+        return 0.0, 0.0
+    q = np.frombuffer(query_seq.encode(), dtype=np.uint8)[aligned]
+    t = np.frombuffer(template_seq.encode(), dtype=np.uint8)[query_to_template[aligned]]
+    return float((q == t).mean()), aligned.size / len(query_seq)
+
+
 def select_templates(
     fetch: Callable[[int], Sequence[Tuple[str, float]]],
     load_seq: Callable[[str], Optional[str]],

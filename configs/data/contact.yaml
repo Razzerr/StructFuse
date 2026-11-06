@@ -54,6 +54,7 @@ min_template_similarity: 0.0
 random_retrieval: false       # ablation: random templates instead of FAISS
 alignment: local              # local, or global_legacy: the pre-2026-11-06 aligner, only to measure the change
 template_weighting: alignment # alignment (identical aligned residues), or cosine: the earlier weights, only to measure the change
+per_template_features: false  # keep each template's maps apart, for fusion_strategy=trufor_per_template
 random_seed: ${seed}          # seeds the random_retrieval RNG (stable per query)
 max_tpl_cache: 5000
 

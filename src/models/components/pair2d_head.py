@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from src.models.components.fusion_strategies import (
     get_fusion_strategy,
     GroupedFeatureFusion,
+    PerTemplateTruForFusion,
     TruForFusion,
 )
 from src.models.components.triangle import TriangleMultiplicativeUpdate
@@ -464,6 +465,8 @@ class Pair2DHead(nn.Module):
         esm_contacts,
         pair_mask=None,
         tpl_dist_bins=None,
+        tpl_stack=None,
+        tpl_present=None,
     ):
         """
         Args:
@@ -475,6 +478,8 @@ class Pair2DHead(nn.Module):
             pair_mask: (B, 1, L, L) binary mask (1 = valid, 0 = padding)
             tpl_dist_bins: optional Stage 2 per-group feature
                 consumed when template distance channels are enabled.
+            tpl_stack, tpl_present: per-template maps, consumed only by
+                PerTemplateTruForFusion.
 
         Returns:
             logits: (B, 1, L, L) contact prediction logits
@@ -504,6 +509,14 @@ class Pair2DHead(nn.Module):
                 count = z((b, 1, h, w))
                 n_dist = getattr(self.fusion, "tpl_dist_channels", 0)
                 tpl_dist_bins = z((b, n_dist, h, w)) if n_dist else None
+                if isinstance(self.fusion, PerTemplateTruForFusion):
+                    tpl_stack = z((b, 1, self.fusion.template_channels, h, w))
+                    tpl_present = torch.ones((b, 1), dtype=torch.bool, device=pair_feat.device)
+            extra = (
+                {"tpl_stack": tpl_stack, "tpl_present": tpl_present}
+                if isinstance(self.fusion, PerTemplateTruForFusion)
+                else {}
+            )
             x = self.fusion(
                 pair_feat,
                 prior,
@@ -511,6 +524,7 @@ class Pair2DHead(nn.Module):
                 rel,
                 esm_contacts,
                 tpl_dist_bins=tpl_dist_bins,
+                **extra,
             )
 
         # Processing
