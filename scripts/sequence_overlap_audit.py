@@ -9,7 +9,7 @@ identical to a test chain is information in the WEIGHTS, unlike a retrieved temp
 Read-only. For every validation and test chain, against all training chains:
   1. exact: the same modelled sequence (NPZ `seq`);
   2. near: otherwise the training chains sharing the most k-mers are aligned with the
-     audit's own `alignment_identity` (production Needleman-Wunsch), best one kept.
+     audit's own `alignment_identity` (production local alignment), best one kept.
 A pair counts as the same protein at identity >= --identity over aligned pairs with
 coverage >= --coverage: "both" = of both chains, "either" = of at least one (also
 catches a fragment of a longer construct). Only the k-mer-ranked candidates are

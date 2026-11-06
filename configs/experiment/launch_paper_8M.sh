@@ -8,6 +8,8 @@
 #   ./configs/experiment/launch_paper_8M.sh --final-eval-controls    # their bs=1 pass, those 2 only
 #   ./configs/experiment/launch_paper_8M.sh --trufor-panel           # 3 jobs, TruFor 2x2 + loss cells
 #   ./configs/experiment/launch_paper_8M.sh --final-eval-trufor-panel # their bs=1 pass, those 3 only
+#   ./configs/experiment/launch_paper_8M.sh --aligner-gate           # 3 jobs, run first: local vs old aligner + control
+#   ./configs/experiment/launch_paper_8M.sh --final-eval-aligner-gate # their bs=1 pass, those 3 only
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -26,7 +28,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
+        --aligner-gate|--final-eval-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -47,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,13p' "$0"
+            sed -n '2,15p' "$0"
             exit 0
             ;;
         *)
@@ -145,6 +147,13 @@ submit_final_eval_controls() {
     submit_final_eval "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
 }
 
+# bs=1 pass for the three --aligner-gate cells only.
+submit_final_eval_aligner_gate() {
+    submit_final_eval "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
+    submit_final_eval "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
+    submit_final_eval "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+}
+
 # bs=1 pass for the three --trufor-panel cells only (same reasoning as above).
 submit_final_eval_trufor_panel() {
     submit_final_eval "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle"
@@ -195,6 +204,15 @@ submit_gate() {
 # a retrieval kill-switch and the (-dist,+triangle) cell, both on TruFor. The
 # grouped panel stays as its own mechanism analysis and is NOT an ablation of
 # TruFor; nothing here re-runs it.
+# Measures the aligner change of 2026-11-06 on one data build. The full model and
+# its no-template control keep their panel task names, so only the old-aligner
+# cell is extra; the control takes no templates, so it serves both aligners.
+submit_aligner_gate() {
+    submit_training "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
+    submit_training "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
+    submit_training "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+}
+
 submit_trufor_controls() {
     submit_training "ablation/trufor_no_templates" "paper_8m_trufor_no_templates"
     submit_training "ablation/trufor_no_dist"      "paper_8m_trufor_no_dist"
@@ -233,6 +251,12 @@ submit_supplementary() {
 
 echo "8M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}, skip_frontier=${SKIP_FRONTIER}"
 case "${MODE}" in
+    aligner-gate)
+        submit_aligner_gate
+        ;;
+    final-eval-aligner-gate)
+        submit_final_eval_aligner_gate
+        ;;
     gate)
         submit_gate
         ;;

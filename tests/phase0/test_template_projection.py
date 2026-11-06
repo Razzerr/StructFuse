@@ -1,6 +1,6 @@
 """Does a template contact land on the query residue it actually aligns to?
 
-The template prior is transferred through a Needleman-Wunsch alignment. A
+The template prior is transferred through a sequence alignment. A
 one-residue error there displaces every transferred contact by one residue —
 invisible at evaluation time, but it feeds the model a systematically wrong prior.
 
@@ -11,8 +11,8 @@ where an off-by-one hides: with a pure 1:1 alignment a shifted implementation an
 a correct one can agree.
 
 SCOPE — this is not verification of the whole prior path. Covered: the transfer
-of contacts and distances given a mapping. NOT covered: `needleman_wunsch`
-deriving that mapping from two sequences, the crop origin inside
+of contacts and distances given a mapping. NOT covered: the aligner deriving
+that mapping from two sequences (`test_local_alignment.py`), the crop origin inside
 `PriorBuilder.build_one`, and the `use_blosum=True` branch. Say "the transfer is
 index-correct", not "the prior is verified".
 """
@@ -26,7 +26,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# align.py imports parasail at module top for needleman_wunsch. These tests pass
+# align.py imports parasail at module top for the aligners. These tests pass
 # `query_to_template` explicitly, so no alignment is computed and the dependency
 # is not exercised — stub it so the suite runs in the local env.
 try:  # pragma: no cover

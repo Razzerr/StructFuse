@@ -258,11 +258,12 @@ run_seq_overlap() {
         return
     fi
     local job_name="paper_seq_overlap"
-    local command="python scripts/sequence_overlap_audit.py --processed-dir ${CB_DIR} \
+    local command="{ python scripts/sequence_overlap_audit.py --processed-dir ${CB_DIR} \
 --split-dir data/output_splits_2026cb --out-dir ${TEMP_DIR}/seq_overlap --workers 16 \
 --out-skip-list data/output_splits_2026cb/same_protein_as_train_ids.txt \
 --skip-ids-files data/output_splits_2026cb/no_cluster_ids.txt \
-data/output_splits_2026cb/low_cb_ids.txt 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
+data/output_splits_2026cb/low_cb_ids.txt && \
+python scripts/verify_data_integrity.py --check-embeddings; } 2>&1 | tee ${TEMP_DIR}/${job_name}.log"
     submit_job "${command}" "${job_name}" "04:00:00" 16 "128G" >/dev/null
 }
 run_seq_overlap

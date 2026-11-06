@@ -8,6 +8,10 @@ from src.utils import RankedLogger
 log = RankedLogger(__name__, rank_zero_only=True)
 
 _PARASAIL_MATRIX = parasail.matrix_create("ACDEFGHIKLMNPQRSTVWY", 1, -1)
+# Scoring of `local_alignment`, with parasail.blosum62. In parasail the first gap
+# position costs GAP_OPEN and every further one GAP_EXTEND.
+GAP_OPEN = 11
+GAP_EXTEND = 1
 _BLOSUM62 = bl.BLOSUM(62, default=0)
 
 # Pre-built BLOSUM62 matrix as numpy array for vectorized scoring.
@@ -20,6 +24,70 @@ for _i, _aa_i in enumerate(_AA_ORDER):
         _BLOSUM_MATRIX[_i, _j] = (_BLOSUM62[_aa_i][_aa_j] + 4) / 15.0
 
 
+def _index_maps(
+    query_aligned: str,
+    template_aligned: str,
+    query_start: int,
+    template_start: int,
+    query_len: int,
+    template_len: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Residue index maps from an alignment that starts at the given residues."""
+    query_to_template = np.full(query_len, -1, dtype=np.int32)
+    template_to_query = np.full(template_len, -1, dtype=np.int32)
+
+    query_idx = query_start
+    template_idx = template_start
+
+    for query_char, template_char in zip(query_aligned, template_aligned):
+        has_query = query_char != "-"
+        has_template = template_char != "-"
+
+        if has_query and has_template:
+            # Both residues present: record the mapping
+            query_to_template[query_idx] = template_idx
+            template_to_query[template_idx] = query_idx
+
+        # Increment ungapped indices
+        if has_query:
+            query_idx += 1
+        if has_template:
+            template_idx += 1
+
+    return query_to_template, template_to_query
+
+
+def local_alignment(
+    query_seq: str,
+    template_seq: str,
+) -> Tuple[str, str, np.ndarray, np.ndarray]:
+    """Smith-Waterman with BLOSUM62 and affine gaps: the production alignment.
+
+    Only the best-matching segment is aligned; every residue outside it maps to -1.
+    Returns the same four values as `needleman_wunsch`, the aligned strings covering
+    that segment only. Nothing aligns when no segment scores above zero.
+    """
+    result = parasail.sw_trace_scan_16(
+        query_seq, template_seq, GAP_OPEN, GAP_EXTEND, parasail.blosum62
+    )
+    if result.score <= 0:
+        return (
+            "",
+            "",
+            np.full(len(query_seq), -1, dtype=np.int32),
+            np.full(len(template_seq), -1, dtype=np.int32),
+        )
+    query_aligned = result.traceback.query
+    template_aligned = result.traceback.ref
+    query_start = result.end_query + 1 - sum(c != "-" for c in query_aligned)
+    template_start = result.end_ref + 1 - sum(c != "-" for c in template_aligned)
+    query_to_template, template_to_query = _index_maps(
+        query_aligned, template_aligned, query_start, template_start,
+        len(query_seq), len(template_seq),
+    )
+    return query_aligned, template_aligned, query_to_template, template_to_query
+
+
 def needleman_wunsch(
     query_seq: str,
     template_seq: str,
@@ -27,6 +95,11 @@ def needleman_wunsch(
 ) -> Tuple[str, str, np.ndarray, np.ndarray]:
     """
     Perform global sequence alignment using Needleman-Wunsch algorithm.
+
+    Superseded by `local_alignment` on 2026-11-06, kept only so the change can be
+    measured (`data.alignment=global_legacy`). With +1/-1 scoring and a linear gap, a
+    short chain scatters letter by letter over a long one: unrelated pairs read as
+    high identity and the contacts copied through such a map are wrong.
 
     Args:
         query_seq (str): Query sequence (length Lq)
@@ -90,27 +163,9 @@ def needleman_wunsch(
             query_aligned = "".join(query_aln_chars)
             template_aligned = "".join(template_aln_chars)
 
-    # Build residue index mappings
-    query_to_template = np.full(query_len, -1, dtype=np.int32)
-    template_to_query = np.full(template_len, -1, dtype=np.int32)
-
-    query_idx = 0
-    template_idx = 0
-
-    for query_char, template_char in zip(query_aligned, template_aligned):
-        has_query = query_char != "-"
-        has_template = template_char != "-"
-
-        if has_query and has_template:
-            # Both residues present: record the mapping
-            query_to_template[query_idx] = template_idx
-            template_to_query[template_idx] = query_idx
-
-        # Increment ungapped indices
-        if has_query:
-            query_idx += 1
-        if has_template:
-            template_idx += 1
+    query_to_template, template_to_query = _index_maps(
+        query_aligned, template_aligned, 0, 0, query_len, template_len
+    )
 
     return query_aligned, template_aligned, query_to_template, template_to_query
 
@@ -160,7 +215,7 @@ def project_prior(
         )
 
     if query_to_template is None:
-        _, _, query_to_template, _ = needleman_wunsch(query_seq, template_seq)
+        _, _, query_to_template, _ = local_alignment(query_seq, template_seq)
 
     query_len = len(query_seq)
     
@@ -250,8 +305,8 @@ def project_distance(
         query_seq: query sequence of length Lq
         template_seq: template sequence of length Lt
         template_coords: (Lt, 3) coordinates in Å (the atom of the contact labels)
-        query_to_template: (Lq,) alignment map from needleman_wunsch;
-            -1 where the query position maps to a gap.
+        query_to_template: (Lq,) alignment map; -1 where the query position is
+            not aligned.
         min_seq_sep: pairs with |i-j| < min_seq_sep are set to "unknown" (0).
         symmetrize: average upper/lower triangle to enforce symmetry.
         template_mask: (Lt,) True where the template residue has coordinates. A
@@ -292,7 +347,7 @@ def project_distance(
 
     if symmetrize:
         # Take pairwise max so any aligned evidence wins over an unknown.
-        # (Both sides *should* agree after symmetric NW but cheap to ensure.)
+        # (Both sides should agree for any alignment map, but cheap to ensure.)
         dist_bins = np.maximum(dist_bins, dist_bins.T)
 
     return dist_bins

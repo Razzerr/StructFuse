@@ -1,0 +1,15 @@
+# @package _global_
+# The selected stack with template features built through the aligner used before
+# 2026-11-06, on the same data, to measure what the change to local alignment did.
+
+task_name: "ablation_trufor_global_alignment"
+tags: ["ablation", "aligner", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+
+data:
+  compute_dist_bins: true
+  alignment: "global_legacy"

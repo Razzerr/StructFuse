@@ -17,6 +17,9 @@ from src.data.utils.template_selection import (
 )
 from src.utils import pylogger
 
+# Values of `PriorBuilder(alignment=...)`; see src/data/utils/align.py.
+ALIGNMENTS = ("local", "global_legacy")
+
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
 
@@ -89,7 +92,13 @@ class PriorBuilder:
         # construction site gets it by default, so no path can silently omit it.
         same_protein_identity: Optional[float] = SAME_PROTEIN_IDENTITY,
         same_protein_coverage: float = SAME_PROTEIN_COVERAGE,
+        # Alignment behind the template features. The same-protein rule always uses
+        # the local one, so "global_legacy" changes the features and nothing else.
+        alignment: str = "local",
     ):
+        if alignment not in ALIGNMENTS:
+            raise ValueError(f"alignment must be one of {ALIGNMENTS}, got {alignment!r}")
+
         from src.models.utils.faiss import FaissIndex
 
         holdout_ids: Set[str] = set()
@@ -120,6 +129,7 @@ class PriorBuilder:
         self.random_retrieval = bool(random_retrieval)
         self.same_protein_identity = same_protein_identity
         self.same_protein_coverage = float(same_protein_coverage)
+        self.alignment = alignment
 
         self.compute_dist_bins = bool(compute_dist_bins)
         self._needs_coords = self.compute_dist_bins
@@ -206,6 +216,7 @@ class PriorBuilder:
         from src.data.utils.align import (
             project_prior,
             project_distance,
+            local_alignment,
             needleman_wunsch,
             N_DIST_BINS,
         )
@@ -243,7 +254,7 @@ class PriorBuilder:
             load_seq=lambda tpl_id: (self._get_tpl(tpl_id) or {}).get("seq"),
             query_seq=crop_seq,
             k=self.topk,
-            align=lambda q, t: needleman_wunsch(q, t)[2],
+            align=lambda q, t: local_alignment(q, t)[2],
             identity=self.same_protein_identity,
             coverage=self.same_protein_coverage,
         )
@@ -269,6 +280,8 @@ class PriorBuilder:
                 continue  # corrupt NPZ — logged in _get_tpl, skip this template
             # q2t comes from the selection above, so the O(Lq·Lt) alignment is
             # computed once per template and fed into every projector.
+            if self.alignment == "global_legacy":
+                q2t = needleman_wunsch(crop_seq, tpl["seq"])[2]
             Pk = project_prior(
                 crop_seq,
                 tpl["seq"],

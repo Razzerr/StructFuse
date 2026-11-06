@@ -235,15 +235,15 @@ def center_crop_bounds(length: int, crop_size: int | None) -> tuple[int, int]:
 
 
 def query_to_template(query_seq: str, template_seq: str) -> np.ndarray:
-    from src.data.utils.align import needleman_wunsch
+    from src.data.utils.align import local_alignment
 
-    return needleman_wunsch(query_seq, template_seq)[2]
+    return local_alignment(query_seq, template_seq)[2]
 
 
 def alignment_identity(query_seq: str, template_seq: str) -> dict[str, float | int]:
-    from src.data.utils.align import needleman_wunsch
+    from src.data.utils.align import local_alignment
 
-    q_aln, t_aln, _, _ = needleman_wunsch(query_seq, template_seq)
+    q_aln, t_aln, _, _ = local_alignment(query_seq, template_seq)
     aligned_pairs = 0
     matches = 0
     query_residues = 0

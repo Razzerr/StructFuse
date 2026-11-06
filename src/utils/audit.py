@@ -259,6 +259,7 @@ def dump_audit_manifest(
             "index_identity": _index_identity(_safe_select(cfg, "data.index_dir")),
             "topk": _safe_select(cfg, "data.topk"),
             "random_retrieval": _safe_select(cfg, "data.random_retrieval"),
+            "alignment": _safe_select(cfg, "data.alignment"),
             "min_template_similarity": _safe_select(cfg, "data.min_template_similarity"),
             "holdout_id_files": holdout_files,
             "esm_embeddings_dir": _safe_select(cfg, "data.esm_embeddings_dir"),

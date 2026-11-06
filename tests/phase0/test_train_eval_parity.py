@@ -28,6 +28,7 @@ EXPERIMENTS = [
     "ablation/trufor_no_triangle_with_dist",
     "ablation/trufor_no_dist_no_triangle",
     "ablation/trufor_bce_only_with_dist",
+    "ablation/trufor_global_alignment",
     "frontier_8M",
     "frontier",
     "trufor_fusion_with_dist_650M",
@@ -177,6 +178,7 @@ def test_trufor_panel_cells_differ_from_their_reference_only_as_intended():
             "model.head_type", "model.use_tpl_dist_bins", "data.compute_dist_bins"},
         "ablation/trufor_bce_only_with_dist": {"model.use_tversky", "model.tversky_weight"},
         "ablation/trufor_no_dist": {"model.use_tpl_dist_bins", "data.compute_dist_bins"},
+        "ablation/trufor_global_alignment": {"data.alignment"},
     }
     for cell, keys in expected.items():
         got = _config_diff(ref, cell)

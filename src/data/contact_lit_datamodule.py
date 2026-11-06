@@ -85,6 +85,7 @@ class ContactDataModule(LightningDataModule):
         only_positive_transfer: bool = False,
         min_template_similarity: float = 0.0,
         random_retrieval: bool = False,
+        alignment: str = "local",
         # Stable seed for the random_retrieval ablation (forwarded to PriorBuilder
         # → FaissIndex). Set `random_seed: ${seed}` in the data config so the
         # control set is reproducible and tied to the run seed.
@@ -158,6 +159,7 @@ class ContactDataModule(LightningDataModule):
         # Retrieval / prior-building params
         self.topk = int(topk)
         self.use_blosum = bool(use_blosum)
+        self.alignment = alignment
         self.only_positive_transfer = bool(only_positive_transfer)
         self.min_template_similarity = float(min_template_similarity)
         self.random_retrieval = bool(random_retrieval)
@@ -376,6 +378,7 @@ class ContactDataModule(LightningDataModule):
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
                     holdout_id_files=self.holdout_id_files,
+                    alignment=self.alignment,
                 )
 
         if stage == "test" or stage is None:
@@ -410,6 +413,7 @@ class ContactDataModule(LightningDataModule):
                     max_tpl_cache=self.max_tpl_cache,
                     compute_dist_bins=self.compute_dist_bins,
                     holdout_id_files=self.holdout_id_files,
+                    alignment=self.alignment,
                 )
 
     def _collate_train(self, batch):

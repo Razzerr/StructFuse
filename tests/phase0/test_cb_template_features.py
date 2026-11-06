@@ -1,10 +1,11 @@
 """Template distance histograms follow the atom of the contact labels.
 
 Drives the real `PriorBuilder.build_one` on template NPZs written to disk; only the
-FAISS lookup and the parasail alignment are replaced. Pins: a Cβ-generation NPZ
+FAISS lookup and the parasail alignments are replaced. Pins: a Cβ-generation NPZ
 feeds `coords_cb` into the histogram, a Cα-generation NPZ keeps `coords`, a template
 residue without coordinates contributes "unknown" rather than a distance to the
-origin, and an index pointing at mixed generations stops the run.
+origin, an index pointing at mixed generations stops the run, and the old aligner
+changes the features only, never the same-protein rule.
 
 Plain-python: `python tests/phase0/test_cb_template_features.py`.
 """
@@ -66,6 +67,7 @@ def _builder(paths: dict, hits: list) -> PriorBuilder:
     b.topk, b.use_blosum, b.only_positive_transfer = len(hits), False, False
     b.min_seq_sep, b.min_template_similarity, b.random_retrieval = 0, 0.0, False
     b.compute_dist_bins, b._needs_coords, b._tpl_atom = True, True, None
+    b.alignment = "local"
     b.same_protein_identity, b.same_protein_coverage = SAME_PROTEIN_IDENTITY, SAME_PROTEIN_COVERAGE
     b._id_to_npz, b._tpl_cache, b._max_tpl_cache = paths, {}, 100
     return b
@@ -76,12 +78,66 @@ def _bins(builder) -> np.ndarray:
 
 
 def _build(builder) -> dict:
-    original = align.needleman_wunsch
-    align.needleman_wunsch = lambda *a, **k: ("", "", np.arange(L), np.arange(L))
+    original = align.local_alignment
+    align.local_alignment = lambda *a, **k: ("", "", np.arange(L), np.arange(L))
     try:
         return builder.build_one("q_A", "A" * L, 0, L)
     finally:
-        align.needleman_wunsch = original
+        align.local_alignment = original
+
+
+def _build_with_both_aligners(builder, seq="A" * L):
+    """Local maps i -> i, the old aligner i -> i-1; records who was called."""
+    calls = []
+
+    def local(q, t):
+        calls.append("local")
+        return "", "", np.arange(L), np.arange(L)
+
+    def legacy(q, t):
+        calls.append("legacy")
+        return "", "", np.arange(L) - 1, np.arange(L)
+
+    saved = align.local_alignment, align.needleman_wunsch
+    align.local_alignment, align.needleman_wunsch = local, legacy
+    try:
+        return builder.build_one("q_A", seq, 0, L), calls
+    finally:
+        align.local_alignment, align.needleman_wunsch = saved
+
+
+def test_local_alignment_is_the_only_aligner_by_default():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(Path(tmp), "1abc_A", "CB")
+        out, calls = _build_with_both_aligners(_builder({"1abc_A": p}, [("1abc_A", 0.9)]))
+        assert set(calls) == {"local"}, calls
+        assert out["dist_bins"][1, 2, 20] > 0 and out["dist_bins"][1, 3, 21] == 0
+
+
+def test_old_aligner_moves_the_features_and_the_rule_stays_local():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(Path(tmp), "1abc_A", "CB")
+        b = _builder({"1abc_A": p}, [("1abc_A", 0.9)])
+        b.alignment = "global_legacy"
+        out, calls = _build_with_both_aligners(b)
+        assert calls == ["local", "legacy"], calls
+        assert out["dist_bins"][1, 3, 21] > 0 and out["dist_bins"][1, 2, 20] == 0
+        # Identical template: the rule refuses it through the local map in either arm.
+        out, calls = _build_with_both_aligners(_builder({"1abc_A": p}, [("1abc_A", 0.9)]), seq="C" * L)
+        assert out["n_templates_retrieved"] == 0 and calls == ["local"], (out["n_templates_retrieved"], calls)
+        b = _builder({"1abc_A": p}, [("1abc_A", 0.9)])
+        b.alignment = "global_legacy"
+        out, calls = _build_with_both_aligners(b, seq="C" * L)
+        assert out["n_templates_retrieved"] == 0 and calls == ["local"], (out["n_templates_retrieved"], calls)
+
+
+def test_unknown_alignment_name_is_refused():
+    try:
+        PriorBuilder("unused", alignment="nw")
+    except ValueError as exc:
+        assert "alignment must be one of" in str(exc)
+    else:
+        raise AssertionError("unknown alignment accepted")
 
 
 def test_cb_generation_histogram_reads_cb():
