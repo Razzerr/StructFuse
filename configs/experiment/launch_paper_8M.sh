@@ -12,6 +12,8 @@
 #   ./configs/experiment/launch_paper_8M.sh --select-eval-aligner-gate # their bs=1 validation pass, no test
 #   ./configs/experiment/launch_paper_8M.sh --select-train <experiment> <task> --code <ref>  # one candidate, no test
 #   ./configs/experiment/launch_paper_8M.sh --select-eval <experiment> <task> --code <ref>   # its bs=1 validation pass
+#   ./configs/experiment/launch_paper_8M.sh --select-rows <experiment> <task> --code <ref>   # per-chain validation rows, for CIs
+#   ./configs/experiment/launch_paper_8M.sh --select-rows-aligner-gate                       # the same for the 4 gate cells
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -33,7 +35,7 @@ SELECT_TASK=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --aligner-gate|--select-eval-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
+        --aligner-gate|--select-eval-aligner-gate|--select-rows-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -41,7 +43,7 @@ while [[ $# -gt 0 ]]; do
             MODE="${1#--}"
             shift
             ;;
-        --select-train|--select-eval)
+        --select-train|--select-eval|--select-rows)
             if [[ -n "${MODE}" || $# -lt 3 ]]; then
                 echo "$1 takes <experiment> <task> and excludes other modes." >&2
                 exit 2
@@ -68,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,17p' "$0"
+            sed -n '2,19p' "$0"
             exit 0
             ;;
         *)
@@ -89,7 +91,7 @@ require_clean_worktree
 
 # Choosing between configurations: from a snapshot, and never on the test set.
 case "${MODE}" in
-    aligner-gate|select-eval-aligner-gate|select-train|select-eval)
+    aligner-gate|select-eval-aligner-gate|select-rows-aligner-gate|select-train|select-eval|select-rows)
         CODE_REF="${CODE_REF:-HEAD}"
         ;;
 esac
@@ -182,6 +184,22 @@ submit_final_eval_controls() {
 # bs=1 validation pass of one candidate; the test set stays unread.
 submit_select_eval() {
     submit_final_eval "$1" "$2" "valbs1" "run_test=false"
+}
+
+# Per-chain validation rows for cluster-bootstrap CIs. The test loop runs on the
+# validation split (data.test_ids points at it), so per_sample_metrics.tsv and the
+# "test/*" keys of these runs describe VALIDATION chains; the test set is not read.
+# The threshold is calibrated by the validate pass first, as everywhere else.
+submit_select_rows() {
+    submit_final_eval "$1" "$2" "valrows" \
+        "run_test=true data.test_ids=${PROJECT_DIR}/data/output_splits_2026cb/val_holdout_ids.txt"
+}
+
+submit_select_rows_aligner_gate() {
+    submit_select_rows "ablation/trufor_fusion_with_dist" "paper_8m_trufor_full_k4"
+    submit_select_rows "ablation/trufor_no_templates"     "paper_8m_trufor_no_templates"
+    submit_select_rows "ablation/trufor_global_alignment" "paper_8m_trufor_global_alignment"
+    submit_select_rows "ablation/trufor_cosine_weights"   "paper_8m_trufor_cosine_weights"
 }
 
 submit_select_eval_aligner_gate() {
@@ -300,6 +318,12 @@ case "${MODE}" in
         ;;
     select-eval)
         submit_select_eval "${SELECT_EXPERIMENT}" "${SELECT_TASK}"
+        ;;
+    select-rows)
+        submit_select_rows "${SELECT_EXPERIMENT}" "${SELECT_TASK}"
+        ;;
+    select-rows-aligner-gate)
+        submit_select_rows_aligner_gate
         ;;
     gate)
         submit_gate

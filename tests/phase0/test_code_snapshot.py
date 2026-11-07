@@ -89,6 +89,9 @@ def test_selection_modes_never_read_the_test_set():
     assert gate.count("submit_training") == 4 and gate.count('"" false') == 4, gate
     assert 'submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "48:00:00" "" false' in src
     assert 'submit_final_eval "$1" "$2" "valbs1" "run_test=false"' in src
+    rows = src[src.index("submit_select_rows() {"):src.index("submit_select_rows_aligner_gate() {")]
+    assert "data.test_ids=${PROJECT_DIR}/data/output_splits_2026cb/val_holdout_ids.txt" in rows, rows
+    assert "test_ids.txt" not in rows.replace("val_holdout_ids.txt", ""), "rows mode must not point at the test split"
     ev = (ROOT / "src/eval.py").read_text()
     i = ev.index('cfg.get("run_test", True)')
     assert "trainer.test(" in ev[i:i + 260], "the test call must sit under the run_test guard"
