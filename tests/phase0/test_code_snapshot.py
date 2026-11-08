@@ -87,7 +87,7 @@ def test_selection_modes_never_read_the_test_set():
     src = (ROOT / "configs/experiment/launch_paper_8M.sh").read_text()
     gate = src[src.index("submit_aligner_gate() {"):src.index("submit_trufor_controls() {")]
     assert gate.count("submit_training") == 4 and gate.count('"" false') == 4, gate
-    assert 'submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "48:00:00" "" false' in src
+    assert 'submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "72:00:00" "" false' in src
     assert 'submit_final_eval "$1" "$2" "valbs1" "run_test=false"' in src
     rows = src[src.index("submit_select_rows() {"):src.index("submit_select_rows_aligner_gate() {")]
     assert "data.test_ids=${PROJECT_DIR}/data/output_splits_2026cb/val_holdout_ids.txt" in rows, rows

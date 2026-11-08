@@ -314,7 +314,8 @@ case "${MODE}" in
         submit_select_eval_aligner_gate
         ;;
     select-train)
-        submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "48:00:00" "" false
+        # 72 h: the larger head with recycling runs about an hour per epoch.
+        submit_training "${SELECT_EXPERIMENT}" "${SELECT_TASK}" "72:00:00" "" false
         ;;
     select-eval)
         submit_select_eval "${SELECT_EXPERIMENT}" "${SELECT_TASK}"
