@@ -110,6 +110,17 @@ def test_checkpointing_gives_the_same_pass_count():
     assert _count_passes(model, _inputs())[0] == 3
 
 
+def test_larger_head_with_recycling_trains_with_checkpointing():
+    """The configuration of ablation/trufor_head_recycling, scaled down."""
+    model = ContactModel(**dict(CFG, depth=16, head_num_heads=8, head_num_kv_heads=4),
+                         recycling_iters=3, use_checkpoint=True).train()
+    torch.manual_seed(3)
+    out = model(**_inputs())
+    out.mean().backward()
+    assert out.shape == (2, 1, 14, 14) and out.isfinite().all()
+    assert sum(p.numel() for p in model.parameters()) > sum(p.numel() for p in _model(3).parameters())
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

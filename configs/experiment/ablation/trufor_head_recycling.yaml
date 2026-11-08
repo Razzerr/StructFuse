@@ -1,0 +1,20 @@
+# @package _global_
+# Larger head and recycling together: the fourth cell of the 2x2 with the base,
+# ablation/trufor_head_capacity and ablation/trufor_recycling, so both effects and
+# their interaction come from the same panel.
+
+task_name: "ablation_trufor_head_recycling"
+tags: ["ablation", "head-capacity", "recycling", "trufor", "tpl-dist", "8M"]
+seed: 42
+
+model:
+  fusion_strategy: "trufor"
+  use_tpl_dist_bins: true
+  depth: 16
+  head_num_heads: 8
+  head_num_kv_heads: 4
+  use_checkpoint: true
+  recycling_iters: 3
+
+data:
+  compute_dist_bins: true
