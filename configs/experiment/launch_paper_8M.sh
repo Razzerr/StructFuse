@@ -14,6 +14,8 @@
 #   ./configs/experiment/launch_paper_8M.sh --select-eval <experiment> <task> --code <ref>   # its bs=1 validation pass
 #   ./configs/experiment/launch_paper_8M.sh --select-rows <experiment> <task> --code <ref>   # per-chain validation rows, for CIs
 #   ./configs/experiment/launch_paper_8M.sh --select-rows-aligner-gate                       # the same for the 4 gate cells
+#   ./configs/experiment/launch_paper_8M.sh --ablations         # 6 jobs: the paper ablations on the frozen 2026cb stack
+#   ./configs/experiment/launch_paper_8M.sh --final-eval-2026cb # bs=1 test of all 10 cells + raw ESM-2, after --ablations
 #   ./configs/experiment/launch_paper_8M.sh --smoke
 #   ./configs/experiment/launch_paper_8M.sh --core
 #   ./configs/experiment/launch_paper_8M.sh --supplementary
@@ -35,7 +37,7 @@ SELECT_TASK=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --aligner-gate|--select-eval-aligner-gate|--select-rows-aligner-gate|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
+        --aligner-gate|--select-eval-aligner-gate|--select-rows-aligner-gate|--ablations|--final-eval-2026cb|--gate|--smoke|--core|--trufor-controls|--trufor-panel|--supplementary|--final-eval|--final-eval-controls|--final-eval-trufor-panel|--all)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -70,7 +72,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,19p' "$0"
+            sed -n '2,24p' "$0"
             exit 0
             ;;
         *)
@@ -91,7 +93,9 @@ require_clean_worktree
 
 # Choosing between configurations: from a snapshot, and never on the test set.
 case "${MODE}" in
-    aligner-gate|select-eval-aligner-gate|select-rows-aligner-gate|select-train|select-eval|select-rows)
+    # The 2026cb panel runs from a snapshot too: its jobs may wait in the queue
+    # while the live checkout moves to another branch.
+    aligner-gate|select-eval-aligner-gate|select-rows-aligner-gate|select-train|select-eval|select-rows|ablations|final-eval-2026cb)
         CODE_REF="${CODE_REF:-HEAD}"
         ;;
 esac
@@ -291,6 +295,40 @@ submit_trufor_panel() {
     submit_training "ablation/trufor_bce_only_with_dist"    "paper_8m_trufor_bce_only"
 }
 
+# The paper's ablations on the frozen 2026cb configuration (decision 2026-11-09):
+# the selected stack's distance x triangle 2x2, the loss cell, the grouped-fusion
+# comparison and the random-retrieval control. The full model and its no-template
+# control already exist from --aligner-gate. Each cell differs from
+# `trufor_fusion_with_dist` only in its intervention (test_train_eval_parity.py).
+# No test during training: the reported numbers come from --final-eval-2026cb.
+submit_ablations() {
+    submit_training "ablation/trufor_no_dist"               "paper_8m_trufor_no_dist"          "24:00:00" "" false
+    submit_training "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle"      "24:00:00" "" false
+    submit_training "ablation/trufor_no_dist_no_triangle"   "paper_8m_trufor_contact_only"     "24:00:00" "" false
+    submit_training "ablation/trufor_bce_only_with_dist"    "paper_8m_trufor_bce_only"         "24:00:00" "" false
+    submit_training "frontier_8M"                           "paper_8m_frontier_k4"             "24:00:00" "" false
+    submit_training "ablation/trufor_random_retrieval"      "paper_8m_trufor_random_retrieval" "24:00:00" "" false
+}
+
+# bs=1 test pass for every 2026cb cell: the four aligner-gate cells, the six
+# ablations and raw ESM-2 8M. MIN_CKPT_DATE keeps older generations out.
+submit_final_eval_2026cb() {
+    submit_final_eval "ablation/trufor_fusion_with_dist"      "paper_8m_trufor_full_k4"
+    submit_final_eval "ablation/trufor_no_templates"          "paper_8m_trufor_no_templates"
+    submit_final_eval "ablation/trufor_global_alignment"      "paper_8m_trufor_global_alignment"
+    submit_final_eval "ablation/trufor_cosine_weights"        "paper_8m_trufor_cosine_weights"
+    submit_final_eval "ablation/trufor_no_dist"               "paper_8m_trufor_no_dist"
+    submit_final_eval "ablation/trufor_no_triangle_with_dist" "paper_8m_trufor_no_triangle"
+    submit_final_eval "ablation/trufor_no_dist_no_triangle"   "paper_8m_trufor_contact_only"
+    submit_final_eval "ablation/trufor_bce_only_with_dist"    "paper_8m_trufor_bce_only"
+    submit_final_eval "frontier_8M"                           "paper_8m_frontier_k4"
+    submit_final_eval "ablation/trufor_random_retrieval"      "paper_8m_trufor_random_retrieval"
+    local b3="paper_8m_esm2_raw_bs1"
+    submit_job "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train.py \
+experiment=baseline/esm2_only test=true task_name=${b3} data.eval_batch_size=1 \
+2>&1 | tee ${TEMP_DIR}/${b3}.log" "${b3}" "08:00:00" 16 "256G" >/dev/null
+}
+
 # NOTE: --supplementary is a MIXED bag, not a grouped panel and not a TruFor one:
 # standard-concat fusion, the historical dist-less TruFor (A2, confounded), a
 # dilated head and the k-sweep. After Stage E it is not a ready panel for the
@@ -325,6 +363,12 @@ case "${MODE}" in
         ;;
     select-rows-aligner-gate)
         submit_select_rows_aligner_gate
+        ;;
+    ablations)
+        submit_ablations
+        ;;
+    final-eval-2026cb)
+        submit_final_eval_2026cb
         ;;
     gate)
         submit_gate

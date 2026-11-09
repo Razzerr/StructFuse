@@ -192,6 +192,8 @@ def test_trufor_panel_cells_differ_from_their_reference_only_as_intended():
         "ablation/trufor_no_dist": {"model.use_tpl_dist_bins", "data.compute_dist_bins"},
         "ablation/trufor_global_alignment": {"data.alignment"},
         "ablation/trufor_cosine_weights": {"data.template_weighting"},
+        "ablation/trufor_random_retrieval": {"data.random_retrieval", "model.random_retrieval"},
+        "frontier_8M": {"model.fusion_strategy"},
     }
     for cell, keys in expected.items():
         got = _config_diff(ref, cell)
