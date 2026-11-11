@@ -19,6 +19,9 @@
 #   ./configs/experiment/launch_paper_650M.sh --baselines      # template-only; B1 is in --final-eval
 #   ./configs/experiment/launch_paper_650M.sh --final-eval       # bs=1 reported numbers
 #   ./configs/experiment/launch_paper_650M.sh --all              # every training, no final-eval
+#   ./configs/experiment/launch_paper_650M.sh --3b-s42           # ESM-2 3B full model, seed 42
+#   ./configs/experiment/launch_paper_650M.sh --3b-control       # its matched no-template control
+#   ./configs/experiment/launch_paper_650M.sh --final-eval-3b    # bs=1 test of the 3B cells that exist
 # Add --dry-run to inspect commands without submitting.
 
 set -euo pipefail
@@ -31,7 +34,7 @@ MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --headline-s42|--remaining-seeds|--baselines|--final-eval|--all)
+        --headline-s42|--remaining-seeds|--baselines|--final-eval|--all|--3b-s42|--3b-control|--final-eval-3b)
             if [[ -n "${MODE}" ]]; then
                 echo "Choose exactly one launch mode." >&2
                 exit 2
@@ -48,7 +51,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,21p' "$0"
+            sed -n '2,25p' "$0"
             exit 0
             ;;
         *)
@@ -147,6 +150,22 @@ experiment=baseline/esm2_650m_only test=true task_name=${b1} data.eval_batch_siz
 2>&1 | tee ${TEMP_DIR}/${b1}.log" "${b1}" "24:00:00" 16 "256G" >/dev/null
 }
 
+# ESM-2 3B (2026-11-11): the frozen configuration with the larger backbone.
+# Retrieval stays on the 650M index; only the ESM features change
+# (trufor_fusion_with_dist_3B.yaml). The control is the matched no-template run.
+submit_3b_s42() {
+    submit_training "trufor_fusion_with_dist_3B" "paper_3b_trufor_s42" "72:00:00" "seed=42"
+}
+
+submit_3b_control() {
+    submit_training "trufor_no_templates_3B" "paper_3b_trufor_no_templates_s42" "72:00:00" "seed=42"
+}
+
+submit_final_evals_3b() {
+    submit_final_eval "trufor_fusion_with_dist_3B" "paper_3b_trufor_s42"
+    submit_final_eval "trufor_no_templates_3B"     "paper_3b_trufor_no_templates_s42"
+}
+
 echo "650M paper launcher, mode=${MODE}, commit=$(git_commit), dry_run=${DRY_RUN}"
 case "${MODE}" in
     headline-s42)
@@ -160,6 +179,15 @@ case "${MODE}" in
         ;;
     final-eval)
         submit_final_evals
+        ;;
+    3b-s42)
+        submit_3b_s42
+        ;;
+    3b-control)
+        submit_3b_control
+        ;;
+    final-eval-3b)
+        submit_final_evals_3b
         ;;
     all)
         submit_headline_s42
